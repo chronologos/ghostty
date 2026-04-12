@@ -8,6 +8,7 @@ struct ForkHost: Codable, Identifiable, Hashable {
     var label: String
     var transport: Transport
     var expanded: Bool = true
+    var accentHue: Double?
 
     static let local = ForkHost(id: "local", label: "localhost", transport: .local)
 
@@ -90,6 +91,14 @@ indirect enum PersistedTree: Codable, Hashable {
         case .empty: 0
         case .leaf: 1
         case .split(_, _, let a, let b): a.paneCount + b.paneCount
+        }
+    }
+
+    var leafRefs: [SessionRef] {
+        switch self {
+        case .empty: []
+        case .leaf(let r): r.map { [$0] } ?? []
+        case .split(_, _, let a, let b): a.leafRefs + b.leafRefs
         }
     }
 }
