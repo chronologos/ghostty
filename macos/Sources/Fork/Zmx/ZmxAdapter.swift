@@ -3,8 +3,10 @@ import Foundation
 
 /// Only place in the fork that knows zmx's CLI shape or builds shell strings (SPEC §4).
 enum ZmxAdapter {
-    /// On-the-wire name. `SessionRef.name` is always stored unprefixed.
-    static func wireName(_ ref: SessionRef) -> String { "\(ref.hostID)-\(ref.name)" }
+    /// On-the-wire name. Managed refs get `{hostID}-` prefix; external refs use raw name.
+    static func wireName(_ ref: SessionRef) -> String {
+        ref.external ? ref.name : "\(ref.hostID)-\(ref.name)"
+    }
 
     /// SurfaceConfiguration whose pty child is `zmx attach <wireName> [cmd...]`, wrapped by transport.
     static func surfaceConfig(
@@ -15,20 +17,42 @@ enum ZmxAdapter {
     ) -> Ghostty.SurfaceConfiguration {
         var c = Ghostty.SurfaceConfiguration()
         if host.transport.isLocal { c.workingDirectory = cwd }
+        if ForkBootstrap.noZmx { return c }
         let argv = ["zmx", "attach", wireName(ref)] + (initialCmd ?? [])
         c.command = host.transport.wrap(argv)
         return c
     }
 
-    /// `zmx list --short` → unprefixed names for this host. Runs out-of-band via `Process`.
-    static func list(host: ForkHost, timeout: TimeInterval = 5) async -> [String] {
+    struct ListResult {
+        var managed: [String] = []
+        var external: [String] = []
+    }
+
+    /// `zmx list --short` partitioned into fork-managed (prefix-stripped) and external names.
+    static func list(host: ForkHost, timeout: TimeInterval = 5) async -> ListResult {
         let argv = host.transport.controlArgv(["zmx", "list", "--short"])
-        guard let out = try? await run(argv: argv, timeout: timeout) else { return [] }
+        guard let out = try? await run(argv: argv, timeout: timeout) else { return .init() }
         let prefix = "\(host.id)-"
-        return out.split(separator: "\n")
-            .map(String.init)
-            .filter { $0.hasPrefix(prefix) }
-            .map { String($0.dropFirst(prefix.count)) }
+        var r = ListResult()
+        for line in out.split(separator: "\n").map(String.init) {
+            if line.hasPrefix(prefix) {
+                r.managed.append(String(line.dropFirst(prefix.count)))
+            } else {
+                r.external.append(line)
+            }
+        }
+        return r
+    }
+
+    /// Shell command for a detached-placeholder surface: shows a prompt, waits for ⏎,
+    /// then execs `zmx attach` for the same ref via the host's transport.
+    static func detachedScript(host: ForkHost, ref: SessionRef) -> String {
+        // `attach` is already a fully shq'd command line (each token single-quoted),
+        // so it's interpolated *unquoted* after `exec` — wrapping it again would make
+        // it one word. shq is total (POSIX `'` → `'\''`); see TransportTests.wrapSshInjection.
+        let attach = host.transport.wrap(["zmx", "attach", wireName(ref)])
+        let msg = "session \(ref.name) — press ⏎ to reattach, ⌘⇧W to close"
+        return shq(["sh", "-c", "printf '%s\\n' \(shq(msg)); read _; exec \(attach)"])
     }
 
     static func kill(host: ForkHost, ref: SessionRef) async throws {
@@ -46,20 +70,26 @@ enum ZmxAdapter {
         p.standardOutput = pipe
         p.standardError = Pipe()
         try p.run()
-        return try await withThrowingTaskGroup(of: String.self) { group in
-            group.addTask {
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                p.waitUntilExit()
-                return String(decoding: data, as: UTF8.self)
+        // `onCancel` + inner `defer` ensure the process is killed on parent-task cancellation
+        // *and* on timeout — otherwise the synchronous reader child pins a cooperative thread.
+        return try await withTaskCancellationHandler {
+            try await withThrowingTaskGroup(of: String.self) { group in
+                group.addTask {
+                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                    p.waitUntilExit()
+                    return String(decoding: data, as: UTF8.self)
+                }
+                group.addTask {
+                    try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                    throw CancellationError()
+                }
+                defer { if p.isRunning { p.terminate() } }
+                let result = try await group.next()!
+                group.cancelAll()
+                return result
             }
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                p.terminate()
-                throw CancellationError()
-            }
-            let result = try await group.next()!
-            group.cancelAll()
-            return result
+        } onCancel: {
+            p.terminate()
         }
     }
 }
