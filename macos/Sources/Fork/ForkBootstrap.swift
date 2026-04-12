@@ -15,7 +15,10 @@ enum ForkBootstrap {
     /// PR1: no-op beyond logging. PR2: loads `SessionRegistry` from `fork.json`.
     static func install(ghostty: Ghostty.App) {
         guard enabled else { return }
-        logger.info("fork enabled (PR1 scaffold)")
+        logger.info("fork enabled")
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { _ in SessionRegistry.shared.saveNow() }
     }
 
     /// Seam #2 — called from `TerminalController.newWindow` before it constructs a controller.
