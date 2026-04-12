@@ -49,5 +49,14 @@ struct TransportTests {
         let ref = SessionRef(hostID: "abcd1234", name: "shell-x")
         #expect(ZmxAdapter.wireName(ref) == "abcd1234-shell-x")
     }
+
+    @Test func persistedTreePaneCount() {
+        let leaf = PersistedTree.leaf(.init(hostID: "h", name: "n"))
+        #expect(PersistedTree.empty.paneCount == 0)
+        #expect(leaf.paneCount == 1)
+        #expect(PersistedTree.split(horizontal: true, ratio: 0.5,
+                                    a: leaf,
+                                    b: .split(horizontal: false, ratio: 0.5, a: leaf, b: leaf)).paneCount == 3)
+    }
 }
 #endif
