@@ -20,14 +20,13 @@ enum ForkBootstrap {
 
     /// Seam #2 — called from `TerminalController.newWindow` before it constructs a controller.
     /// Returning non-nil short-circuits upstream window creation.
-    /// PR1: always nil. PR2: returns a `ForkWindowController` (which is-a `TerminalController`).
     static func intercept(
         _ ghostty: Ghostty.App,
         withBaseConfig baseConfig: Ghostty.SurfaceConfiguration?,
         withParent parent: NSWindow?
     ) -> TerminalController? {
         guard enabled else { return nil }
-        return nil
+        return ForkWindowController.newWindow(ghostty)
     }
 }
 #endif
