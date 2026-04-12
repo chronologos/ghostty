@@ -94,13 +94,17 @@ struct SidebarView: View {
     }
 
     private var footer: some View {
-        HStack {
+        HStack(spacing: 12) {
             Button { controller?.showNewSessionSheet() } label: {
                 Label("New Session", systemImage: "plus").font(.system(size: 11))
             }
-            .buttonStyle(.plain)
             Spacer()
+            Button { controller?.showNewHostSheet() } label: {
+                Image(systemName: "server.rack").font(.system(size: 11))
+            }
+            .help("Add host")
         }
+        .buttonStyle(.plain)
         .padding(.horizontal, 12).padding(.vertical, 8)
     }
 
