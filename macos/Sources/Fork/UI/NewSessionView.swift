@@ -17,7 +17,7 @@ struct NewSessionView: View {
     @State private var name: String = ""
     @State private var cwd: String = ""
     @State private var command: String = ""
-    @State private var recents = ZmxAdapter.ListResult()
+    @State private var recents: ZmxAdapter.ListResult?
     @State private var placeholder: String = ""
 
     private var nameValid: Bool {
@@ -46,6 +46,7 @@ struct NewSessionView: View {
         .frame(height: 320)
         .onAppear { placeholder = registry.uniqueAutoName() }
         .task(id: hostID) {
+            recents = nil
             guard let h = registry.host(id: hostID) else { return }
             recents = await ZmxAdapter.list(host: h)
         }
@@ -87,27 +88,32 @@ struct NewSessionView: View {
         }
     }
 
-    private var recentsList: some View {
-        List {
-            if !recents.managed.isEmpty {
-                Section("Recent") {
-                    ForEach(recents.managed, id: \.self) { n in
-                        Button(n) { submit(name: n) }.buttonStyle(.plain)
+    @ViewBuilder private var recentsList: some View {
+        if let recents {
+            List {
+                if !recents.managed.isEmpty {
+                    Section("Recent") {
+                        ForEach(recents.managed, id: \.self) { n in
+                            Button(n) { submit(name: n) }.buttonStyle(.plain)
+                        }
+                    }
+                }
+                if !recents.external.isEmpty {
+                    Section("Other zmx sessions") {
+                        ForEach(recents.external, id: \.self) { n in
+                            Button(n) { submit(name: n, external: true) }.buttonStyle(.plain)
+                        }
                     }
                 }
             }
-            if !recents.external.isEmpty {
-                Section("Other zmx sessions") {
-                    ForEach(recents.external, id: \.self) { n in
-                        Button(n) { submit(name: n, external: true) }.buttonStyle(.plain)
-                    }
+            .overlay {
+                if recents.managed.isEmpty && recents.external.isEmpty {
+                    Text("No sessions").foregroundStyle(.secondary)
                 }
             }
-        }
-        .overlay {
-            if recents.managed.isEmpty && recents.external.isEmpty {
-                Text("No sessions").foregroundStyle(.secondary)
-            }
+        } else {
+            ProgressView().controlSize(.small)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
