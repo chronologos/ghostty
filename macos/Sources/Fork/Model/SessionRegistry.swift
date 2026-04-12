@@ -10,8 +10,13 @@ final class SessionRegistry: ObservableObject {
 
     @Published private(set) var hosts: [ForkHost]
     @Published private(set) var tabs: [TabModel]
-    @Published private(set) var refs: [UUID: SessionRef] = [:]
     @Published private(set) var activeTabID: TabModel.ID?
+
+    /// Intentionally NOT @Published: every `bind()` during a split would invalidate
+    /// `SidebarView`, whose NSHostingView relayout races zmx's SIGWINCH round-trip
+    /// (the "type-one-char-to-see-prompt" bug). `refs` is bookkeeping; `isConnected()`
+    /// reads it but every flow that mutates `refs` also mutates a @Published prop.
+    private(set) var refs: [UUID: SessionRef] = [:]
 
     private let persistence = ForkPersistence()
     private var saveDebounce: AnyCancellable?
@@ -45,6 +50,18 @@ final class SessionRegistry: ObservableObject {
         hosts.append(h)
     }
 
+    func removeHost(_ id: ForkHost.ID) {
+        guard id != ForkHost.local.id else { return }
+        hosts.removeAll { $0.id == id }
+        tabs.removeAll { $0.hostID == id }
+        if let active = activeTabID, !tabs.contains(where: { $0.id == active }) { activeTabID = nil }
+    }
+
+    func renameHost(_ id: ForkHost.ID, to label: String) {
+        guard let i = hosts.firstIndex(where: { $0.id == id }) else { return }
+        hosts[i].label = label
+    }
+
     func setExpanded(_ hostID: ForkHost.ID, _ v: Bool) {
         guard let i = hosts.firstIndex(where: { $0.id == hostID }) else { return }
         hosts[i].expanded = v
@@ -71,7 +88,6 @@ final class SessionRegistry: ObservableObject {
 
     func bind(surface: UUID, to ref: SessionRef) { refs[surface] = ref }
     func unbind(surface: UUID) { refs.removeValue(forKey: surface) }
-    func pruneRefs(keeping live: Set<UUID>) { refs = refs.filter { live.contains($0.key) } }
     func saveNow() { persistence.save(snapshot()) }
 
     func setPersistedTree(_ tree: PersistedTree, for tabID: TabModel.ID) {
@@ -89,6 +105,15 @@ final class SessionRegistry: ObservableObject {
         let alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
         let suffix = String((0..<3).map { _ in alphabet.randomElement()! })
         return "shell-\(suffix)"
+    }
+
+    /// `autoName()` retried until disjoint from in-memory refs (36³ ≈ 47k; birthday at ~216).
+    func uniqueAutoName() -> String {
+        let used = Set(refs.values.map(\.name))
+        while true {
+            let n = Self.autoName()
+            if !used.contains(n) { return n }
+        }
     }
 }
 #endif
