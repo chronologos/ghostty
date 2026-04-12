@@ -62,6 +62,11 @@ final class SessionRegistry: ObservableObject {
         hosts[i].label = label
     }
 
+    func setAccentHue(_ id: ForkHost.ID, _ hue: Double?) {
+        guard let i = hosts.firstIndex(where: { $0.id == id }) else { return }
+        hosts[i].accentHue = hue
+    }
+
     func setExpanded(_ hostID: ForkHost.ID, _ v: Bool) {
         guard let i = hosts.firstIndex(where: { $0.id == hostID }) else { return }
         hosts[i].expanded = v
@@ -107,9 +112,10 @@ final class SessionRegistry: ObservableObject {
         return "shell-\(suffix)"
     }
 
-    /// `autoName()` retried until disjoint from in-memory refs (36³ ≈ 47k; birthday at ~216).
+    /// `autoName()` retried until disjoint from live refs and dormant persisted-tree leaves.
     func uniqueAutoName() -> String {
         let used = Set(refs.values.map(\.name))
+            .union(tabs.flatMap(\.tree.leafRefs).map(\.name))
         while true {
             let n = Self.autoName()
             if !used.contains(n) { return n }
