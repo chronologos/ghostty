@@ -4,13 +4,12 @@ import SwiftUI
 /// ⌘D picker: new session (default, ⏎) or attach an existing one on the active host.
 struct SplitPickerView: View {
     let host: ForkHost
+    let placeholder: String
     let onSubmit: (SessionRef) -> Void
     let onCancel: () -> Void
 
-    @EnvironmentObject private var registry: SessionRegistry
     @State private var name: String = ""
     @State private var recents: ZmxAdapter.ListResult?
-    @State private var placeholder: String = ""
 
     private var nameValid: Bool {
         name.isEmpty || SessionRef(hostID: host.id, name: name).isValid
@@ -53,7 +52,6 @@ struct SplitPickerView: View {
         }
         .padding()
         .frame(width: 280)
-        .onAppear { placeholder = registry.uniqueAutoName() }
         .task { recents = await ZmxAdapter.list(host: host) }
     }
 
