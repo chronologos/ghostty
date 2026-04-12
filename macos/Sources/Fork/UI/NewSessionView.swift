@@ -6,6 +6,7 @@ struct NewSessionIntent {
     var name: String?
     var cwd: String?
     var cmd: [String]?
+    var external: Bool = false
 }
 
 /// ⌘T sheet: host picker · form · recents (SPEC §9).
@@ -16,8 +17,8 @@ struct NewSessionView: View {
     @State private var name: String = ""
     @State private var cwd: String = ""
     @State private var command: String = ""
-    @State private var recents: [String] = []
-    @State private var placeholder = SessionRegistry.autoName()
+    @State private var recents = ZmxAdapter.ListResult()
+    @State private var placeholder: String = ""
 
     private var nameValid: Bool {
         name.isEmpty || SessionRef(hostID: hostID, name: name).isValid
@@ -43,6 +44,7 @@ struct NewSessionView: View {
             recentsList.frame(width: 200)
         }
         .frame(height: 320)
+        .onAppear { placeholder = registry.uniqueAutoName() }
         .task(id: hostID) {
             guard let h = registry.host(id: hostID) else { return }
             recents = await ZmxAdapter.list(host: h)
@@ -61,10 +63,11 @@ struct NewSessionView: View {
     }
 
     private var form: some View {
-        Form {
-            TextField("Name", text: $name, prompt: Text(placeholder))
-            TextField("Working dir (local only)", text: $cwd)
-            TextField("Command", text: $command)
+        VStack(alignment: .leading, spacing: 14) {
+            field("Name", $name, prompt: placeholder)
+            field("Working directory (local only)", $cwd, prompt: "~")
+            field("Command", $command, prompt: "optional")
+            Spacer()
             HStack {
                 Button("Cancel") { onCancel() }.keyboardShortcut(.cancelAction)
                 Spacer()
@@ -76,20 +79,46 @@ struct NewSessionView: View {
         .padding()
     }
 
-    private var recentsList: some View {
-        List(recents, id: \.self) { n in
-            Button(n) { submit(name: n) }.buttonStyle(.plain)
+    private func field(_ label: String, _ binding: Binding<String>, prompt: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label).font(.system(size: 11)).foregroundStyle(.secondary)
+            TextField("", text: binding, prompt: Text(prompt))
+                .textFieldStyle(.roundedBorder)
         }
-        .overlay { if recents.isEmpty { Text("No sessions").foregroundStyle(.secondary) } }
     }
 
-    private func submit(name: String?) {
+    private var recentsList: some View {
+        List {
+            if !recents.managed.isEmpty {
+                Section("Recent") {
+                    ForEach(recents.managed, id: \.self) { n in
+                        Button(n) { submit(name: n) }.buttonStyle(.plain)
+                    }
+                }
+            }
+            if !recents.external.isEmpty {
+                Section("Other zmx sessions") {
+                    ForEach(recents.external, id: \.self) { n in
+                        Button(n) { submit(name: n, external: true) }.buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        .overlay {
+            if recents.managed.isEmpty && recents.external.isEmpty {
+                Text("No sessions").foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func submit(name: String?, external: Bool = false) {
         let cmdArr = command.isEmpty ? nil : command.split(separator: " ").map(String.init)
         onSubmit(.init(
             hostID: hostID,
             name: name,
             cwd: cwd.isEmpty ? nil : cwd,
-            cmd: cmdArr))
+            cmd: cmdArr,
+            external: external))
     }
 }
 #endif
