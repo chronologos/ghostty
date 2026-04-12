@@ -26,7 +26,9 @@ var environmentVariables	macos/Sources/Ghostty/Surface View/SurfaceView.swift
 ghosttyCloseSurface	macos/Sources/Ghostty/
 struct CommandPaletteView	macos/Sources/Features/Command Palette/
 struct CommandOption	macos/Sources/Features/Command Palette/
-class HiddenTitlebarTerminalWindow	macos/Sources/Features/Terminal/Window Styles/
+var titleOverride: String\?	macos/Sources/Features/Terminal/BaseTerminalController.swift
+func closeTabImmediately\(	macos/Sources/Features/Terminal/TerminalController.swift
+var processExited: Bool	macos/Sources/Ghostty/Surface View/SurfaceView_AppKit.swift
 EOF
 )
 
