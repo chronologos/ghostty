@@ -11,6 +11,11 @@ enum ForkBootstrap {
     /// Master switch. PR1: opt-in via env var so upstream behavior is the default.
     static let enabled: Bool = ProcessInfo.processInfo.environment["GHOSTTY_FORK"] == "1"
 
+    /// Debug toggles for bisecting layout/zmx issues.
+    static let noSidebar: Bool = ProcessInfo.processInfo.environment["GHOSTTY_FORK_NO_SIDEBAR"] == "1"
+    static let noZmx: Bool = ProcessInfo.processInfo.environment["GHOSTTY_FORK_NO_ZMX"] == "1"
+    static let noPicker: Bool = ProcessInfo.processInfo.environment["GHOSTTY_FORK_NO_PICKER"] == "1"
+
     /// Seam #1 — called from `AppDelegate.applicationDidFinishLaunching` after config load.
     /// PR1: no-op beyond logging. PR2: loads `SessionRegistry` from `fork.json`.
     static func install(ghostty: Ghostty.App) {

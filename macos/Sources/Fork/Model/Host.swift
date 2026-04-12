@@ -38,10 +38,23 @@ struct ForkHost: Codable, Identifiable, Hashable {
     }
 }
 
-/// Stable reference to a zmx session. `name` is unprefixed; `ZmxAdapter.wireName` adds `{hostID}-`.
+/// Stable reference to a zmx session. For fork-managed refs `name` is unprefixed and
+/// `ZmxAdapter.wireName` adds `{hostID}-`; `external` refs use `name` verbatim.
 struct SessionRef: Codable, Hashable {
     let hostID: ForkHost.ID
     let name: String
+    var external: Bool
+
+    init(hostID: ForkHost.ID, name: String, external: Bool = false) {
+        self.hostID = hostID; self.name = name; self.external = external
+    }
+
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        hostID = try c.decode(ForkHost.ID.self, forKey: .hostID)
+        name = try c.decode(String.self, forKey: .name)
+        external = try c.decodeIfPresent(Bool.self, forKey: .external) ?? false
+    }
 
     private static let pattern = try! NSRegularExpression(pattern: #"^[A-Za-z0-9._-]+$"#)
     var isValid: Bool {
@@ -71,5 +84,13 @@ indirect enum PersistedTree: Codable, Hashable {
     case empty
     case leaf(SessionRef?)
     case split(horizontal: Bool, ratio: Double, a: PersistedTree, b: PersistedTree)
+
+    var paneCount: Int {
+        switch self {
+        case .empty: 0
+        case .leaf: 1
+        case .split(_, _, let a, let b): a.paneCount + b.paneCount
+        }
+    }
 }
 #endif
