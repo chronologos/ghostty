@@ -17,6 +17,11 @@ struct NewSessionView: View {
     @State private var cwd: String = ""
     @State private var command: String = ""
     @State private var recents: [String] = []
+    @State private var placeholder = SessionRegistry.autoName()
+
+    private var nameValid: Bool {
+        name.isEmpty || SessionRef(hostID: hostID, name: name).isValid
+    }
 
     let onSubmit: (NewSessionIntent) -> Void
     let onCancel: () -> Void
@@ -57,14 +62,15 @@ struct NewSessionView: View {
 
     private var form: some View {
         Form {
-            TextField("Name", text: $name, prompt: Text(SessionRegistry.autoName()))
+            TextField("Name", text: $name, prompt: Text(placeholder))
             TextField("Working dir (local only)", text: $cwd)
             TextField("Command", text: $command)
             HStack {
                 Button("Cancel") { onCancel() }.keyboardShortcut(.cancelAction)
                 Spacer()
-                Button("Connect") { submit(name: name.isEmpty ? nil : name) }
+                Button("Connect") { submit(name: name.isEmpty ? placeholder : name) }
                     .keyboardShortcut(.defaultAction)
+                    .disabled(!nameValid)
             }
         }
         .padding()
