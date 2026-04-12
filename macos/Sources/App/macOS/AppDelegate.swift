@@ -212,6 +212,8 @@ class AppDelegate: NSObject,
         // Initial config loading
         ghosttyConfigDidChange(config: ghostty.config)
 
+        ForkBootstrap.install(ghostty: ghostty) // [fork]
+
         // Start our update checker.
         updateController.startUpdater()
 
