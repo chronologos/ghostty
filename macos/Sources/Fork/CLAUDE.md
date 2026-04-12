@@ -19,10 +19,9 @@ cd macos && xcodebuild test -scheme Ghostty -destination 'platform=macOS' \
 
 # Seam + symbol invariants — run after every rebase
 ./scripts/fork-check.sh
-
-# Optimized build (ReleaseFast zig + ReleaseLocal xcodebuild, ad-hoc signed)
-./scripts/fork-release.sh   # → macos/build/ReleaseLocal/Ghostty.app
 ```
+
+Release build & push: see [Branches & release](#branches--release).
 
 ## The one architectural rule
 
@@ -102,12 +101,23 @@ and `SessionRef.name` are validated against `^[A-Za-z0-9._-]+$`; `shq` single-qu
 For ssh, the remote command is double-quoted (`shq(shq(argv))`). Don't build shell strings
 anywhere else.
 
-## Rebase
+## Branches & release
+
+Remotes: `upstream` = `ghostty-org/ghostty`, `origin` = `chronologos/ghostty`.
+`main` mirrors upstream; the fork stack lives on bookmark `fork`.
 
 ```sh
-jj git fetch
-jj rebase -d main@origin
-./scripts/fork-check.sh   # seam count + upstream symbols
+# Pull upstream and rebase the stack
+jj git fetch --remote upstream
+jj rebase -b fork -d main@upstream
+./scripts/fork-check.sh                       # seam count + upstream symbols
+
+# Push (after squashing into the PR commits)
+jj bookmark set fork -r @-
+jj git push --bookmark fork --remote origin   # never push to upstream
+
+# Optimized build → macos/build/ReleaseLocal/Ghostty.app (ad-hoc signed)
+./scripts/fork-release.sh
 ```
 
 ## Backlog
