@@ -7,6 +7,7 @@ struct NewHostView: View {
 
     @State private var label: String = ""
     @State private var connection: String = ""
+    @State private var hue: Double?
 
     let onDone: () -> Void
 
@@ -22,6 +23,7 @@ struct NewHostView: View {
         Form {
             TextField("Label", text: $label, prompt: Text("prod-web-01"))
             TextField("Connection", text: $connection, prompt: Text("user@host"))
+            HuePicker(hue: $hue)
             HStack {
                 Button("Cancel") { onDone() }.keyboardShortcut(.cancelAction)
                 Spacer()
@@ -36,7 +38,8 @@ struct NewHostView: View {
     private func add() {
         guard let t = target else { return }
         let id = ForkHost.id(for: t)
-        registry.addHost(.init(id: id, label: label.isEmpty ? t.host : label, transport: .ssh(t)))
+        registry.addHost(.init(id: id, label: label.isEmpty ? t.host : label,
+                               transport: .ssh(t), accentHue: hue))
         onDone()
     }
 }
