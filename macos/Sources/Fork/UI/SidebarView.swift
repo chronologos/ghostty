@@ -9,7 +9,6 @@ struct SidebarView: View {
     @State private var renameText: String = ""
 
     private let clay = Color(red: 0xD9/255, green: 0x77/255, blue: 0x57/255)
-    private let olive = Color(red: 0x7F/255, green: 0xA8/255, blue: 0x6B/255)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -39,6 +38,9 @@ struct SidebarView: View {
             }
             actionRow(icon: "server.rack", label: "Add host", keys: nil) {
                 controller?.showNewHostSheet()
+            }
+            actionRow(icon: "sidebar.left", label: "Hide sidebar", keys: ["⌘", "\\"]) {
+                controller?.toggleSidebar()
             }
         }
         .padding(6)
@@ -88,7 +90,7 @@ struct SidebarView: View {
                     .rotationEffect(.degrees(host.expanded ? 90 : 0))
                     .frame(width: 10)
                 Circle()
-                    .fill(connected ? olive : Color.secondary.opacity(0.4))
+                    .fill(connected ? accent(for: host) : Color.secondary.opacity(0.4))
                     .frame(width: 7, height: 7)
                 Text(host.label)
                     .font(.system(size: 12, weight: .medium, design: .monospaced))
@@ -104,6 +106,7 @@ struct SidebarView: View {
             Button("New Session on \(host.label)") {
                 controller?.newForkTab(intent: .init(hostID: host.id))
             }
+            Button("Manage Host…") { controller?.showHostDetail(host) }
             if host.id != ForkHost.local.id {
                 Divider()
                 Button("Remove Host", role: .destructive) {
@@ -116,11 +119,11 @@ struct SidebarView: View {
             VStack(alignment: .leading, spacing: 2) {
                 ForEach(tabs) { tab in tabRow(tab) }
             }
-            .padding(.leading, 12)
-            .overlay(alignment: .leading) {
-                Rectangle().fill(accent(for: host.id)).frame(width: 2)
-            }
-            .padding(.leading, 10)
+            .padding(6)
+            .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.secondary.opacity(0.15), lineWidth: 0.5))
+            .padding(.horizontal, 8)
         }
     }
 
@@ -142,18 +145,15 @@ struct SidebarView: View {
                     .foregroundStyle(active ? .primary : .secondary)
             }
             Spacer()
-            if panes > 1 {
-                Text("\(panes)")
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 5).padding(.vertical, 1)
-                    .background(Color.secondary.opacity(0.12),
-                                in: RoundedRectangle(cornerRadius: 3))
+            Button { controller?.kickRedraw(tabID: tab.id) } label: {
+                Image(systemName: "arrow.clockwise").font(.system(size: 9))
             }
+            .buttonStyle(.plain).opacity(active ? 0.5 : 0).allowsHitTesting(active)
+            .help("Force redraw all panes")
             Button { controller?.closeForkTab(tab.id) } label: {
                 Image(systemName: "xmark").font(.system(size: 9))
             }
-            .buttonStyle(.plain).opacity(active ? 0.6 : 0)
+            .buttonStyle(.plain).opacity(active ? 0.6 : 0).allowsHitTesting(active)
         }
         .padding(.trailing, 12).frame(height: 30)
         .background(active ? clay.opacity(0.14) : .clear,
@@ -188,9 +188,16 @@ struct SidebarView: View {
         renamingTab = nil
     }
 
-    private func accent(for id: String) -> Color {
-        let h = id.utf8.reduce(UInt32(2166136261)) { ($0 &* 16777619) ^ UInt32($1) }
-        return Color(hue: Double(h % 360) / 360, saturation: 0.45, brightness: 0.7)
+    private func accent(for host: ForkHost) -> Color { ForkHost.accent(for: host) }
+}
+
+extension ForkHost {
+    static func accent(for host: ForkHost) -> Color {
+        let hue = host.accentHue ?? {
+            let h = host.id.utf8.reduce(UInt32(2166136261)) { ($0 &* 16777619) ^ UInt32($1) }
+            return Double(h % 360) / 360
+        }()
+        return Color(hue: hue, saturation: 0.45, brightness: 0.7)
     }
 }
 #endif
