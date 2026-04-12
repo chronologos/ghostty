@@ -67,28 +67,38 @@ final class ForkWindowController: TerminalController {
         closeForkTab(active)
     }
 
-    private var newSessionPanel: NSWindow?
+    private var sheetPanel: NSWindow?
 
     func showNewSessionSheet() {
-        guard let window, newSessionPanel == nil else { return }
-        let panel = NSWindow(contentRect: .init(x: 0, y: 0, width: 640, height: 320),
-                             styleMask: [.titled, .docModalWindow], backing: .buffered, defer: false)
-        panel.contentView = NSHostingView(rootView:
-            NewSessionView(defaultHostID: registry.activeHost?.id ?? ForkHost.local.id,
-                           onSubmit: { [weak self] intent in
-                               self?.newForkTab(intent: intent)
-                               self?.endNewSessionSheet()
-                           },
-                           onCancel: { [weak self] in self?.endNewSessionSheet() })
-            .environmentObject(registry))
-        newSessionPanel = panel
+        presentSheet(size: .init(width: 640, height: 320)) { [weak self] in
+            NewSessionView(defaultHostID: self?.registry.activeHost?.id ?? ForkHost.local.id,
+                           onSubmit: { intent in self?.newForkTab(intent: intent); self?.endSheet() },
+                           onCancel: { self?.endSheet() })
+        }
+    }
+
+    func showNewHostSheet() {
+        presentSheet(size: .init(width: 360, height: 180)) { [weak self] in
+            NewHostView(onDone: { self?.endSheet() })
+        }
+    }
+
+    private func presentSheet<V: View>(size: CGSize, @ViewBuilder _ content: () -> V) {
+        guard let window, sheetPanel == nil else { return }
+        // NSHostingController (not NSHostingView) so AppKit's paste:/copy: selectors
+        // bridge into SwiftUI's text fields.
+        let host = NSHostingController(rootView: content().environmentObject(registry))
+        host.view.frame = .init(origin: .zero, size: size)
+        let panel = NSWindow(contentViewController: host)
+        panel.styleMask = [.titled, .docModalWindow]
+        sheetPanel = panel
         window.beginSheet(panel)
     }
 
-    private func endNewSessionSheet() {
-        guard let panel = newSessionPanel else { return }
+    private func endSheet() {
+        guard let panel = sheetPanel else { return }
         window?.endSheet(panel)
-        newSessionPanel = nil
+        sheetPanel = nil
     }
 
     // MARK: Window setup — wrap upstream's contentView in a sidebar split.
@@ -117,6 +127,7 @@ final class ForkWindowController: TerminalController {
         sidebarSplit = split
 
         $surfaceTree
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] tree in self?.persistActive(tree) }
             .store(in: &cancellables)
     }
@@ -185,6 +196,7 @@ final class ForkWindowController: TerminalController {
         guard let active = registry.activeTabID else { return }
         liveTabs[active] = tree
         registry.setPersistedTree(project(tree.root), for: active)
+        registry.pruneRefs(keeping: Set(liveTabs.values.flatMap { $0.map(\.id) }))
     }
 
     private func project(_ node: SplitTree<Ghostty.SurfaceView>.Node?) -> PersistedTree {

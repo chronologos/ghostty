@@ -2,7 +2,6 @@
 import Foundation
 
 /// Only place in the fork that knows zmx's CLI shape or builds shell strings (SPEC §4).
-/// PR2: `.local` only. ssh/et wrapping lands in PR3.
 enum ZmxAdapter {
     /// On-the-wire name. `SessionRef.name` is always stored unprefixed.
     static func wireName(_ ref: SessionRef) -> String { "\(ref.hostID)-\(ref.name)" }
@@ -21,11 +20,10 @@ enum ZmxAdapter {
         return c
     }
 
-    /// `zmx list --short` → unprefixed names for this host. Runs out-of-band via `Process`
-    /// (argv, no shell). PR2: local only; remote returns [].
+    /// `zmx list --short` → unprefixed names for this host. Runs out-of-band via `Process`.
     static func list(host: ForkHost, timeout: TimeInterval = 5) async -> [String] {
-        guard host.transport.isLocal else { return [] }
-        guard let out = try? await run(argv: ["zmx", "list", "--short"], timeout: timeout) else { return [] }
+        let argv = host.transport.controlArgv(["zmx", "list", "--short"])
+        guard let out = try? await run(argv: argv, timeout: timeout) else { return [] }
         let prefix = "\(host.id)-"
         return out.split(separator: "\n")
             .map(String.init)
@@ -34,8 +32,8 @@ enum ZmxAdapter {
     }
 
     static func kill(host: ForkHost, ref: SessionRef) async throws {
-        guard host.transport.isLocal else { return }
-        _ = try await run(argv: ["zmx", "kill", wireName(ref)], timeout: 5)
+        let argv = host.transport.controlArgv(["zmx", "kill", wireName(ref)])
+        _ = try await run(argv: argv, timeout: 5)
     }
 
     // MARK: -
@@ -67,17 +65,28 @@ enum ZmxAdapter {
 }
 
 extension ForkHost.Transport {
-    /// Produce the single shell string libghostty's `command` field needs.
-    /// SECURITY: only place untrusted-ish data meets a shell. Layer 1 quotes argv;
-    /// remote layer 2 (ssh/et) lands in PR3.
+    /// Shell string for libghostty's `command` field — interactive (tty-allocating) path.
+    /// SECURITY: only place untrusted-ish data meets a shell. argv is single-quoted (layer 1);
+    /// for remote, the joined remote command is single-quoted again (layer 2).
     func wrap(_ argv: [String]) -> String {
+        let remote = shq(argv)
         switch self {
         case .local:
-            return shq(argv)
-        case .ssh(let t), .et(let t):
-            precondition(t.isValid, "SSHTarget must be validated before wrap")
-            let bin = { if case .et = self { return "et" } else { return "ssh" } }()
-            return shq([bin, "-t", "--", t.connectionString]) + " " + shq(shq(argv))
+            return remote
+        case .ssh(let t):
+            precondition(t.isValid)
+            return shq(["ssh", "-t", "--", t.connectionString]) + " " + shq(remote)
+        }
+    }
+
+    /// argv (no shell) for non-interactive control commands (`list`, `kill`) via `Process`.
+    func controlArgv(_ argv: [String]) -> [String] {
+        switch self {
+        case .local:
+            return argv
+        case .ssh(let t):
+            precondition(t.isValid)
+            return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", t.connectionString, shq(argv)]
         }
     }
 }
