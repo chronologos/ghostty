@@ -64,13 +64,18 @@ struct ForkPersistence {
             t.tree = scrub(tab.tree)
             return t
         }
+        if let id = out.activeTabID, !out.tabs.contains(where: { $0.id == id }) {
+            out.activeTabID = out.tabs.first?.id
+        }
         return out
     }
 
+    /// `isValid` is the managed-name regex; external refs come from `zmx list` verbatim
+    /// and `shq` covers them at the shell boundary.
     private func scrub(_ tree: PersistedTree) -> PersistedTree {
         switch tree {
         case .empty: return .empty
-        case .leaf(let ref): return .leaf(ref.flatMap { $0.isValid ? $0 : nil })
+        case .leaf(let ref): return .leaf(ref.flatMap { $0.external || $0.isValid ? $0 : nil })
         case .split(let h, let r, let a, let b): return .split(horizontal: h, ratio: r, a: scrub(a), b: scrub(b))
         }
     }
