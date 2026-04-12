@@ -251,6 +251,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         withBaseConfig baseConfig: Ghostty.SurfaceConfiguration? = nil,
         withParent explicitParent: NSWindow? = nil
     ) -> TerminalController {
+        if let c = ForkBootstrap.intercept(ghostty, withBaseConfig: baseConfig, withParent: explicitParent) { return c } // [fork]
         let c = TerminalController.init(ghostty, withBaseConfig: baseConfig)
 
         // Get our parent. Our parent is the one explicitly given to us,
