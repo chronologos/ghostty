@@ -35,7 +35,10 @@ struct ForkPersistence {
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? enc.encode(state) else { return }
-        try? FileManager.default.copyItem(at: url, to: bakURL)
+        if FileManager.default.fileExists(atPath: url.path) {
+            try? FileManager.default.removeItem(at: bakURL)
+            try? FileManager.default.copyItem(at: url, to: bakURL)
+        }
         let tmp = url.appendingPathExtension("tmp")
         do {
             try data.write(to: tmp, options: .atomic)
@@ -51,12 +54,25 @@ struct ForkPersistence {
         out.hosts = s.hosts.filter {
             switch $0.transport {
             case .local: return true
-            case .ssh(let t), .et(let t): return t.isValid
+            case .ssh(let t): return t.isValid
             }
         }
         let validIDs = Set(out.hosts.map(\.id))
-        out.tabs = s.tabs.filter { validIDs.contains($0.hostID) }
+        out.tabs = s.tabs.compactMap { tab in
+            guard validIDs.contains(tab.hostID) else { return nil }
+            var t = tab
+            t.tree = scrub(tab.tree)
+            return t
+        }
         return out
+    }
+
+    private func scrub(_ tree: PersistedTree) -> PersistedTree {
+        switch tree {
+        case .empty: return .empty
+        case .leaf(let ref): return .leaf(ref.flatMap { $0.isValid ? $0 : nil })
+        case .split(let h, let r, let a, let b): return .split(horizontal: h, ratio: r, a: scrub(a), b: scrub(b))
+        }
     }
 }
 #endif

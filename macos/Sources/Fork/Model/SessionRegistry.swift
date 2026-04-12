@@ -71,6 +71,8 @@ final class SessionRegistry: ObservableObject {
 
     func bind(surface: UUID, to ref: SessionRef) { refs[surface] = ref }
     func unbind(surface: UUID) { refs.removeValue(forKey: surface) }
+    func pruneRefs(keeping live: Set<UUID>) { refs = refs.filter { live.contains($0.key) } }
+    func saveNow() { persistence.save(snapshot()) }
 
     func setPersistedTree(_ tree: PersistedTree, for tabID: TabModel.ID) {
         guard let i = tabs.firstIndex(where: { $0.id == tabID }) else { return }

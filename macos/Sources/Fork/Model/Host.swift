@@ -2,7 +2,7 @@
 import Foundation
 import CryptoKit
 
-/// A machine zmx sessions can run on. v1: local only; ssh/et land in PR3.
+/// A machine zmx sessions can run on.
 struct ForkHost: Codable, Identifiable, Hashable {
     let id: String
     var label: String
@@ -14,7 +14,6 @@ struct ForkHost: Codable, Identifiable, Hashable {
     enum Transport: Codable, Hashable {
         case local
         case ssh(SSHTarget)
-        case et(SSHTarget)
 
         var isLocal: Bool { if case .local = self { return true } else { return false } }
     }
