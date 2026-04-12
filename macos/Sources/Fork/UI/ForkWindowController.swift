@@ -67,22 +67,44 @@ final class ForkWindowController: TerminalController {
 
     private var detachedPlaceholders: Set<UUID> = []
 
+    private func makeDetachedPlaceholder(for dead: Ghostty.SurfaceView) -> Ghostty.SurfaceView? {
+        guard dead.processExited,
+              !detachedPlaceholders.contains(dead.id),
+              let ref = registry.refs[dead.id],
+              let host = registry.host(id: ref.hostID),
+              let app = ghostty.app else { return nil }
+        var cfg = Ghostty.SurfaceConfiguration()
+        cfg.command = ZmxAdapter.detachedScript(host: host, ref: ref)
+        let placeholder = Ghostty.SurfaceView(app, baseConfig: cfg)
+        detachedPlaceholders.insert(placeholder.id)
+        registry.bind(surface: placeholder.id, to: ref)
+        registry.unbind(surface: dead.id)
+        return placeholder
+    }
+
+    /// `BaseTerminalController.ghosttyDidCloseSurface` (`:585`) is `@objc private` and
+    /// guards on `surfaceTree`, so a parked tab's pty-exit is dropped before our
+    /// `closeSurface` override sees it. This second observer covers that case.
+    @objc private func parkedSurfaceDidExit(_ note: Notification) {
+        guard let dead = note.object as? Ghostty.SurfaceView,
+              surfaceTree.root?.node(view: dead) == nil,
+              let (tabID, tree) = liveTabs.first(where: {
+                  $0.key != registry.activeTabID && $0.value.contains { $0.id == dead.id }
+              }),
+              let placeholder = makeDetachedPlaceholder(for: dead),
+              let deadNode = tree.root?.node(view: dead),
+              let newTree = try? tree.replacing(node: deadNode, with: .leaf(view: placeholder))
+        else { return }
+        liveTabs[tabID] = newTree
+        registry.setPersistedTree(project(newTree.root), for: tabID)
+    }
+
     override func closeSurface(_ node: SplitTree<Ghostty.SurfaceView>.Node, withConfirmation: Bool = true) {
         // `withConfirmation` is libghostty's `needsConfirmQuit()`, which is false for both
         // process-death AND user ⌘W on an idle shell. `processExited` is the discriminator.
         if !withConfirmation,
            case let .leaf(dead) = node,
-           dead.processExited,
-           !detachedPlaceholders.contains(dead.id),
-           let ref = registry.refs[dead.id],
-           let host = registry.host(id: ref.hostID),
-           let app = ghostty.app {
-            var cfg = Ghostty.SurfaceConfiguration()
-            cfg.command = ZmxAdapter.detachedScript(host: host, ref: ref)
-            let placeholder = Ghostty.SurfaceView(app, baseConfig: cfg)
-            detachedPlaceholders.insert(placeholder.id)
-            registry.bind(surface: placeholder.id, to: ref)
-            registry.unbind(surface: dead.id)
+           let placeholder = makeDetachedPlaceholder(for: dead) {
             do {
                 surfaceTree = try surfaceTree.replacing(node: node, with: .leaf(view: placeholder))
                 focusedSurface = placeholder
@@ -128,6 +150,9 @@ final class ForkWindowController: TerminalController {
                 default: return ev
                 }
             }
+            if mods == .command, ev.charactersIgnoringModifiers == "\\" {
+                self.toggleSidebar(); return nil
+            }
             // ⌘[/⌘] are upstream's `goto_split:previous/next` (Config.zig:7016).
             // Sidebar tab nav uses ⌘⇧[/⌘⇧] (upstream's `previous_tab`/`next_tab`).
             guard mods == [.command, .shift] else { return ev }
@@ -137,7 +162,37 @@ final class ForkWindowController: TerminalController {
             default: return ev
             }
         }
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(parkedSurfaceDidExit(_:)),
+            name: Ghostty.Notification.ghosttyCloseSurface, object: nil)
     }
+
+    // MARK: Sidebar visibility (⌘\)
+
+    private static let sidebarWidth: CGFloat = 248
+    private weak var sidebarHost: NSView?
+    private weak var sidebarReveal: NSButton?
+    private var sidebarWidthConstraint: NSLayoutConstraint?
+    private var terminalLeadingConstraint: NSLayoutConstraint?
+
+    func toggleSidebar() {
+        guard let sidebarHost, let sidebarWidthConstraint, let terminalLeadingConstraint else { return }
+        let hide = sidebarWidthConstraint.constant > 0
+        let w: CGFloat = hide ? 0 : Self.sidebarWidth
+        if !hide { sidebarHost.isHidden = false }
+        sidebarReveal?.isHidden = !hide
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.18
+            ctx.allowsImplicitAnimation = true
+            sidebarWidthConstraint.animator().constant = w
+            terminalLeadingConstraint.animator().constant = w
+            sidebarHost.superview?.layoutSubtreeIfNeeded()
+        } completionHandler: {
+            sidebarHost.isHidden = sidebarWidthConstraint.constant == 0
+        }
+    }
+
+    @objc private func revealSidebar(_ sender: Any?) { toggleSidebar() }
 
     private func stepTab(_ delta: Int) {
         guard let active = registry.activeTabID,
@@ -152,6 +207,21 @@ final class ForkWindowController: TerminalController {
         let tabs = registry.tabs(on: host)
         guard tabs.indices.contains(n - 1) else { return }
         activate(tab: tabs[n - 1].id)
+    }
+
+    /// Jiggle every pane in `tabID`'s tree by 1px to force a SIGWINCH redraw.
+    /// `ghostty_surface_set_size` only emits SIGWINCH on dimension change.
+    func kickRedraw(tabID: TabModel.ID) {
+        let tree = (tabID == registry.activeTabID) ? surfaceTree : (liveTabs[tabID] ?? .init())
+        for view in tree {
+            guard let surface = view.surface else { continue }
+            let s = view.convertToBacking(view.frame.size)
+            let w = UInt32(s.width), h = UInt32(s.height)
+            guard w > 0, h > 1 else { continue }
+            ghostty_surface_set_size(surface, w, h - 1)
+            ghostty_surface_set_size(surface, w, h)
+            ghostty_surface_draw(surface)
+        }
     }
 
     func gotoHost(index n: Int) {
@@ -177,7 +247,7 @@ final class ForkWindowController: TerminalController {
     func confirmKill(_ tab: TabModel) {
         guard let window, let host = registry.host(id: tab.hostID) else { return }
         let live = liveTabs[tab.id]?.compactMap { registry.refs[$0.id] } ?? []
-        let refs = Array(Set(live.isEmpty ? collectRefs(tab.tree) : live))
+        let refs = Array(Set(live.isEmpty ? tab.tree.leafRefs : live))
         guard !refs.isEmpty else { closeForkTab(tab.id); return }
         let alert = NSAlert()
         alert.messageText = "Kill \(refs.count) zmx session\(refs.count == 1 ? "" : "s")?"
@@ -216,8 +286,14 @@ final class ForkWindowController: TerminalController {
     }
 
     func showNewHostSheet() {
-        presentSheet(size: .init(width: 360, height: 180)) { [weak self] in
+        presentSheet(size: .init(width: 360, height: 210)) { [weak self] in
             NewHostView(onDone: { self?.endSheet() })
+        }
+    }
+
+    func showHostDetail(_ host: ForkHost) {
+        presentSheet(size: .init(width: 420, height: 360)) { [weak self] in
+            HostDetailView(host: host, onDone: { self?.endSheet() })
         }
     }
 
@@ -262,15 +338,16 @@ final class ForkWindowController: TerminalController {
         // Instead: keep `terminalContent` as `window.contentView`, add the sidebar
         // as a sibling subview of the container, and re-pin the container's inner
         // hosting view to start after the sidebar.
-        let sidebarWidth: CGFloat = 248
         let sidebar = NSHostingView(rootView: SidebarView(controller: self).environmentObject(registry))
         sidebar.translatesAutoresizingMaskIntoConstraints = false
         terminalContent.addSubview(sidebar)
+        sidebarHost = sidebar
+        sidebarWidthConstraint = sidebar.widthAnchor.constraint(equalToConstant: Self.sidebarWidth)
         NSLayoutConstraint.activate([
             sidebar.leadingAnchor.constraint(equalTo: terminalContent.leadingAnchor),
             sidebar.topAnchor.constraint(equalTo: terminalContent.topAnchor),
             sidebar.bottomAnchor.constraint(equalTo: terminalContent.bottomAnchor),
-            sidebar.widthAnchor.constraint(equalToConstant: sidebarWidth),
+            sidebarWidthConstraint!,
         ])
         // Shift the existing terminal hosting view (first subview, pinned to all
         // edges by TerminalViewContainer.setup()) to the right of the sidebar.
@@ -282,10 +359,22 @@ final class ForkWindowController: TerminalController {
                 .filter { ($0.firstItem === hosting && $0.firstAttribute == .leading)
                        || ($0.secondItem === hosting && $0.secondAttribute == .leading) }
                 .forEach { $0.isActive = false }
-            hosting.leadingAnchor.constraint(
-                equalTo: terminalContent.leadingAnchor, constant: sidebarWidth
-            ).isActive = true
+            terminalLeadingConstraint = hosting.leadingAnchor.constraint(
+                equalTo: terminalContent.leadingAnchor, constant: Self.sidebarWidth)
+            terminalLeadingConstraint!.isActive = true
         }
+
+        let reveal = NSButton(image: NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Show sidebar")!,
+                              target: self, action: #selector(revealSidebar(_:)))
+        reveal.isBordered = false
+        reveal.isHidden = true
+        reveal.translatesAutoresizingMaskIntoConstraints = false
+        terminalContent.addSubview(reveal)
+        NSLayoutConstraint.activate([
+            reveal.leadingAnchor.constraint(equalTo: terminalContent.leadingAnchor, constant: 8),
+            reveal.topAnchor.constraint(equalTo: terminalContent.topAnchor, constant: 8),
+        ])
+        sidebarReveal = reveal
 
         $surfaceTree
             .receive(on: DispatchQueue.main)
@@ -348,9 +437,15 @@ final class ForkWindowController: TerminalController {
         }
     }
 
-    // MARK: Split — picker (new vs attach-existing), then inject zmx command (SPEC §5).
-
-    private var pendingSplit: (at: Ghostty.SurfaceView, dir: SplitTree<Ghostty.SurfaceView>.NewDirection)?
+    // MARK: Split — sync split first, then picker swaps the new pane (SPEC §5).
+    //
+    // `super.newSplit` MUST run synchronously here with no intervening event
+    // processing. Any async/modal between entry and the actual split drops the
+    // OLD pane's `queueIo(.resize)` before the IO thread ioctls — zmx server logs
+    // confirm no Resize arrives. Root cause in libghostty unlocated. So: split with
+    // an autoName session immediately, then the picker (post-hoc) offers to swap the
+    // NEW pane to an existing session — a leaf-replace, not a structural change, so
+    // the OLD pane never resizes again.
 
     @discardableResult
     override func newSplit(
@@ -361,38 +456,38 @@ final class ForkWindowController: TerminalController {
         guard sheetPanel == nil, let host = registry.activeHost else {
             return super.newSplit(at: oldView, direction: direction, baseConfig: config)
         }
-        if ForkBootstrap.noPicker {
-            let ref = SessionRef(hostID: host.id, name: registry.uniqueAutoName())
-            let cfg = ZmxAdapter.surfaceConfig(host: host, ref: ref)
-            guard let view = super.newSplit(at: oldView, direction: direction, baseConfig: cfg) else { return nil }
-            registry.bind(surface: view.id, to: ref)
-            return view
+        let initial = SessionRef(hostID: host.id, name: registry.uniqueAutoName())
+        let cfg = ZmxAdapter.surfaceConfig(host: host, ref: initial)
+        guard let newView = super.newSplit(at: oldView, direction: direction, baseConfig: cfg)
+        else { return nil }
+        registry.bind(surface: newView.id, to: initial)
+
+        if !ForkBootstrap.noPicker {
+            presentSheet(size: .init(width: 280, height: 260)) { [weak self] in
+                SplitPickerView(
+                    host: host, placeholder: initial.name,
+                    onSubmit: { ref in self?.swapSplitSession(newView, from: initial, to: ref) },
+                    onCancel: { self?.endSheet() })
+            }
         }
-        pendingSplit = (oldView, direction)
-        presentSheet(size: .init(width: 280, height: 260)) { [weak self] in
-            SplitPickerView(host: host,
-                            onSubmit: { self?.completeSplit($0) },
-                            onCancel: { self?.pendingSplit = nil; self?.endSheet() })
-        }
-        return nil
+        return newView
     }
 
-    private func completeSplit(_ ref: SessionRef) {
+    private func swapSplitSession(_ view: Ghostty.SurfaceView, from initial: SessionRef, to ref: SessionRef) {
         defer { endSheet() }
-        guard let p = pendingSplit, let host = registry.host(id: ref.hostID) else { return }
-        pendingSplit = nil
+        guard ref != initial,
+              let host = registry.host(id: ref.hostID),
+              let app = ghostty.app,
+              let node = surfaceTree.root?.node(view: view) else { return }
         let cfg = ZmxAdapter.surfaceConfig(host: host, ref: ref)
-        guard let view = doSplit(at: p.at, dir: p.dir, cfg: cfg) else { return }
-        registry.bind(surface: view.id, to: ref)
-    }
-
-    /// Separate method so `super.` resolves outside the SwiftUI button-action closure.
-    private func doSplit(
-        at oldView: Ghostty.SurfaceView,
-        dir: SplitTree<Ghostty.SurfaceView>.NewDirection,
-        cfg: Ghostty.SurfaceConfiguration
-    ) -> Ghostty.SurfaceView? {
-        super.newSplit(at: oldView, direction: dir, baseConfig: cfg)
+        let replacement = Ghostty.SurfaceView(app, baseConfig: cfg)
+        registry.unbind(surface: view.id)
+        registry.bind(surface: replacement.id, to: ref)
+        do {
+            surfaceTree = try surfaceTree.replacing(node: node, with: .leaf(view: replacement))
+            focusedSurface = replacement
+        } catch { return }
+        Task { try? await ZmxAdapter.kill(host: host, ref: initial) }
     }
 
     // MARK: Persistence projection
@@ -404,14 +499,6 @@ final class ForkWindowController: TerminalController {
         // registers Close-Terminal undo) holds a strong ref to the closed SurfaceView;
         // pruning then ⌘Z → `project()` reads `refs[id] == nil` → persists `.leaf(nil)`.
         registry.setPersistedTree(project(tree.root), for: active)
-    }
-
-    private func collectRefs(_ tree: PersistedTree) -> [SessionRef] {
-        switch tree {
-        case .empty: return []
-        case .leaf(let r): return r.map { [$0] } ?? []
-        case .split(_, _, let a, let b): return collectRefs(a) + collectRefs(b)
-        }
     }
 
     private func project(_ node: SplitTree<Ghostty.SurfaceView>.Node?) -> PersistedTree {

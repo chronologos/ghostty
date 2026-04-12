@@ -28,13 +28,16 @@ private struct MinimapNode: View {
         case .empty:
             Color.clear
         case .leaf(let ref):
-            Text(ref?.name ?? "—")
+            Text((ref?.name ?? "—").replacingOccurrences(of: "-", with: "-\u{200B}"))
                 .font(.system(size: 9, design: .monospaced))
                 .foregroundStyle(.secondary)
-                .lineLimit(1)
+                .lineLimit(2)
+                .truncationMode(.head)
+                .multilineTextAlignment(.leading)
                 .padding(.horizontal, 4)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                 .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 2))
+                .help(ref?.name ?? "")
         case .split(let horizontal, _, let a, let b):
             if horizontal {
                 HStack(spacing: 1) { MinimapNode(node: a); MinimapNode(node: b) }
