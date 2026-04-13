@@ -94,7 +94,7 @@ Fork/
   via self-pipe. None of the Swift-side ordering mattered; the prior "fixes"
   here (split-before-endSheet, `refs` un-@Published) were timing coincidences.
   Debug toggles: `GHOSTTY_FORK_NO_SIDEBAR`, `GHOSTTY_FORK_NO_PICKER`,
-  `GHOSTTY_FORK_NO_ZMX`.
+  `GHOSTTY_FORK_NO_ZMX`. `GHOSTTY_FORK_ZMX=/path` overrides zmx resolution.
 - **Sheet ⌘V**: nil-targeted menu actions walk *past* the sheet to
   `mainWindow.firstResponder` (the `SurfaceView`, which has its own `paste:`).
   `ForkSheetPanel.performKeyEquivalent` intercepts before the menu.
@@ -140,9 +140,6 @@ jj git push --bookmark fork --remote origin   # never push to upstream
 
 ## Backlog
 
-- **zmx absolute path**: `ZmxAdapter` uses bare `zmx`, which works under `open -n`
-  (inherits shell PATH) but not Finder/Spotlight/Dock launch (launchd PATH only).
-  Resolve once at startup; fall back to a config key.
 - **⌘K command palette** (SPEC §8) — fork-hosted `CommandPaletteView` listing
   sessions/hosts/actions. Reuse upstream's `CommandPaletteView(options:)`.
 - 3rd seam for `keybind = all:cmd+t=new_tab` config edge — leaks through

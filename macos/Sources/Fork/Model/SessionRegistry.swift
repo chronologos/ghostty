@@ -45,6 +45,17 @@ final class SessionRegistry: ObservableObject {
         refs.values.contains { $0.hostID == hostID }
     }
 
+    /// Title of the tab containing `sessionName`, iff that title differs from the name
+    /// (i.e. the user renamed it). Lets pickers annotate raw zmx names with the label
+    /// the user actually recognizes.
+    func tabTitle(for sessionName: String, external: Bool, on hostID: ForkHost.ID) -> String? {
+        tabs.first {
+            $0.hostID == hostID && $0.tree.leafRefs.contains {
+                $0.name == sessionName && $0.external == external
+            }
+        }.flatMap { $0.title == sessionName ? nil : $0.title }
+    }
+
     // MARK: Mutations
 
     func addHost(_ h: ForkHost) {
@@ -114,6 +125,8 @@ final class SessionRegistry: ObservableObject {
     func setPersistedTree(_ tree: PersistedTree, for tabID: TabModel.ID) {
         guard let i = tabs.firstIndex(where: { $0.id == tabID }) else { return }
         tabs[i].tree = tree
+        let live = Set(tree.leafRefs.map(\.name))
+        tabs[i].lastActive = tabs[i].lastActive.filter { live.contains($0.key) }
     }
 
     // MARK: Persistence
@@ -134,8 +147,16 @@ final class SessionRegistry: ObservableObject {
     func uniqueAutoName(derivedFrom base: String? = nil) -> String {
         let used = Set(refs.values.map(\.name))
             .union(tabs.flatMap(\.tree.leafRefs).map(\.name))
+        // Strip a prior derived suffix so chained splits don't grow `foo-abcd-efgh-ijkl`.
+        // Only strip when the stem is itself a live session — otherwise `-xxxx` is part
+        // of a user-chosen name (`api-prod`), not an auto-suffix.
+        let stem: String? = base.map {
+            let s = $0.replacingOccurrences(of: #"-[a-z0-9]{4}$"#, with: "",
+                                            options: .regularExpression)
+            return s != $0 && used.contains(s) ? s : $0
+        }
         while true {
-            let n = base.map { Self.autoName(base: $0, suffixLen: 4) } ?? Self.autoName()
+            let n = stem.map { Self.autoName(base: $0, suffixLen: 4) } ?? Self.autoName()
             if !used.contains(n) { return n }
         }
     }

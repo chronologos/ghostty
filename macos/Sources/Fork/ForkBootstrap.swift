@@ -28,9 +28,13 @@ enum ForkBootstrap {
     static func install(ghostty: Ghostty.App) {
         guard enabled else { return }
         logger.info("fork enabled")
+        // Warm `localZmx` off the main thread — its login-shell probe can take seconds.
+        Task.detached(priority: .utility) {
+            logger.info("zmx resolved: \(ZmxAdapter.localZmx, privacy: .public)")
+        }
         let clay = NSColor(red: 0xD9/255, green: 0x77/255, blue: 0x57/255, alpha: 1)
         NSApp.applicationIconImage = ColorizedGhosttyIcon(
-            screenColors: [clay, clay.blended(withFraction: 0.4, of: .black) ?? clay],
+            screenColors: [.systemOrange, clay],
             ghostColor: .white,
             frame: .aluminum
         ).makeImage(in: .main)
