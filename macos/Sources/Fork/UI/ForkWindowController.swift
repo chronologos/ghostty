@@ -209,6 +209,34 @@ final class ForkWindowController: TerminalController {
         activate(tab: tabs[n - 1].id)
     }
 
+    private func moveActiveTab(by amount: Int) {
+        guard amount != 0, let active = registry.activeTab else { return }
+        let siblings = registry.tabs(on: active.hostID)
+        guard let i = siblings.firstIndex(where: { $0.id == active.id }) else { return }
+        let j = max(0, min(siblings.count - 1, i + amount))
+        guard j != i else { return }
+        registry.moveTab(active.id, before: siblings[j].id)
+    }
+
+    /// Intercept palette tab actions — `Ghostty.App.gotoTab/moveTab` guard on
+    /// `tabGroup.windows.count > 1`, which is never true with `tabbingMode = .disallowed`.
+    override func performAction(_ action: String, on surfaceView: Ghostty.SurfaceView) {
+        let parts = action.split(separator: ":", maxSplits: 1).map(String.init)
+        switch parts[0] {
+        case "previous_tab": stepTab(-1)
+        case "next_tab": stepTab(1)
+        case "last_tab":
+            let host = registry.activeHost?.id ?? ForkHost.local.id
+            if let last = registry.tabs(on: host).last { activate(tab: last.id) }
+        case "goto_tab":
+            if parts.count == 2, let n = Int(parts[1]) { gotoTab(index: n) }
+        case "move_tab":
+            if parts.count == 2, let d = Int(parts[1]) { moveActiveTab(by: d) }
+        default:
+            super.performAction(action, on: surfaceView)
+        }
+    }
+
     /// Jiggle every pane in `tabID`'s tree by 1px to force a SIGWINCH redraw.
     /// `ghostty_surface_set_size` only emits SIGWINCH on dimension change.
     func kickRedraw(tabID: TabModel.ID) {
@@ -406,9 +434,15 @@ final class ForkWindowController: TerminalController {
     // MARK: Tab management
 
     func activate(tab id: TabModel.ID) {
-        if let current = registry.activeTabID, current != id {
+        let current = registry.activeTabID
+        guard current != id else { return }
+        if let current {
             liveTabs[current] = surfaceTree
+            registry.setPersistedTree(project(surfaceTree.root), for: current)
         }
+        // Upstream's undo closures capture a *tree*, not a tab. Clear on every real
+        // switch — including `current == nil`, which closeForkTab/removeHost produce.
+        undoManager?.removeAllActions(withTarget: self)
         registry.setActive(tab: id)
         if let tree = liveTabs[id] {
             surfaceTree = tree
