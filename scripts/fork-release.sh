@@ -23,6 +23,7 @@ env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
     -configuration ReleaseLocal \
     "SYMROOT=$(pwd)/macos/build" \
     'OTHER_SWIFT_FLAGS=$(inherited) -DGHOSTTY_FORK_DEFAULT' \
+    'PRODUCT_BUNDLE_IDENTIFIER=com.mitchellh.ghostty.fork' \
     build
 
 out="macos/build/ReleaseLocal/Ghostty.app"
