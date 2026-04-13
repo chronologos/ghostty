@@ -6,9 +6,10 @@ import SwiftUI
 /// is ignored — imperceptible at this scale and avoids nested GeometryReader).
 struct MinimapView: View {
     let tree: PersistedTree
+    var surfaceFor: (SessionRef) -> Ghostty.SurfaceView? = { _ in nil }
 
     var body: some View {
-        MinimapNode(node: tree).frame(height: height)
+        MinimapNode(node: tree, surfaceFor: surfaceFor).frame(height: height)
     }
 
     private var height: CGFloat {
@@ -22,29 +23,63 @@ struct MinimapView: View {
 
 private struct MinimapNode: View {
     let node: PersistedTree
+    let surfaceFor: (SessionRef) -> Ghostty.SurfaceView?
 
     var body: some View {
         switch node {
         case .empty:
             Color.clear
         case .leaf(let ref):
-            Text((ref?.name ?? "—").replacingOccurrences(of: "-", with: "-\u{200B}"))
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .truncationMode(.head)
-                .multilineTextAlignment(.leading)
-                .padding(.horizontal, 4)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-                .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 2))
-                .help(ref?.name ?? "")
+            MinimapLeaf(ref: ref, surface: ref.flatMap(surfaceFor))
         case .split(let horizontal, _, let a, let b):
             if horizontal {
-                HStack(spacing: 1) { MinimapNode(node: a); MinimapNode(node: b) }
+                HStack(spacing: 1) {
+                    MinimapNode(node: a, surfaceFor: surfaceFor)
+                    MinimapNode(node: b, surfaceFor: surfaceFor)
+                }
             } else {
-                VStack(spacing: 1) { MinimapNode(node: a); MinimapNode(node: b) }
+                VStack(spacing: 1) {
+                    MinimapNode(node: a, surfaceFor: surfaceFor)
+                    MinimapNode(node: b, surfaceFor: surfaceFor)
+                }
             }
         }
     }
+}
+
+private struct MinimapLeaf: View {
+    let ref: SessionRef?
+    let surface: Ghostty.SurfaceView?
+
+    var body: some View {
+        if let surface {
+            ObservingLeaf(surface: surface, fallback: ref?.name)
+        } else {
+            slab(ref?.name ?? "—")
+        }
+    }
+
+    private struct ObservingLeaf: View {
+        @ObservedObject var surface: Ghostty.SurfaceView
+        let fallback: String?
+        var body: some View {
+            // Upstream sets title="👻" at +500ms if no OSC 2 arrives — treat as unset.
+            let t = surface.title
+            slab(t.isEmpty || t == "👻" ? (fallback ?? "—") : t)
+        }
+    }
+}
+
+private func slab(_ label: String) -> some View {
+    Text(label.replacingOccurrences(of: "-", with: "-\u{200B}"))
+        .font(.system(size: 9, design: .monospaced))
+        .foregroundStyle(.secondary)
+        .lineLimit(2)
+        .truncationMode(.head)
+        .multilineTextAlignment(.leading)
+        .padding(.horizontal, 4)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 2))
+        .help(label)
 }
 #endif
