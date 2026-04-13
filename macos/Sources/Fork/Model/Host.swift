@@ -83,12 +83,24 @@ struct TabModel: Codable, Identifiable, Hashable {
     var hostID: ForkHost.ID
     var title: String
     var tree: PersistedTree
+    /// Last-focused timestamp per pane, keyed by `SessionRef.name` (indices renumber, names don't).
+    var lastActive: [String: Date]
 
     init(id: UUID = UUID(), hostID: ForkHost.ID, title: String, tree: PersistedTree = .empty) {
         self.id = id
         self.hostID = hostID
         self.title = title
         self.tree = tree
+        self.lastActive = [:]
+    }
+
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        hostID = try c.decode(ForkHost.ID.self, forKey: .hostID)
+        title = try c.decode(String.self, forKey: .title)
+        tree = try c.decode(PersistedTree.self, forKey: .tree)
+        lastActive = try c.decodeIfPresent([String: Date].self, forKey: .lastActive) ?? [:]
     }
 }
 

@@ -102,6 +102,11 @@ final class SessionRegistry: ObservableObject {
     func setActive(tab id: TabModel.ID) { activeTabID = id }
     func setFocusedPane(index: Int?) { if focusedPaneIndex != index { focusedPaneIndex = index } }
 
+    func touchPane(tab id: TabModel.ID, name: String) {
+        guard let i = tabs.firstIndex(where: { $0.id == id }) else { return }
+        tabs[i].lastActive[name] = Date()
+    }
+
     func bind(surface: UUID, to ref: SessionRef) { refs[surface] = ref }
     func unbind(surface: UUID) { refs.removeValue(forKey: surface) }
     func saveNow() { persistence.save(snapshot()) }
@@ -117,18 +122,20 @@ final class SessionRegistry: ObservableObject {
         .init(hosts: hosts, tabs: tabs, activeTabID: activeTabID)
     }
 
-    static func autoName() -> String {
+    static func autoName(base: String = "shell", suffixLen: Int = 3) -> String {
         let alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
-        let suffix = String((0..<3).map { _ in alphabet.randomElement()! })
-        return "shell-\(suffix)"
+        let suffix = String((0..<suffixLen).map { _ in alphabet.randomElement()! })
+        return "\(base)-\(suffix)"
     }
 
     /// `autoName()` retried until disjoint from live refs and dormant persisted-tree leaves.
-    func uniqueAutoName() -> String {
+    /// `derivedFrom` seeds the name from an existing session (split picker passes the
+    /// focused pane's name); nil → default `shell-xxx`.
+    func uniqueAutoName(derivedFrom base: String? = nil) -> String {
         let used = Set(refs.values.map(\.name))
             .union(tabs.flatMap(\.tree.leafRefs).map(\.name))
         while true {
-            let n = Self.autoName()
+            let n = base.map { Self.autoName(base: $0, suffixLen: 4) } ?? Self.autoName()
             if !used.contains(n) { return n }
         }
     }
