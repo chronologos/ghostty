@@ -12,10 +12,9 @@ final class SessionRegistry: ObservableObject {
     @Published private(set) var tabs: [TabModel]
     @Published private(set) var activeTabID: TabModel.ID?
 
-    /// Intentionally NOT @Published: every `bind()` during a split would invalidate
-    /// `SidebarView`, whose NSHostingView relayout races zmx's SIGWINCH round-trip
-    /// (the "type-one-char-to-see-prompt" bug). `refs` is bookkeeping; `isConnected()`
-    /// reads it but every flow that mutates `refs` also mutates a @Published prop.
+    /// Not @Published: pure surface→session bookkeeping the sidebar never renders
+    /// directly. `isConnected()` reads it, but every flow that mutates `refs` also
+    /// mutates a @Published prop, so the derived UI stays fresh.
     private(set) var refs: [UUID: SessionRef] = [:]
 
     private let persistence = ForkPersistence()
