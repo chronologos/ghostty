@@ -59,18 +59,20 @@ private struct MinimapLeaf: View {
         }
     }
 
+    /// Label is always the session name; live OSC 2 title goes to the tooltip only
+    /// (shell-integration sets it to cwd, which is a poor pane discriminator).
     private struct ObservingLeaf: View {
-        @ObservedObject var surface: Ghostty.SurfaceView
+        let surface: Ghostty.SurfaceView
         let fallback: String?
+        @State private var title = ""
         var body: some View {
-            // Upstream sets title="👻" at +500ms if no OSC 2 arrives — treat as unset.
-            let t = surface.title
-            slab(t.isEmpty || t == "👻" ? (fallback ?? "—") : t)
+            slab(fallback ?? "—", help: title.isEmpty || title == "👻" ? nil : title)
+                .onReceive(surface.$title.removeDuplicates()) { title = $0 }
         }
     }
 }
 
-private func slab(_ label: String) -> some View {
+private func slab(_ label: String, help: String? = nil) -> some View {
     Text(label.replacingOccurrences(of: "-", with: "-\u{200B}"))
         .font(.system(size: 9, design: .monospaced))
         .foregroundStyle(.secondary)
@@ -80,6 +82,6 @@ private func slab(_ label: String) -> some View {
         .padding(.horizontal, 4)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 2))
-        .help(label)
+        .help(help ?? label)
 }
 #endif
