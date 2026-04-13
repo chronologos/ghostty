@@ -169,7 +169,7 @@ struct SidebarView: View {
             Button("Kill Session…", role: .destructive) { controller?.confirmKill(tab) }
         }
         if active && panes > 1 {
-            MinimapView(tree: tab.tree)
+            MinimapView(tree: tab.tree, surfaceFor: { controller?.surface(for: $0) })
                 .padding(.leading, 12).padding(.trailing, 12).padding(.bottom, 4)
         }
     }
