@@ -9,6 +9,7 @@ struct SidebarView: View {
     @State private var renamingTab: TabModel.ID?
     @State private var renameText: String = ""
     @State private var draggingTab: TabModel.ID?
+    @FocusState private var renameFieldFocused: Bool
 
     private let clay = Color(red: 0xD9/255, green: 0x77/255, blue: 0x57/255)
 
@@ -102,8 +103,8 @@ struct SidebarView: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
-            Button("New Session on \(host.label)") {
-                controller?.newForkTab(intent: .init(hostID: host.id))
+            Button("New Session on \(host.label)…") {
+                controller?.showSessionPicker(on: host)
             }
             Button("Manage Host…") { controller?.showHostDetail(host) }
             if host.id != ForkHost.local.id {
@@ -127,20 +128,26 @@ struct SidebarView: View {
     }
 
     // MARK: Tab → pane rows
-    // Single-pane: one plain title row. Multi-pane: one row per leaf session,
-    // grouped by a spine + elbow connector; tab title is not shown.
+    // Head row always shows `tab.title`; if the underlying session name differs
+    // (i.e. renamed), it appears as a subtitle. Multi-pane tabs add one row per
+    // extra leaf session, grouped by a spine + elbow connector.
 
     private func tabRow(_ tab: TabModel) -> some View {
         let active = tab.id == registry.activeTabID
         let refs = tab.tree.leafRefs
+        let root = refs.first?.name
         return Group {
             if refs.count <= 1 {
-                paneRow(tab, index: 0, label: tab.title, ageKey: refs.first?.name,
+                paneRow(tab, index: 0, label: tab.title,
+                        subtitle: root != tab.title ? root : nil, ageKey: root,
                         spine: nil, head: true, active: active)
             } else {
                 VStack(spacing: 0) {
                     ForEach(Array(refs.enumerated()), id: \.offset) { i, ref in
-                        paneRow(tab, index: i, label: ref.name, ageKey: ref.name,
+                        paneRow(tab, index: i,
+                                label: i == 0 ? tab.title : ref.name,
+                                subtitle: i == 0 && tab.title != ref.name ? ref.name : nil,
+                                ageKey: ref.name,
                                 spine: (i == 0, i == refs.count - 1),
                                 head: i == 0, active: active)
                     }
@@ -155,11 +162,12 @@ struct SidebarView: View {
             target: tab.id, dragging: $draggingTab, registry: registry))
     }
 
-    private func paneRow(_ tab: TabModel, index: Int, label: String, ageKey: String?,
-                         spine: (first: Bool, last: Bool)?, head: Bool,
+    private func paneRow(_ tab: TabModel, index: Int, label: String, subtitle: String?,
+                         ageKey: String?, spine: (first: Bool, last: Bool)?, head: Bool,
                          active: Bool) -> some View {
         let renaming = head && renamingTab == tab.id
         let focused = active && (registry.focusedPaneIndex.map { $0 == index } ?? head)
+        let age = focused ? nil : ageKey.flatMap { tab.lastActive[$0] }
         return HStack(spacing: 0) {
             Group {
                 if let spine {
@@ -173,16 +181,27 @@ struct SidebarView: View {
             if renaming {
                 TextField("", text: $renameText, onCommit: commitRename)
                     .textFieldStyle(.plain).font(.system(size: 12))
+                    .focused($renameFieldFocused)
                     .onExitCommand { renamingTab = nil }
+                    .onAppear { renameFieldFocused = true }
+                    .onChange(of: renameFieldFocused) { focused in
+                        // Nil-targeted selectAll would route to SurfaceView (CLAUDE.md "Sheet ⌘V").
+                        // onChange fires *after* SwiftUI installs the field editor, so we can
+                        // verify firstResponder is text before sending.
+                        guard focused, NSApp.keyWindow?.firstResponder is NSTextView else { return }
+                        NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
+                    }
             } else {
-                Text(label).font(.system(size: 12)).lineLimit(1)
-                    .foregroundStyle(active ? .primary : .secondary)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(label).font(.system(size: 12)).lineLimit(1)
+                        .foregroundStyle(active ? .primary : .secondary)
+                    if let subtitle {
+                        Text(subtitle).font(.system(size: 9)).lineLimit(1)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
             }
             Spacer()
-            if !focused, let key = ageKey, let age = tab.lastActive[key]?.shortAge {
-                Text(age).font(.system(size: 9)).foregroundStyle(.tertiary)
-                    .padding(.trailing, head ? 6 : 0)
-            }
             if head {
                 Button { controller?.kickRedraw(tabID: tab.id) } label: {
                     Image(systemName: "arrow.clockwise").font(.system(size: 9))
@@ -194,8 +213,13 @@ struct SidebarView: View {
                 }
                 .buttonStyle(.plain).opacity(active ? 0.6 : 0).allowsHitTesting(active)
             }
+            TimelineView(.periodic(from: .now, by: 30)) { _ in
+                Text(age?.shortAge ?? "")
+                    .font(.system(size: 9)).foregroundStyle(ageStyle(age))
+                    .frame(width: 24, alignment: .trailing)
+            }
         }
-        .padding(.trailing, 12).frame(height: 28)
+        .padding(.trailing, 12).frame(minHeight: 28)
         .background(focused ? clay.opacity(0.14) : .clear,
                     in: RoundedRectangle(cornerRadius: 5))
         .contentShape(Rectangle())
@@ -216,6 +240,14 @@ struct SidebarView: View {
     private func beginRename(_ tab: TabModel) {
         renameText = tab.title
         renamingTab = tab.id
+    }
+
+    private func ageStyle(_ date: Date?) -> AnyShapeStyle {
+        switch date.map({ Date().timeIntervalSince($0) }) {
+        case .some(..<300):  return AnyShapeStyle(.green)
+        case .some(..<3600): return AnyShapeStyle(.secondary)
+        default:             return AnyShapeStyle(.tertiary)
+        }
     }
 
     private func commitRename() {
