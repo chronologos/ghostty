@@ -1,8 +1,27 @@
 #if os(macOS)
+import Foundation
 import Testing
 @testable import Ghostty
 
 struct TransportTests {
+    @Test func forkHostDecodeMissingOptional() throws {
+        let json = #"{"id":"h","label":"host","transport":{"local":{}}}"#
+        let h = try JSONDecoder().decode(ForkHost.self, from: Data(json.utf8))
+        #expect(h.expanded == true)
+        #expect(h.accentHue == nil)
+    }
+
+    @Test func lenientStateDecode() throws {
+        let json = """
+        {"version":1,"hosts":[
+          {"id":"ok","label":"ok","transport":{"local":{}}},
+          {"id":"bad","label":"bad","transport":{"et":{"host":"x"}}}
+        ],"tabs":[]}
+        """
+        let s = try JSONDecoder().decode(ForkPersistence.State.self, from: Data(json.utf8))
+        #expect(s.hosts.map(\.id) == ["ok"])
+    }
+
     @Test func shqRoundTrip() {
         #expect(shq("a") == "'a'")
         #expect(shq("a b") == "'a b'")
