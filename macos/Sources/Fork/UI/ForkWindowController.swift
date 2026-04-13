@@ -224,6 +224,12 @@ final class ForkWindowController: TerminalController {
         }
     }
 
+    /// First live surface in the active tree bound to `ref` (for minimap title display;
+    /// non-unique refs return an arbitrary match).
+    func surface(for ref: SessionRef) -> Ghostty.SurfaceView? {
+        surfaceTree.first { registry.refs[$0.id] == ref }
+    }
+
     func gotoHost(index n: Int) {
         guard registry.hosts.indices.contains(n - 1) else { return }
         let host = registry.hosts[n - 1]
@@ -388,8 +394,9 @@ final class ForkWindowController: TerminalController {
         installNavMonitor()
     }
 
-    /// `BaseTerminalController.titleOverride` (`:94`) wins over `focusedSurface.title`
-    /// (shell OSC 2, which zmx doesn't forward). Set it from registry.
+    /// `BaseTerminalController.titleOverride` (`:94`) wins over `focusedSurface.title`.
+    /// zmx is OSC-transparent, so shell title *does* reach `SurfaceView.title`; we just
+    /// prefer the registry-derived "{tab} — {host}" for the window chrome.
     private func syncWindowTitle() {
         guard let tab = registry.activeTab else { titleOverride = nil; return }
         let host = registry.host(id: tab.hostID)?.label ?? tab.hostID
@@ -437,15 +444,9 @@ final class ForkWindowController: TerminalController {
         }
     }
 
-    // MARK: Split — sync split first, then picker swaps the new pane (SPEC §5).
-    //
-    // `super.newSplit` MUST run synchronously here with no intervening event
-    // processing. Any async/modal between entry and the actual split drops the
-    // OLD pane's `queueIo(.resize)` before the IO thread ioctls — zmx server logs
-    // confirm no Resize arrives. Root cause in libghostty unlocated. So: split with
-    // an autoName session immediately, then the picker (post-hoc) offers to swap the
-    // NEW pane to an existing session — a leaf-replace, not a structural change, so
-    // the OLD pane never resizes again.
+    // MARK: Split — picker first (new vs attach-existing), then split (SPEC §5).
+
+    private var pendingSplit: (at: Ghostty.SurfaceView, dir: SplitTree<Ghostty.SurfaceView>.NewDirection)?
 
     @discardableResult
     override func newSplit(
@@ -456,38 +457,36 @@ final class ForkWindowController: TerminalController {
         guard sheetPanel == nil, let host = registry.activeHost else {
             return super.newSplit(at: oldView, direction: direction, baseConfig: config)
         }
-        let initial = SessionRef(hostID: host.id, name: registry.uniqueAutoName())
-        let cfg = ZmxAdapter.surfaceConfig(host: host, ref: initial)
-        guard let newView = super.newSplit(at: oldView, direction: direction, baseConfig: cfg)
-        else { return nil }
-        registry.bind(surface: newView.id, to: initial)
-
-        if !ForkBootstrap.noPicker {
-            presentSheet(size: .init(width: 280, height: 260)) { [weak self] in
-                SplitPickerView(
-                    host: host, placeholder: initial.name,
-                    onSubmit: { ref in self?.swapSplitSession(newView, from: initial, to: ref) },
-                    onCancel: { self?.endSheet() })
-            }
+        if ForkBootstrap.noPicker {
+            return completeSplit(at: oldView, direction: direction, host: host,
+                                 ref: .init(hostID: host.id, name: registry.uniqueAutoName()))
         }
-        return newView
+        pendingSplit = (oldView, direction)
+        let placeholder = registry.uniqueAutoName()
+        presentSheet(size: .init(width: 280, height: 260)) { [weak self] in
+            SplitPickerView(
+                host: host, placeholder: placeholder,
+                onSubmit: { ref in
+                    guard let self, let p = self.pendingSplit else { return }
+                    self.pendingSplit = nil
+                    _ = self.completeSplit(at: p.at, direction: p.dir, host: host, ref: ref)
+                    self.endSheet()
+                },
+                onCancel: { self?.pendingSplit = nil; self?.endSheet() })
+        }
+        return nil
     }
 
-    private func swapSplitSession(_ view: Ghostty.SurfaceView, from initial: SessionRef, to ref: SessionRef) {
-        defer { endSheet() }
-        guard ref != initial,
-              let host = registry.host(id: ref.hostID),
-              let app = ghostty.app,
-              let node = surfaceTree.root?.node(view: view) else { return }
+    /// `super.` won't resolve inside the SwiftUI button-action closure above.
+    private func completeSplit(
+        at oldView: Ghostty.SurfaceView,
+        direction: SplitTree<Ghostty.SurfaceView>.NewDirection,
+        host: ForkHost, ref: SessionRef
+    ) -> Ghostty.SurfaceView? {
         let cfg = ZmxAdapter.surfaceConfig(host: host, ref: ref)
-        let replacement = Ghostty.SurfaceView(app, baseConfig: cfg)
-        registry.unbind(surface: view.id)
-        registry.bind(surface: replacement.id, to: ref)
-        do {
-            surfaceTree = try surfaceTree.replacing(node: node, with: .leaf(view: replacement))
-            focusedSurface = replacement
-        } catch { return }
-        Task { try? await ZmxAdapter.kill(host: host, ref: initial) }
+        guard let view = super.newSplit(at: oldView, direction: direction, baseConfig: cfg) else { return nil }
+        registry.bind(surface: view.id, to: ref)
+        return view
     }
 
     // MARK: Persistence projection
