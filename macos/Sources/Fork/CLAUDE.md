@@ -70,8 +70,7 @@ Fork/
     ZmxAdapter.swift           surfaceConfig/list/kill/detachedScript; Transport.wrap/controlArgv
   UI/
     ForkWindowController.swift the controller; tab switching = swap surfaceTree
-    SidebarView.swift          SwiftUI; host sections, tab rows, context menus
-    MinimapView.swift          read-only PersistedTree visualizer under active tab
+    SidebarView.swift          host sections; tabs as pane rows (spine connector groups multi-pane)
     NewSessionView.swift       ⌘T sheet
     SplitPickerView.swift      ⌘D picker (new vs attach-existing)
     SessionMetaLabel.swift     shared row trailer: client-count + age
