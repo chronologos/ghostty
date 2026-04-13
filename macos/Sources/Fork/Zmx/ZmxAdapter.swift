@@ -3,6 +3,43 @@ import Foundation
 
 /// Only place in the fork that knows zmx's CLI shape or builds shell strings (SPEC §4).
 enum ZmxAdapter {
+    /// Absolute local path to `zmx`. Spotlight/Dock launches inherit launchd's minimal
+    /// PATH, and Ghostty runs commands via `bash --noprofile --norc`, so bare `zmx` fails.
+    /// Resolved once: env override → current PATH → common install dirs → login-shell probe.
+    static let localZmx: String = {
+        let fm = FileManager.default
+        let env = ProcessInfo.processInfo.environment
+        let home = fm.homeDirectoryForCurrentUser.path
+        var candidates = [env["GHOSTTY_FORK_ZMX"]]
+        candidates += (env["PATH"] ?? "").split(separator: ":").map { "\($0)/zmx" }
+        candidates += ["\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin",
+                       "\(home)/.cargo/bin", "\(home)/bin"].map { "\($0)/zmx" }
+        if let hit = candidates.compactMap({ $0 }).first(where: fm.isExecutableFile(atPath:)) {
+            return hit
+        }
+        // Last resort: ask the user's login shell. Bounded — a hung .zshrc must not
+        // wedge the static-let initializer (and with it, every caller).
+        let p = Process(), pipe = Pipe(), done = DispatchSemaphore(value: 0)
+        p.executableURL = URL(fileURLWithPath: env["SHELL"] ?? "/bin/zsh")
+        p.arguments = ["-lic", "command -v zmx"]
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        p.terminationHandler = { _ in done.signal() }
+        if (try? p.run()) != nil {
+            if done.wait(timeout: .now() + 2) == .timedOut { p.terminate() }
+            let out = String(decoding: pipe.fileHandleForReading.availableData, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if fm.isExecutableFile(atPath: out) { return out }
+        }
+        ForkBootstrap.logger.warning("zmx not resolved; falling back to PATH lookup")
+        return "zmx"
+    }()
+
+    /// Remote hosts use bare `zmx` (resolved by the remote shell's PATH).
+    private static func zmx(on host: ForkHost) -> String {
+        host.transport.isLocal ? localZmx : "zmx"
+    }
+
     /// On-the-wire name. Managed refs get `{hostID}-` prefix; external refs use raw name.
     static func wireName(_ ref: SessionRef) -> String {
         ref.external ? ref.name : "\(ref.hostID)-\(ref.name)"
@@ -18,7 +55,7 @@ enum ZmxAdapter {
         var c = Ghostty.SurfaceConfiguration()
         if host.transport.isLocal { c.workingDirectory = cwd }
         if ForkBootstrap.noZmx { return c }
-        let argv = ["zmx", "attach", wireName(ref)] + (initialCmd ?? [])
+        let argv = [zmx(on: host), "attach", wireName(ref)] + (initialCmd ?? [])
         c.command = host.transport.wrap(argv)
         return c
     }
@@ -38,7 +75,7 @@ enum ZmxAdapter {
     /// `zmx list` (full k=v form) partitioned into fork-managed (prefix-stripped) and external.
     /// Dead-socket lines (`err=…`) are dropped.
     static func list(host: ForkHost, timeout: TimeInterval = 5) async -> ListResult {
-        let argv = host.transport.controlArgv(["zmx", "list"])
+        let argv = host.transport.controlArgv([zmx(on: host), "list"])
         guard let out = try? await run(argv: argv, timeout: timeout) else { return .init() }
         let prefix = "\(host.id)-"
         var r = ListResult()
@@ -78,13 +115,13 @@ enum ZmxAdapter {
         // `attach` is already a fully shq'd command line (each token single-quoted),
         // so it's interpolated *unquoted* after `exec` — wrapping it again would make
         // it one word. shq is total (POSIX `'` → `'\''`); see TransportTests.wrapSshInjection.
-        let attach = host.transport.wrap(["zmx", "attach", wireName(ref)])
+        let attach = host.transport.wrap([zmx(on: host), "attach", wireName(ref)])
         let msg = "session \(ref.name) — press ⏎ to reattach, ⌘⇧W to close"
         return shq(["sh", "-c", "printf '%s\\n' \(shq(msg)); read _; exec \(attach)"])
     }
 
     static func kill(host: ForkHost, ref: SessionRef) async throws {
-        let argv = host.transport.controlArgv(["zmx", "kill", wireName(ref)])
+        let argv = host.transport.controlArgv([zmx(on: host), "kill", wireName(ref)])
         _ = try await run(argv: argv, timeout: 5)
     }
 

@@ -1,14 +1,17 @@
 #if os(macOS)
 import SwiftUI
 
-/// ⌘D picker: new session (default, ⏎) or attach an existing one on the active host.
+/// Compact session picker: new (default, ⏎) or attach an existing one on `host`.
 /// Type to filter · ↓/↑ to select · ⏎ attaches selection or creates new.
+/// Used for ⌘D split and the host context-menu "New Session".
 struct SplitPickerView: View {
+    let title: String
     let host: ForkHost
     let placeholder: String
     let onSubmit: (SessionRef) -> Void
     let onCancel: () -> Void
 
+    @EnvironmentObject private var registry: SessionRegistry
     @State private var name: String = ""
     @State private var recents: ZmxAdapter.ListResult?
     @State private var sel: Int?
@@ -26,7 +29,7 @@ struct SplitPickerView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Split on \(host.label)")
+            Text(title)
                 .font(.system(size: 11)).foregroundStyle(.secondary)
             TextField("", text: $name, prompt: Text(placeholder))
                 .textFieldStyle(.roundedBorder)
@@ -73,7 +76,12 @@ struct SplitPickerView: View {
     private func row(_ i: Int, _ e: ZmxAdapter.ListEntry) -> some View {
         Button { submit(e.name, external: e.external) } label: {
             HStack {
-                Text(e.name).font(.system(size: 12))
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(e.name).font(.system(size: 12))
+                    if let title = registry.tabTitle(for: e.name, external: e.external, on: host.id) {
+                        Text(title).font(.system(size: 9)).foregroundStyle(.secondary)
+                    }
+                }
                 Spacer()
                 SessionMetaLabel(entry: e)
             }
