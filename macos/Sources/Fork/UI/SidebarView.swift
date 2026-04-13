@@ -35,13 +35,10 @@ struct SidebarView: View {
             actionRow(icon: "plus", label: "New tab", keys: ["⌘", "T"]) {
                 controller?.showNewSessionSheet()
             }
-            actionRow(icon: "magnifyingglass", label: "Sessions", keys: ["⌘", "K"]) {
-                // SPEC §8 backlog
-            }
             actionRow(icon: "server.rack", label: "Add host", keys: nil) {
                 controller?.showNewHostSheet()
             }
-            actionRow(icon: "sidebar.left", label: "Hide sidebar", keys: ["⌘", "\\"]) {
+            actionRow(icon: "sidebar.left", label: "Hide sidebar", keys: nil) {
                 controller?.toggleSidebar()
             }
         }
@@ -138,11 +135,12 @@ struct SidebarView: View {
         let refs = tab.tree.leafRefs
         return Group {
             if refs.count <= 1 {
-                paneRow(tab, index: 0, label: tab.title, spine: nil, head: true, active: active)
+                paneRow(tab, index: 0, label: tab.title, ageKey: refs.first?.name,
+                        spine: nil, head: true, active: active)
             } else {
                 VStack(spacing: 0) {
                     ForEach(Array(refs.enumerated()), id: \.offset) { i, ref in
-                        paneRow(tab, index: i, label: ref.name,
+                        paneRow(tab, index: i, label: ref.name, ageKey: ref.name,
                                 spine: (i == 0, i == refs.count - 1),
                                 head: i == 0, active: active)
                     }
@@ -157,10 +155,11 @@ struct SidebarView: View {
             target: tab.id, dragging: $draggingTab, registry: registry))
     }
 
-    private func paneRow(_ tab: TabModel, index: Int, label: String,
+    private func paneRow(_ tab: TabModel, index: Int, label: String, ageKey: String?,
                          spine: (first: Bool, last: Bool)?, head: Bool,
                          active: Bool) -> some View {
         let renaming = head && renamingTab == tab.id
+        let focused = active && (registry.focusedPaneIndex.map { $0 == index } ?? head)
         return HStack(spacing: 0) {
             Group {
                 if let spine {
@@ -180,6 +179,10 @@ struct SidebarView: View {
                     .foregroundStyle(active ? .primary : .secondary)
             }
             Spacer()
+            if !focused, let key = ageKey, let age = tab.lastActive[key]?.shortAge {
+                Text(age).font(.system(size: 9)).foregroundStyle(.tertiary)
+                    .padding(.trailing, head ? 6 : 0)
+            }
             if head {
                 Button { controller?.kickRedraw(tabID: tab.id) } label: {
                     Image(systemName: "arrow.clockwise").font(.system(size: 9))
@@ -193,8 +196,7 @@ struct SidebarView: View {
             }
         }
         .padding(.trailing, 12).frame(height: 28)
-        .background(active && (registry.focusedPaneIndex.map { $0 == index } ?? head)
-                        ? clay.opacity(0.14) : .clear,
+        .background(focused ? clay.opacity(0.14) : .clear,
                     in: RoundedRectangle(cornerRadius: 5))
         .contentShape(Rectangle())
         .onTapGesture { controller?.activate(tab: tab.id, paneIndex: index) }

@@ -14,12 +14,15 @@ PATH="$(pwd)/scripts/shims:$PATH" zig build \
 
 echo "→ Ghostty.app (ReleaseLocal)"
 # Clean env: Nix's NIX_LDFLAGS/NIX_CFLAGS_COMPILE poison xcodebuild's linker.
+# OTHER_SWIFT_FLAGS (unset in pbxproj, so CLI override is non-clobbering) bakes the
+# fork on by default; env GHOSTTY_FORK=0 still opts out at runtime.
 env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
   xcodebuild \
     -project macos/Ghostty.xcodeproj \
     -scheme Ghostty \
     -configuration ReleaseLocal \
     "SYMROOT=$(pwd)/macos/build" \
+    'OTHER_SWIFT_FLAGS=$(inherited) -DGHOSTTY_FORK_DEFAULT' \
     build
 
 out="macos/build/ReleaseLocal/Ghostty.app"
