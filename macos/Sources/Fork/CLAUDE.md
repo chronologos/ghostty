@@ -21,7 +21,7 @@ See `do_not_commit/ghostty-fork/SPEC.md` for the full spec.
 # scripts/shims/xcrun redirects its SDK probe to 15.4. Remove once a fixed zig ships.
 PATH=$(pwd)/scripts/shims:$PATH zig build
 
-# Run the fork
+# Run the fork (debug builds are opt-in; ReleaseLocal via fork-release.sh defaults on)
 GHOSTTY_FORK=1 open macos/build/Debug/Ghostty.app
 
 # Tests (Swift Testing, auto-picked-up via PBXFileSystemSynchronizedRootGroup)
@@ -63,7 +63,7 @@ Fork/
   ForkBootstrap.swift          enabled flag (env GHOSTTY_FORK=1), seam entry points
   Model/
     Host.swift                 ForkHost, Transport, SSHTarget, SessionRef, TabModel, PersistedTree
-    SessionRegistry.swift      @MainActor singleton; @Published hosts/tabs/activeTabID (refs is plain var)
+    SessionRegistry.swift      @MainActor singleton; @Published hosts/tabs/activeTabID/focusedPaneIndex (refs is plain var)
     Persistence.swift          fork.json (atomic write + .bak + revalidate-on-load)
   Zmx/
     ShellQuote.swift           shq() — POSIX single-quote
@@ -75,6 +75,7 @@ Fork/
     SplitPickerView.swift      ⌘D picker (new vs attach-existing)
     SessionMetaLabel.swift     shared row trailer: client-count + age
     NewHostView.swift          add-host sheet
+    HostDetailView.swift       manage-host sheet (rename, accent hue, remove)
     ForkSheetPanel.swift       NSWindow.performKeyEquivalent → ⌘V/C/X/A/Z to firstResponder
 ```
 
@@ -153,8 +154,6 @@ jj git push --bookmark fork --remote origin   # never push to upstream
 - Scripted splits (`NewTerminalIntent.swift:133`, `ScriptTerminal.swift:105`) hit our
   `newSplit` override → picker pops + script gets nil. Bypass needed if Shortcuts/
   AppleScript matters.
-- **Minimap focus highlight + click-to-focus** — needs `[Bool]` tree-path addressing
-  (`SessionRef` is non-unique per leaf via `completeSplit` attach-existing).
 - **Detached-pane list-probe** (SPEC §5) — `detachedScript` reattaches blindly; should
   `zmx list` first and show "session ended — start fresh?" if absent.
 
