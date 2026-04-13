@@ -310,6 +310,23 @@ final class ForkWindowController: TerminalController {
         }
     }
 
+    /// Compact picker (same as ⌘D split) for the host context-menu — name or attach,
+    /// no cwd/cmd fields. Use `showNewSessionSheet` for the full form.
+    func showSessionPicker(on host: ForkHost) {
+        let placeholder = registry.uniqueAutoName()
+        presentSheet(size: .init(width: 280, height: 260)) { [weak self] in
+            SplitPickerView(
+                title: "New session on \(host.label)",
+                host: host, placeholder: placeholder,
+                onSubmit: { ref in
+                    self?.newForkTab(intent: .init(hostID: ref.hostID, name: ref.name,
+                                                   external: ref.external))
+                    self?.endSheet()
+                },
+                onCancel: { self?.endSheet() })
+        }
+    }
+
     func showNewHostSheet() {
         presentSheet(size: .init(width: 360, height: 210)) { [weak self] in
             NewHostView(onDone: { self?.endSheet() })
@@ -452,7 +469,10 @@ final class ForkWindowController: TerminalController {
         let leaves = Array(surfaceTree)
         guard leaves.indices.contains(paneIndex) else { return }
         let target = leaves[paneIndex]
-        focusedSurface = target
+        // The sidebar click already stole firstResponder; writing `focusedSurface` (even
+        // to the same value) fires its `didSet → syncFocusToSurfaceTree()`, which checks
+        // `isFirstResponder` and would mark every pane unfocused mid-transition.
+        if focusedSurface !== target { focusedSurface = target }
         DispatchQueue.main.async { [weak self] in
             self?.window?.makeFirstResponder(target)
         }
@@ -460,10 +480,12 @@ final class ForkWindowController: TerminalController {
 
     override func focusedSurfaceDidChange(to: Ghostty.SurfaceView?) {
         super.focusedSurfaceDidChange(to: to)
-        registry.setFocusedPane(index: to.flatMap { v in
-            Array(surfaceTree).firstIndex { $0 === v }
-        })
-        if let v = to, let tab = registry.activeTabID, let name = registry.refs[v.id]?.name {
+        // nil = focus left the split tree (sidebar click, sheet, etc.) — keep last-known
+        // index so the highlight doesn't snap to head and back. `activate()` writes nil
+        // explicitly when it actually wants the head fallback.
+        guard let to else { return }
+        registry.setFocusedPane(index: Array(surfaceTree).firstIndex { $0 === to })
+        if let tab = registry.activeTabID, let name = registry.refs[to.id]?.name {
             registry.touchPane(tab: tab, name: name)
         }
     }
@@ -486,9 +508,14 @@ final class ForkWindowController: TerminalController {
         }
         liveTabs.removeValue(forKey: id)
         let wasActive = registry.activeTabID == id
+        let host = registry.tabs.first { $0.id == id }?.hostID
+        let i = host.flatMap { h in registry.tabs(on: h).firstIndex { $0.id == id } }
         registry.removeTab(id)
         guard wasActive else { return }
-        if let next = registry.tabs.first?.id {
+        let siblings = host.map(registry.tabs(on:)) ?? []
+        let next = i.flatMap { siblings.indices.contains($0) ? siblings[$0].id : siblings.last?.id }
+            ?? registry.tabs.first?.id
+        if let next {
             activate(tab: next)
         } else {
             surfaceTree = .init()
@@ -506,7 +533,9 @@ final class ForkWindowController: TerminalController {
         baseConfig config: Ghostty.SurfaceConfiguration? = nil
     ) -> Ghostty.SurfaceView? {
         guard sheetPanel == nil, let host = registry.activeHost else {
-            return super.newSplit(at: oldView, direction: direction, baseConfig: config)
+            // ⌘D leaks past an open sheet via the responder chain (same path as the ⌘V
+            // gotcha). super.newSplit would spawn a non-zmx, unbound pane; swallow instead.
+            return nil
         }
         let placeholder = registry.uniqueAutoName(derivedFrom: registry.refs[oldView.id]?.name)
         if ForkBootstrap.noPicker {
@@ -516,6 +545,7 @@ final class ForkWindowController: TerminalController {
         pendingSplit = (oldView, direction)
         presentSheet(size: .init(width: 280, height: 260)) { [weak self] in
             SplitPickerView(
+                title: "Split on \(host.label)",
                 host: host, placeholder: placeholder,
                 onSubmit: { ref in
                     guard let self, let p = self.pendingSplit else { return }

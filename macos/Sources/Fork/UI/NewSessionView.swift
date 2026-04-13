@@ -118,7 +118,12 @@ struct NewSessionView: View {
     private func recentRow(_ e: ZmxAdapter.ListEntry) -> some View {
         Button { submit(name: e.name, external: e.external) } label: {
             HStack {
-                Text(e.name)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(e.name)
+                    if let title = registry.tabTitle(for: e.name, external: e.external, on: hostID) {
+                        Text(title).font(.system(size: 9)).foregroundStyle(.secondary)
+                    }
+                }
                 Spacer()
                 SessionMetaLabel(entry: e)
             }
