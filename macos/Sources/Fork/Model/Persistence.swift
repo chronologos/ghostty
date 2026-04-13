@@ -8,6 +8,28 @@ struct ForkPersistence {
         var hosts: [ForkHost] = []
         var tabs: [TabModel] = []
         var activeTabID: TabModel.ID?
+
+        init(version: Int = 1, hosts: [ForkHost] = [], tabs: [TabModel] = [],
+             activeTabID: TabModel.ID? = nil) {
+            self.version = version; self.hosts = hosts; self.tabs = tabs
+            self.activeTabID = activeTabID
+        }
+
+        /// Lenient: drops individually-undecodable hosts/tabs instead of failing the whole
+        /// state (e.g. an unknown `Transport` enum case from a schema change).
+        init(from d: Decoder) throws {
+            let c = try d.container(keyedBy: CodingKeys.self)
+            version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
+            hosts = (try? c.decode([Lossy<ForkHost>].self, forKey: .hosts))?.compactMap(\.value) ?? []
+            tabs = (try? c.decode([Lossy<TabModel>].self, forKey: .tabs))?.compactMap(\.value) ?? []
+            activeTabID = try c.decodeIfPresent(TabModel.ID.self, forKey: .activeTabID)
+        }
+    }
+
+    /// Per-element error sink so one bad array entry doesn't poison its siblings.
+    private struct Lossy<T: Decodable>: Decodable {
+        let value: T?
+        init(from d: Decoder) throws { value = try? T(from: d) }
     }
 
     private let url: URL
