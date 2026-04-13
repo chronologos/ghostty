@@ -17,11 +17,11 @@ struct SplitPickerView: View {
         name.isEmpty || SessionRef(hostID: host.id, name: name).isValid
     }
 
-    private var items: [(name: String, external: Bool)] {
+    private var items: [ZmxAdapter.ListEntry] {
         guard let r = recents else { return [] }
-        let all = r.managed.map { ($0, false) } + r.external.map { ($0, true) }
+        let all = r.managed + r.external
         guard !name.isEmpty else { return all }
-        return all.filter { $0.0.localizedCaseInsensitiveContains(name) }
+        return all.filter { $0.name.localizedCaseInsensitiveContains(name) }
     }
 
     var body: some View {
@@ -60,8 +60,8 @@ struct SplitPickerView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(items.enumerated()), id: \.offset) { i, item in
-                            row(i, item.name, external: item.external)
+                        ForEach(Array(items.enumerated()), id: \.offset) { i, e in
+                            row(i, e)
                         }
                     }
                 }
@@ -70,14 +70,12 @@ struct SplitPickerView: View {
         }
     }
 
-    private func row(_ i: Int, _ n: String, external: Bool) -> some View {
-        Button { submit(n, external: external) } label: {
+    private func row(_ i: Int, _ e: ZmxAdapter.ListEntry) -> some View {
+        Button { submit(e.name, external: e.external) } label: {
             HStack {
-                Text(n).font(.system(size: 12))
+                Text(e.name).font(.system(size: 12))
                 Spacer()
-                if external {
-                    Text("ext").font(.system(size: 9)).foregroundStyle(.secondary)
-                }
+                SessionMetaLabel(entry: e)
             }
             .padding(.horizontal, 6).padding(.vertical, 3)
             .background(sel == i ? Color.accentColor.opacity(0.25) : .clear,
