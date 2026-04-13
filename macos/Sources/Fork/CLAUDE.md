@@ -74,13 +74,11 @@ Fork/
   Do registry seeding in `newWindow()` after init returns, never in `windowDidLoad`.
 - **`@Published.sink` without a scheduler fires synchronously** inside the property setter.
   Use `.receive(on: DispatchQueue.main)` so `bind()` runs before `persistActive` projects.
-- **Split-prompt redraw**: two independent triggers, both interleave with zmx's
-  SIGWINCH round-trip. (1) `refs` is not `@Published` — `bind()` during split
-  shouldn't invalidate the sidebar same-tick. (2) `completeSplit` does the split
-  *before* `endSheet` — dismissing first regains key on the parent window,
-  whose `focusDidChange(true)` writes `\e[I` to the pty *between* the layout
-  pass and the resize ioctl. The terminal hosting view is also pinned to
-  `terminalContent.leading + const` (not `sidebar.trailingAnchor`) as defense.
+- **Split-prompt redraw** (resolved, zmx-side): old pane's prompt vanished after
+  ⌘D because zig stdlib's `posix.poll` auto-retries on EINTR — zmx's SIGWINCH
+  handler set its flag but the client loop never woke to check it. Fixed in zmx
+  via self-pipe. None of the Swift-side ordering mattered; the prior "fixes"
+  here (split-before-endSheet, `refs` un-@Published) were timing coincidences.
   Debug toggles: `GHOSTTY_FORK_NO_SIDEBAR`, `GHOSTTY_FORK_NO_PICKER`,
   `GHOSTTY_FORK_NO_ZMX`.
 - **Sheet ⌘V**: nil-targeted menu actions walk *past* the sheet to
