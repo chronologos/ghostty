@@ -95,16 +95,12 @@ struct NewSessionView: View {
             List {
                 if !recents.managed.isEmpty {
                     Section("Recent") {
-                        ForEach(recents.managed, id: \.self) { n in
-                            Button(n) { submit(name: n) }.buttonStyle(.plain)
-                        }
+                        ForEach(recents.managed, id: \.name) { recentRow($0) }
                     }
                 }
                 if !recents.external.isEmpty {
                     Section("Other zmx sessions") {
-                        ForEach(recents.external, id: \.self) { n in
-                            Button(n) { submit(name: n, external: true) }.buttonStyle(.plain)
-                        }
+                        ForEach(recents.external, id: \.name) { recentRow($0) }
                     }
                 }
             }
@@ -117,6 +113,17 @@ struct NewSessionView: View {
             ProgressView().controlSize(.small)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    private func recentRow(_ e: ZmxAdapter.ListEntry) -> some View {
+        Button { submit(name: e.name, external: e.external) } label: {
+            HStack {
+                Text(e.name)
+                Spacer()
+                SessionMetaLabel(entry: e)
+            }
+        }
+        .buttonStyle(.plain)
     }
 
     private func submit(name: String?, external: Bool = false) {
