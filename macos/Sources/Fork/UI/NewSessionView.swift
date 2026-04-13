@@ -48,7 +48,9 @@ struct NewSessionView: View {
         .task(id: hostID) {
             recents = nil
             guard let h = registry.host(id: hostID) else { return }
-            recents = await ZmxAdapter.list(host: h)
+            let r = await ZmxAdapter.list(host: h)
+            guard !Task.isCancelled else { return }
+            recents = r
         }
     }
 

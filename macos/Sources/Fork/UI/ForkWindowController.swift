@@ -329,7 +329,7 @@ final class ForkWindowController: TerminalController {
 
         if ForkBootstrap.noSidebar {
             $surfaceTree
-                .receive(on: DispatchQueue.main)
+                .debounce(for: .milliseconds(80), scheduler: DispatchQueue.main)
                 .sink { [weak self] tree in self?.persistActive(tree) }
                 .store(in: &cancellables)
             installNavMonitor()
@@ -383,7 +383,7 @@ final class ForkWindowController: TerminalController {
         sidebarReveal = reveal
 
         $surfaceTree
-            .receive(on: DispatchQueue.main)
+            .debounce(for: .milliseconds(80), scheduler: DispatchQueue.main)
             .sink { [weak self] tree in self?.persistActive(tree) }
             .store(in: &cancellables)
         registry.objectWillChange
@@ -529,7 +529,8 @@ final class ForkWindowController: TerminalController {
                 registry.bind(surface: v.id, to: r)
                 return .leaf(view: v)
             case .split(let h, let ratio, let a, let b):
-                guard let na = revive(a), let nb = revive(b) else { return revive(a) ?? revive(b) }
+                let na = revive(a), nb = revive(b)
+                guard let na, let nb else { return na ?? nb }
                 return .split(.init(direction: h ? .horizontal : .vertical, ratio: ratio, left: na, right: nb))
             }
         }
