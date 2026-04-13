@@ -8,8 +8,15 @@ import os
 enum ForkBootstrap {
     static let logger = Logger(subsystem: "com.mitchellh.ghostty", category: "fork")
 
-    /// Master switch. PR1: opt-in via env var so upstream behavior is the default.
-    static let enabled: Bool = ProcessInfo.processInfo.environment["GHOSTTY_FORK"] == "1"
+    /// Master switch. Debug builds: opt-in via `GHOSTTY_FORK=1`. `fork-release.sh` passes
+    /// `-DGHOSTTY_FORK_DEFAULT` so release builds are opt-out via `GHOSTTY_FORK=0`.
+    static let enabled: Bool = {
+        #if GHOSTTY_FORK_DEFAULT
+        return ProcessInfo.processInfo.environment["GHOSTTY_FORK"] != "0"
+        #else
+        return ProcessInfo.processInfo.environment["GHOSTTY_FORK"] == "1"
+        #endif
+    }()
 
     /// Debug toggles for bisecting layout/zmx issues.
     static let noSidebar: Bool = ProcessInfo.processInfo.environment["GHOSTTY_FORK_NO_SIDEBAR"] == "1"
@@ -21,6 +28,12 @@ enum ForkBootstrap {
     static func install(ghostty: Ghostty.App) {
         guard enabled else { return }
         logger.info("fork enabled")
+        let clay = NSColor(red: 0xD9/255, green: 0x77/255, blue: 0x57/255, alpha: 1)
+        NSApp.applicationIconImage = ColorizedGhosttyIcon(
+            screenColors: [clay, clay.blended(withFraction: 0.4, of: .black) ?? clay],
+            ghostColor: .white,
+            frame: .aluminum
+        ).makeImage(in: .main)
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
         ) { _ in SessionRegistry.shared.saveNow() }
