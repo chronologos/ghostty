@@ -252,12 +252,6 @@ final class ForkWindowController: TerminalController {
         }
     }
 
-    /// First live surface in the active tree bound to `ref` (for minimap title display;
-    /// non-unique refs return an arbitrary match).
-    func surface(for ref: SessionRef) -> Ghostty.SurfaceView? {
-        surfaceTree.first { registry.refs[$0.id] == ref }
-    }
-
     func gotoHost(index n: Int) {
         guard registry.hosts.indices.contains(n - 1) else { return }
         let host = registry.hosts[n - 1]
@@ -433,22 +427,45 @@ final class ForkWindowController: TerminalController {
 
     // MARK: Tab management
 
-    func activate(tab id: TabModel.ID) {
+    func activate(tab id: TabModel.ID, paneIndex: Int? = nil) {
         let current = registry.activeTabID
-        guard current != id else { return }
-        if let current {
-            liveTabs[current] = surfaceTree
-            registry.setPersistedTree(project(surfaceTree.root), for: current)
+        if current != id {
+            if let current {
+                liveTabs[current] = surfaceTree
+                registry.setPersistedTree(project(surfaceTree.root), for: current)
+            }
+            // Upstream's undo closures capture a *tree*, not a tab. Clear on every real
+            // switch — including `current == nil`, which closeForkTab/removeHost produce.
+            undoManager?.removeAllActions(withTarget: self)
+            registry.setActive(tab: id)
         }
-        // Upstream's undo closures capture a *tree*, not a tab. Clear on every real
-        // switch — including `current == nil`, which closeForkTab/removeHost produce.
-        undoManager?.removeAllActions(withTarget: self)
-        registry.setActive(tab: id)
+        // Relaunch arrives with `current == id` (registry loads activeTabID from disk) but
+        // no `liveTabs` entry — must still rebuild, or `persistActive(.init())` wipes it.
         if let tree = liveTabs[id] {
-            surfaceTree = tree
+            if current != id { surfaceTree = tree }
         } else {
             rebuildTree(for: id)
         }
+        // `surfaceTree.leaves()` and `PersistedTree.leafRefs` are both depth-first-left,
+        // so the sidebar's pane-row offset addresses the matching live SurfaceView.
+        // Write the highlight index in the same tick as `setActive` above; the async
+        // focus roundtrip lands a frame later and would briefly show the prior tab's index.
+        registry.setFocusedPane(index: paneIndex)
+        guard let paneIndex else { return }
+        let leaves = Array(surfaceTree)
+        guard leaves.indices.contains(paneIndex) else { return }
+        let target = leaves[paneIndex]
+        focusedSurface = target
+        DispatchQueue.main.async { [weak self] in
+            self?.window?.makeFirstResponder(target)
+        }
+    }
+
+    override func focusedSurfaceDidChange(to: Ghostty.SurfaceView?) {
+        super.focusedSurfaceDidChange(to: to)
+        registry.setFocusedPane(index: to.flatMap { v in
+            Array(surfaceTree).firstIndex { $0 === v }
+        })
     }
 
     func newForkTab(intent: NewSessionIntent) {

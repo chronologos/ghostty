@@ -129,56 +129,83 @@ struct SidebarView: View {
         }
     }
 
-    // MARK: Tab row
+    // MARK: Tab → pane rows
+    // Single-pane: one plain title row. Multi-pane: one row per leaf session,
+    // grouped by a spine + elbow connector; tab title is not shown.
 
-    @ViewBuilder
     private func tabRow(_ tab: TabModel) -> some View {
         let active = tab.id == registry.activeTabID
-        let renaming = renamingTab == tab.id
-        let panes = tab.tree.paneCount
-        HStack(spacing: 8) {
-            Rectangle().fill(active ? clay : .clear).frame(width: 3)
-            if renaming {
-                TextField("", text: $renameText, onCommit: commitRename)
-                    .textFieldStyle(.plain).font(.system(size: 12))
-                    .onExitCommand { renamingTab = nil }
+        let refs = tab.tree.leafRefs
+        return Group {
+            if refs.count <= 1 {
+                paneRow(tab, index: 0, label: tab.title, spine: nil, head: true, active: active)
             } else {
-                Text(tab.title).font(.system(size: 12)).lineLimit(1)
-                    .foregroundStyle(active ? .primary : .secondary)
+                VStack(spacing: 0) {
+                    ForEach(Array(refs.enumerated()), id: \.offset) { i, ref in
+                        paneRow(tab, index: i, label: ref.name,
+                                spine: (i == 0, i == refs.count - 1),
+                                head: i == 0, active: active)
+                    }
+                }
             }
-            Spacer()
-            Button { controller?.kickRedraw(tabID: tab.id) } label: {
-                Image(systemName: "arrow.clockwise").font(.system(size: 9))
-            }
-            .buttonStyle(.plain).opacity(active ? 0.5 : 0).allowsHitTesting(active)
-            .help("Force redraw all panes")
-            Button { controller?.closeForkTab(tab.id) } label: {
-                Image(systemName: "xmark").font(.system(size: 9))
-            }
-            .buttonStyle(.plain).opacity(active ? 0.6 : 0).allowsHitTesting(active)
         }
-        .padding(.trailing, 12).frame(height: 30)
-        .background(active ? clay.opacity(0.14) : .clear,
-                    in: RoundedRectangle(cornerRadius: 5))
-        .padding(.trailing, 6)
-        .contentShape(Rectangle())
         .onDrag {
             draggingTab = tab.id
             return NSItemProvider(object: tab.id.uuidString as NSString)
         }
         .onDrop(of: [.text], delegate: TabDropDelegate(
             target: tab.id, dragging: $draggingTab, registry: registry))
-        .onTapGesture { controller?.activate(tab: tab.id) }
-        .simultaneousGesture(TapGesture(count: 2).onEnded { beginRename(tab) })
+    }
+
+    private func paneRow(_ tab: TabModel, index: Int, label: String,
+                         spine: (first: Bool, last: Bool)?, head: Bool,
+                         active: Bool) -> some View {
+        let renaming = head && renamingTab == tab.id
+        return HStack(spacing: 0) {
+            Group {
+                if let spine {
+                    Spine(first: spine.first, last: spine.last)
+                        .stroke(active ? clay : Color.secondary.opacity(0.3), lineWidth: 1)
+                } else {
+                    Color.clear
+                }
+            }
+            .frame(width: 14)
+            if renaming {
+                TextField("", text: $renameText, onCommit: commitRename)
+                    .textFieldStyle(.plain).font(.system(size: 12))
+                    .onExitCommand { renamingTab = nil }
+            } else {
+                Text(label).font(.system(size: 12)).lineLimit(1)
+                    .foregroundStyle(active ? .primary : .secondary)
+            }
+            Spacer()
+            if head {
+                Button { controller?.kickRedraw(tabID: tab.id) } label: {
+                    Image(systemName: "arrow.clockwise").font(.system(size: 9))
+                }
+                .buttonStyle(.plain).opacity(active ? 0.5 : 0).allowsHitTesting(active)
+                .help("Force redraw all panes")
+                Button { controller?.closeForkTab(tab.id) } label: {
+                    Image(systemName: "xmark").font(.system(size: 9))
+                }
+                .buttonStyle(.plain).opacity(active ? 0.6 : 0).allowsHitTesting(active)
+            }
+        }
+        .padding(.trailing, 12).frame(height: 28)
+        .background(active && (registry.focusedPaneIndex.map { $0 == index } ?? head)
+                        ? clay.opacity(0.14) : .clear,
+                    in: RoundedRectangle(cornerRadius: 5))
+        .contentShape(Rectangle())
+        .onTapGesture { controller?.activate(tab: tab.id, paneIndex: index) }
+        .simultaneousGesture(TapGesture(count: 2).onEnded {
+            if head { beginRename(tab) }
+        })
         .contextMenu {
-            Button("Rename…") { beginRename(tab) }
+            if head { Button("Rename…") { beginRename(tab) } }
             Button("Close Tab") { controller?.closeForkTab(tab.id) }
             Divider()
             Button("Kill Session…", role: .destructive) { controller?.confirmKill(tab) }
-        }
-        if active && panes > 1 {
-            MinimapView(tree: tab.tree, surfaceFor: { controller?.surface(for: $0) })
-                .padding(.leading, 12).padding(.trailing, 12).padding(.bottom, 4)
         }
     }
 
@@ -194,6 +221,20 @@ struct SidebarView: View {
             registry.renameTab(id, to: renameText)
         }
         renamingTab = nil
+    }
+}
+
+private struct Spine: Shape {
+    var first: Bool
+    var last: Bool
+    func path(in r: CGRect) -> Path {
+        var p = Path()
+        let x = r.minX + 4
+        p.move(to: .init(x: x, y: first ? r.midY : r.minY))
+        p.addLine(to: .init(x: x, y: last ? r.midY : r.maxY))
+        p.move(to: .init(x: x, y: r.midY))
+        p.addLine(to: .init(x: r.maxX - 2, y: r.midY))
+        return p
     }
 }
 
