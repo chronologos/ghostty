@@ -11,6 +11,9 @@ final class SessionRegistry: ObservableObject {
     @Published private(set) var hosts: [ForkHost]
     @Published private(set) var tabs: [TabModel]
     @Published private(set) var activeTabID: TabModel.ID?
+    /// Depth-first leaf index of the focused pane within the active tab. Controller-owned
+    /// (`activate(tab:)` writes optimistically, `focusedSurfaceDidChange` confirms); not persisted.
+    @Published private(set) var focusedPaneIndex: Int?
 
     /// Not @Published: pure surface→session bookkeeping the sidebar never renders
     /// directly. `isConnected()` reads it, but every flow that mutates `refs` also
@@ -97,6 +100,7 @@ final class SessionRegistry: ObservableObject {
     }
 
     func setActive(tab id: TabModel.ID) { activeTabID = id }
+    func setFocusedPane(index: Int?) { if focusedPaneIndex != index { focusedPaneIndex = index } }
 
     func bind(surface: UUID, to ref: SessionRef) { refs[surface] = ref }
     func unbind(surface: UUID) { refs.removeValue(forKey: surface) }
