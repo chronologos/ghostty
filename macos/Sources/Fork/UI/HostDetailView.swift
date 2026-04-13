@@ -63,23 +63,23 @@ struct HostDetailView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             List {
-                ForEach(sessions.managed, id: \.self) { sessionRow($0, external: false) }
-                ForEach(sessions.external, id: \.self) { sessionRow($0, external: true) }
+                ForEach(sessions.managed, id: \.name) { sessionRow($0) }
+                ForEach(sessions.external, id: \.name) { sessionRow($0) }
             }
             .listStyle(.plain)
         }
     }
 
-    private func sessionRow(_ name: String, external: Bool) -> some View {
+    private func sessionRow(_ e: ZmxAdapter.ListEntry) -> some View {
         HStack {
-            Text(name).font(.system(size: 12, design: .monospaced))
-            if external { Text("external").font(.caption2).foregroundStyle(.secondary) }
+            Text(e.name).font(.system(size: 12, design: .monospaced))
             Spacer()
+            SessionMetaLabel(entry: e)
             Button("Kill") {
-                if external { sessions.external.removeAll { $0 == name } }
-                else { sessions.managed.removeAll { $0 == name } }
+                if e.external { sessions.external.removeAll { $0.name == e.name } }
+                else { sessions.managed.removeAll { $0.name == e.name } }
                 Task {
-                    let ref = SessionRef(hostID: host.id, name: name, external: external)
+                    let ref = SessionRef(hostID: host.id, name: e.name, external: e.external)
                     try? await ZmxAdapter.kill(host: host, ref: ref)
                 }
             }
