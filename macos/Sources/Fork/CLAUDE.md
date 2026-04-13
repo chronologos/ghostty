@@ -3,6 +3,17 @@
 Left sidebar with host-grouped tabs; every tab/split is a `zmx` session (local or ssh).
 See `do_not_commit/ghostty-fork/SPEC.md` for the full spec.
 
+## Principles
+
+1. **Upstream-rebaseable.** The diff against `ghostty-org/ghostty` is exactly two
+   `// [fork]` seam lines plus `Fork/**`. `jj rebase -b fork -d main@upstream` must
+   stay mechanical — see [seam policy](#upstream-seam-policy).
+2. **zmx-native.** Every pane is `zmx attach <session>`; there is no non-zmx mode.
+   Tabs, splits, remote hosts, and crash-survival all reduce to session names.
+3. **Additive, not parallel.** Subclass + side-registry. Never reimplement what
+   `TerminalController` already does — the
+   [one architectural rule](#the-one-architectural-rule) is the load-bearing case.
+
 ## Build & test
 
 ```sh
@@ -63,6 +74,7 @@ Fork/
     MinimapView.swift          read-only PersistedTree visualizer under active tab
     NewSessionView.swift       ⌘T sheet
     SplitPickerView.swift      ⌘D picker (new vs attach-existing)
+    SessionMetaLabel.swift     shared row trailer: client-count + age
     NewHostView.swift          add-host sheet
     ForkSheetPanel.swift       NSWindow.performKeyEquivalent → ⌘V/C/X/A/Z to firstResponder
 ```
@@ -88,6 +100,12 @@ Fork/
   `ForkSheetPanel.performKeyEquivalent` intercepts before the menu.
 - **`activeTabID` is controller-owned**: registry's `newTab`/`removeTab` mutate the list,
   never the cursor. Only `ForkWindowController.activate(tab:)` calls `setActive`.
+- **Undo is window-scoped, tabs aren't**: `BaseTerminalController.replaceSurfaceTree`
+  registers `{ target.surfaceTree = oldTree }` with `withTarget: self`. The closure
+  captures a *tree*, not a tab id, so ⌘Z after a sidebar tab switch would write the
+  previous tab's tree under the new `activeTabID` (then `persistActive` makes it
+  permanent). `activate(tab:)` clears `undoManager.removeAllActions(withTarget: self)`
+  on switch — same idiom upstream uses at `BaseTerminalController.swift:226`.
 - **iOS target shares `Sources/`** via the synchronized group. Every file under `Fork/` must
   be wrapped in `#if os(macOS) … #endif`.
 - **Codable defaults aren't optional**: adding a non-Optional field with a default to a

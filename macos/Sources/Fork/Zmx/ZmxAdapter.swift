@@ -23,25 +23,53 @@ enum ZmxAdapter {
         return c
     }
 
-    struct ListResult {
-        var managed: [String] = []
-        var external: [String] = []
+    struct ListEntry: Hashable {
+        var name: String
+        var clients: Int
+        var created: Date
+        var external: Bool
     }
 
-    /// `zmx list --short` partitioned into fork-managed (prefix-stripped) and external names.
+    struct ListResult {
+        var managed: [ListEntry] = []
+        var external: [ListEntry] = []
+    }
+
+    /// `zmx list` (full k=v form) partitioned into fork-managed (prefix-stripped) and external.
+    /// Dead-socket lines (`err=…`) are dropped.
     static func list(host: ForkHost, timeout: TimeInterval = 5) async -> ListResult {
-        let argv = host.transport.controlArgv(["zmx", "list", "--short"])
+        let argv = host.transport.controlArgv(["zmx", "list"])
         guard let out = try? await run(argv: argv, timeout: timeout) else { return .init() }
         let prefix = "\(host.id)-"
         var r = ListResult()
-        for line in out.split(separator: "\n").map(String.init) {
-            if line.hasPrefix(prefix) {
-                r.managed.append(String(line.dropFirst(prefix.count)))
+        for line in out.split(separator: "\n") {
+            guard var e = parse(line: line) else { continue }
+            if e.name.hasPrefix(prefix) {
+                e.name = String(e.name.dropFirst(prefix.count))
+                e.external = false
+                r.managed.append(e)
             } else {
-                r.external.append(line)
+                r.external.append(e)
             }
         }
         return r
+    }
+
+    /// zmx util.zig:539 — `[→ |  ]name=…\tpid=…\tclients=…\tcreated=…[\t…]`.
+    /// `created` is unix seconds (the `ns` comment at main.zig:359 is stale).
+    static func parse(line: Substring) -> ListEntry? {
+        var kv: [Substring: Substring] = [:]
+        for tok in line.drop(while: { $0 == " " || $0 == "→" }).split(separator: "\t") {
+            guard let eq = tok.firstIndex(of: "=") else { continue }
+            kv[tok[..<eq]] = tok[tok.index(after: eq)...]
+        }
+        guard kv["err"] == nil,
+              let name = kv["name"],
+              let clients = kv["clients"].flatMap({ Int($0) }),
+              let created = kv["created"].flatMap({ TimeInterval($0) })
+        else { return nil }
+        return .init(name: String(name), clients: clients,
+                     created: Date(timeIntervalSince1970: created), external: true)
     }
 
     /// Shell command for a detached-placeholder surface: shows a prompt, waits for ⏎,
@@ -68,7 +96,7 @@ enum ZmxAdapter {
         p.arguments = argv
         let pipe = Pipe()
         p.standardOutput = pipe
-        p.standardError = Pipe()
+        p.standardError = FileHandle.nullDevice
         try p.run()
         // `onCancel` + inner `defer` ensure the process is killed on parent-task cancellation
         // *and* on timeout — otherwise the synchronous reader child pins a cooperative thread.

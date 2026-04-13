@@ -12,10 +12,11 @@ struct NewHostView: View {
     let onDone: () -> Void
 
     private var target: ForkHost.SSHTarget? {
-        let parts = connection.split(separator: "@", maxSplits: 1).map(String.init)
+        let s = connection.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = s.split(separator: "@", maxSplits: 1).map(String.init)
         let t: ForkHost.SSHTarget = parts.count == 2
             ? .init(user: parts[0], host: parts[1])
-            : .init(user: nil, host: connection)
+            : .init(user: nil, host: s)
         return t.isValid ? t : nil
     }
 
