@@ -2,6 +2,12 @@
 import Foundation
 import CryptoKit
 
+/// Shell-safety identifier check. CLAUDE.md §Security: only validated names reach `Transport.wrap`.
+private let identPattern = try! NSRegularExpression(pattern: #"^[A-Za-z0-9._-]+$"#)
+func isValidIdent(_ s: String) -> Bool {
+    identPattern.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil
+}
+
 /// A machine zmx sessions can run on.
 struct ForkHost: Codable, Identifiable, Hashable {
     let id: String
@@ -11,6 +17,21 @@ struct ForkHost: Codable, Identifiable, Hashable {
     var accentHue: Double?
 
     static let local = ForkHost(id: "local", label: "localhost", transport: .local)
+
+    init(id: String, label: String, transport: Transport,
+         expanded: Bool = true, accentHue: Double? = nil) {
+        self.id = id; self.label = label; self.transport = transport
+        self.expanded = expanded; self.accentHue = accentHue
+    }
+
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        label = try c.decode(String.self, forKey: .label)
+        transport = try c.decode(Transport.self, forKey: .transport)
+        expanded = try c.decodeIfPresent(Bool.self, forKey: .expanded) ?? true
+        accentHue = try c.decodeIfPresent(Double.self, forKey: .accentHue)
+    }
 
     enum Transport: Codable, Hashable {
         case local
@@ -23,12 +44,7 @@ struct ForkHost: Codable, Identifiable, Hashable {
         var user: String?
         var host: String
 
-        private static let pattern = try! NSRegularExpression(pattern: #"^[A-Za-z0-9._-]+$"#)
-        var isValid: Bool {
-            let okHost = Self.pattern.firstMatch(in: host, range: NSRange(host.startIndex..., in: host)) != nil
-            let okUser = user.map { Self.pattern.firstMatch(in: $0, range: NSRange($0.startIndex..., in: $0)) != nil } ?? true
-            return okHost && okUser
-        }
+        var isValid: Bool { isValidIdent(host) && (user.map(isValidIdent) ?? true) }
 
         var connectionString: String { user.map { "\($0)@\(host)" } ?? host }
     }
@@ -57,10 +73,7 @@ struct SessionRef: Codable, Hashable {
         external = try c.decodeIfPresent(Bool.self, forKey: .external) ?? false
     }
 
-    private static let pattern = try! NSRegularExpression(pattern: #"^[A-Za-z0-9._-]+$"#)
-    var isValid: Bool {
-        Self.pattern.firstMatch(in: name, range: NSRange(name.startIndex..., in: name)) != nil
-    }
+    var isValid: Bool { isValidIdent(name) }
 }
 
 /// A sidebar tab. The live `SplitTree<SurfaceView>` lives on the controller; this holds
