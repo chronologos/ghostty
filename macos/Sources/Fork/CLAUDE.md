@@ -73,7 +73,9 @@ Fork/
   `surfaceTree` → `didSet` → `surfaceTreeDidChange` reads `self.window` → nib lazy-loads.
   Do registry seeding in `newWindow()` after init returns, never in `windowDidLoad`.
 - **`@Published.sink` without a scheduler fires synchronously** inside the property setter.
-  Use `.receive(on: DispatchQueue.main)` so `bind()` runs before `persistActive` projects.
+  `$surfaceTree` uses `.debounce(80ms, .main)` — async delivery so `bind()` completes before
+  `persistActive` projects, *and* divider-drag (per-frame `splitDidResize`) doesn't storm
+  the sidebar.
 - **Split-prompt redraw** (resolved, zmx-side): old pane's prompt vanished after
   ⌘D because zig stdlib's `posix.poll` auto-retries on EINTR — zmx's SIGWINCH
   handler set its flag but the client loop never woke to check it. Fixed in zmx

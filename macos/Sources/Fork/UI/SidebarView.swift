@@ -90,7 +90,7 @@ struct SidebarView: View {
                     .rotationEffect(.degrees(host.expanded ? 90 : 0))
                     .frame(width: 10)
                 Circle()
-                    .fill(connected ? accent(for: host) : Color.secondary.opacity(0.4))
+                    .fill(connected ? ForkHost.accent(for: host) : Color.secondary.opacity(0.4))
                     .frame(width: 7, height: 7)
                 Text(host.label)
                     .font(.system(size: 12, weight: .medium, design: .monospaced))
@@ -187,8 +187,6 @@ struct SidebarView: View {
         }
         renamingTab = nil
     }
-
-    private func accent(for host: ForkHost) -> Color { ForkHost.accent(for: host) }
 }
 
 extension ForkHost {
