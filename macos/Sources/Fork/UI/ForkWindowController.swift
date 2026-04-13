@@ -150,9 +150,6 @@ final class ForkWindowController: TerminalController {
                 default: return ev
                 }
             }
-            if mods == .command, ev.charactersIgnoringModifiers == "\\" {
-                self.toggleSidebar(); return nil
-            }
             // ⌘[/⌘] are upstream's `goto_split:previous/next` (Config.zig:7016).
             // Sidebar tab nav uses ⌘⇧[/⌘⇧] (upstream's `previous_tab`/`next_tab`).
             guard mods == [.command, .shift] else { return ev }
@@ -167,7 +164,7 @@ final class ForkWindowController: TerminalController {
             name: Ghostty.Notification.ghosttyCloseSurface, object: nil)
     }
 
-    // MARK: Sidebar visibility (⌘\)
+    // MARK: Sidebar visibility
 
     private static let sidebarWidth: CGFloat = 248
     private weak var sidebarHost: NSView?
@@ -466,6 +463,9 @@ final class ForkWindowController: TerminalController {
         registry.setFocusedPane(index: to.flatMap { v in
             Array(surfaceTree).firstIndex { $0 === v }
         })
+        if let v = to, let tab = registry.activeTabID, let name = registry.refs[v.id]?.name {
+            registry.touchPane(tab: tab, name: name)
+        }
     }
 
     func newForkTab(intent: NewSessionIntent) {
@@ -508,12 +508,12 @@ final class ForkWindowController: TerminalController {
         guard sheetPanel == nil, let host = registry.activeHost else {
             return super.newSplit(at: oldView, direction: direction, baseConfig: config)
         }
+        let placeholder = registry.uniqueAutoName(derivedFrom: registry.refs[oldView.id]?.name)
         if ForkBootstrap.noPicker {
             return completeSplit(at: oldView, direction: direction, host: host,
-                                 ref: .init(hostID: host.id, name: registry.uniqueAutoName()))
+                                 ref: .init(hostID: host.id, name: placeholder))
         }
         pendingSplit = (oldView, direction)
-        let placeholder = registry.uniqueAutoName()
         presentSheet(size: .init(width: 280, height: 260)) { [weak self] in
             SplitPickerView(
                 host: host, placeholder: placeholder,
