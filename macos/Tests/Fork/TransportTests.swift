@@ -64,6 +64,19 @@ struct TransportTests {
         #expect(!SessionRef(hostID: "local", name: "a;b").isValid)
     }
 
+    // Mirrors zmx util.zig:590-602.
+    @Test(arguments: ["→ ", "  ", ""])
+    func parseListLine(prefix: String) {
+        let e = ZmxAdapter.parse(line: "\(prefix)name=dev\tpid=123\tclients=2\tcreated=1700000000"[...])
+        #expect(e?.name == "dev")
+        #expect(e?.clients == 2)
+        #expect(e?.created == Date(timeIntervalSince1970: 1700000000))
+    }
+
+    @Test func parseListLineErr() {
+        #expect(ZmxAdapter.parse(line: "  name=dead\terr=ConnectionRefused\tstatus=cleaning up") == nil)
+    }
+
     @Test func wireName() {
         let ref = SessionRef(hostID: "abcd1234", name: "shell-x")
         #expect(ZmxAdapter.wireName(ref) == "abcd1234-shell-x")

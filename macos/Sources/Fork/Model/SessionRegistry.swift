@@ -88,6 +88,14 @@ final class SessionRegistry: ObservableObject {
         if activeTabID == id { activeTabID = nil }
     }
 
+    func moveTab(_ id: TabModel.ID, before target: TabModel.ID) {
+        guard id != target,
+              let from = tabs.firstIndex(where: { $0.id == id }),
+              let to = tabs.firstIndex(where: { $0.id == target }),
+              tabs[from].hostID == tabs[to].hostID else { return }
+        tabs.move(fromOffsets: [from], toOffset: to > from ? to + 1 : to)
+    }
+
     func setActive(tab id: TabModel.ID) { activeTabID = id }
 
     func bind(surface: UUID, to ref: SessionRef) { refs[surface] = ref }
