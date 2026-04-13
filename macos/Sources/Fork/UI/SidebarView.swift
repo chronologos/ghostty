@@ -1,5 +1,6 @@
 #if os(macOS)
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Left sidebar: hosts as collapsible sections, tabs as rows (SPEC §9).
 struct SidebarView: View {
@@ -7,6 +8,7 @@ struct SidebarView: View {
     @EnvironmentObject private var registry: SessionRegistry
     @State private var renamingTab: TabModel.ID?
     @State private var renameText: String = ""
+    @State private var draggingTab: TabModel.ID?
 
     private let clay = Color(red: 0xD9/255, green: 0x77/255, blue: 0x57/255)
 
@@ -160,6 +162,12 @@ struct SidebarView: View {
                     in: RoundedRectangle(cornerRadius: 5))
         .padding(.trailing, 6)
         .contentShape(Rectangle())
+        .onDrag {
+            draggingTab = tab.id
+            return NSItemProvider(object: tab.id.uuidString as NSString)
+        }
+        .onDrop(of: [.text], delegate: TabDropDelegate(
+            target: tab.id, dragging: $draggingTab, registry: registry))
         .onTapGesture { controller?.activate(tab: tab.id) }
         .simultaneousGesture(TapGesture(count: 2).onEnded { beginRename(tab) })
         .contextMenu {
@@ -187,6 +195,21 @@ struct SidebarView: View {
         }
         renamingTab = nil
     }
+}
+
+private struct TabDropDelegate: DropDelegate {
+    let target: TabModel.ID
+    @Binding var dragging: TabModel.ID?
+    let registry: SessionRegistry
+
+    func dropEntered(info: DropInfo) {
+        guard let dragging, dragging != target else { return }
+        withAnimation(.easeInOut(duration: 0.15)) {
+            registry.moveTab(dragging, before: target)
+        }
+    }
+    func dropUpdated(info: DropInfo) -> DropProposal? { .init(operation: .move) }
+    func performDrop(info: DropInfo) -> Bool { dragging = nil; return true }
 }
 
 extension ForkHost {
