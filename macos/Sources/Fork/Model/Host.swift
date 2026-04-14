@@ -66,6 +66,11 @@ struct SessionRef: Codable, Hashable {
         self.hostID = hostID; self.name = name; self.external = external
     }
 
+    /// Per-tab dict key — `name` alone collides when an external session shadows a
+    /// tab-owned one with the same short name (zmx prefix is stripped). `@` is outside
+    /// the validated charset so old non-external keys are unchanged.
+    var key: String { external ? "@\(name)" : name }
+
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
         hostID = try c.decode(ForkHost.ID.self, forKey: .hostID)
@@ -78,6 +83,11 @@ struct SessionRef: Codable, Hashable {
 
 /// A sidebar tab. The live `SplitTree<SurfaceView>` lives on the controller; this holds
 /// only persistable shape (SPEC §6).
+struct PaneTag: Codable, Hashable {
+    var text: String
+    var hue: Double
+}
+
 struct TabModel: Codable, Identifiable, Hashable {
     let id: UUID
     var hostID: ForkHost.ID
@@ -88,6 +98,7 @@ struct TabModel: Codable, Identifiable, Hashable {
     /// User-set per-pane labels (⌘I / "Rename Pane…"), keyed by `SessionRef.name`. Shown in
     /// the sidebar over `surface.title`, which is per-`SurfaceView`-instance and lost on restart.
     var paneLabels: [String: String]
+    var paneTags: [String: PaneTag]
 
     init(id: UUID = UUID(), hostID: ForkHost.ID, title: String, tree: PersistedTree = .empty) {
         self.id = id
@@ -96,6 +107,7 @@ struct TabModel: Codable, Identifiable, Hashable {
         self.tree = tree
         self.lastActive = [:]
         self.paneLabels = [:]
+        self.paneTags = [:]
     }
 
     init(from d: Decoder) throws {
@@ -106,6 +118,7 @@ struct TabModel: Codable, Identifiable, Hashable {
         tree = try c.decode(PersistedTree.self, forKey: .tree)
         lastActive = try c.decodeIfPresent([String: Date].self, forKey: .lastActive) ?? [:]
         paneLabels = try c.decodeIfPresent([String: String].self, forKey: .paneLabels) ?? [:]
+        paneTags = try c.decodeIfPresent([String: PaneTag].self, forKey: .paneTags) ?? [:]
     }
 }
 
