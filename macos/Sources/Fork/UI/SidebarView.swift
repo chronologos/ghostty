@@ -6,9 +6,9 @@ import UniformTypeIdentifiers
 struct SidebarView: View {
     weak var controller: ForkWindowController?
     @EnvironmentObject private var registry: SessionRegistry
-    @State private var renamingTab: TabModel.ID?
     @State private var renameText: String = ""
     @State private var draggingTab: TabModel.ID?
+    @State private var hoveredPane: (TabModel.ID, Int)?
     @FocusState private var renameFieldFocused: Bool
 
     private let clay = Color(red: 0xD9/255, green: 0x77/255, blue: 0x57/255)
@@ -60,6 +60,7 @@ struct SidebarView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .modifier(HoverHighlight())
     }
 
     private func kbd(_ keys: [String]) -> some View {
@@ -82,7 +83,9 @@ struct SidebarView: View {
         let tabs = registry.tabs(on: host.id)
         let connected = registry.isConnected(host.id)
 
-        Button { registry.setExpanded(host.id, !host.expanded) } label: {
+        Button {
+            withAnimation(.snappy(duration: 0.15)) { registry.setExpanded(host.id, !host.expanded) }
+        } label: {
             HStack(spacing: 8) {
                 Image(systemName: "chevron.right")
                     .font(.system(size: 9, weight: .semibold))
@@ -98,10 +101,12 @@ struct SidebarView: View {
                 Spacer()
                 Text("\(tabs.count)").font(.system(size: 10)).foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 12).padding(.vertical, 6)
+            .padding(.horizontal, 4).padding(.vertical, 6)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .modifier(HoverHighlight())
+        .padding(.horizontal, 8)
         .contextMenu {
             Button("New Session on \(host.label)…") {
                 controller?.showSessionPicker(on: host)
@@ -124,34 +129,29 @@ struct SidebarView: View {
             .overlay(RoundedRectangle(cornerRadius: 6)
                 .stroke(Color.secondary.opacity(0.15), lineWidth: 0.5))
             .padding(.horizontal, 8)
+            .transition(.opacity)
         }
     }
 
     // MARK: Tab → pane rows
-    // Head row always shows `tab.title`; if the underlying session name differs
-    // (i.e. renamed), it appears as a subtitle. Multi-pane tabs add one row per
-    // extra leaf session, grouped by a spine + elbow connector.
+    // Each row's label is `paneLabels[ref.name]` (persisted, ⌘I) › `surface.title` (OSC, live)
+    // › `ref.name`, with `ref.name` as subtitle when the label differs. `tab.title` is a heading
+    // above the group, shown only when it diverges from the first session name (⌘⇧I edits it).
+    // Cold-restored tabs have no live surfaces until first activated.
 
     private func tabRow(_ tab: TabModel) -> some View {
         let active = tab.id == registry.activeTabID
         let refs = tab.tree.leafRefs
-        let root = refs.first?.name
-        return Group {
-            if refs.count <= 1 {
-                paneRow(tab, index: 0, label: tab.title,
-                        subtitle: root != tab.title ? root : nil, ageKey: root,
-                        spine: nil, head: true, active: active)
-            } else {
-                VStack(spacing: 0) {
-                    ForEach(Array(refs.enumerated()), id: \.offset) { i, ref in
-                        paneRow(tab, index: i,
-                                label: i == 0 ? tab.title : ref.name,
-                                subtitle: i == 0 && tab.title != ref.name ? ref.name : nil,
-                                ageKey: ref.name,
-                                spine: (i == 0, i == refs.count - 1),
-                                head: i == 0, active: active)
-                    }
-                }
+        let surfaces = controller?.surfaces(for: tab.id) ?? []
+        let renaming = registry.renaming == .tab(tab.id)
+        let heading = renaming || tab.title != refs.first?.name
+        return VStack(alignment: .leading, spacing: 0) {
+            if heading { tabHeading(tab, renaming: renaming, active: active) }
+            ForEach(Array(refs.enumerated()), id: \.offset) { i, ref in
+                paneRow(tab, index: i, ref: ref,
+                        surface: i < surfaces.count ? surfaces[i] : nil,
+                        spine: refs.count > 1 ? (i == 0, i == refs.count - 1) : nil,
+                        active: active)
             }
         }
         .onDrag {
@@ -162,47 +162,59 @@ struct SidebarView: View {
             target: tab.id, dragging: $draggingTab, registry: registry))
     }
 
-    private func paneRow(_ tab: TabModel, index: Int, label: String, subtitle: String?,
-                         ageKey: String?, spine: (first: Bool, last: Bool)?, head: Bool,
-                         active: Bool) -> some View {
-        let renaming = head && renamingTab == tab.id
-        let focused = active && (registry.focusedPaneIndex.map { $0 == index } ?? head)
-        let age = focused ? nil : ageKey.flatMap { tab.lastActive[$0] }
+    private func tabHeading(_ tab: TabModel, renaming: Bool, active: Bool) -> some View {
+        HStack(spacing: 0) {
+            Color.clear.frame(width: 14)
+            if renaming {
+                renameField(seed: tab.title, font: .system(size: 10, weight: .semibold))
+            } else {
+                Text(tab.title.uppercased())
+                    .font(.system(size: 9, weight: .semibold)).kerning(0.6).lineLimit(1)
+                    .foregroundStyle(clay.opacity(active ? 1 : 0.6))
+            }
+            Spacer()
+        }
+        .padding(.top, 4).padding(.trailing, 12).frame(height: 20)
+        .contentShape(Rectangle())
+        .onTapGesture { controller?.activate(tab: tab.id) }
+        .simultaneousGesture(TapGesture(count: 2).onEnded { beginRename(tab) })
+        .contextMenu {
+            Button("Rename Tab…") { beginRename(tab) }
+            Button("Close Tab") { controller?.closeForkTab(tab.id) }
+        }
+    }
+
+    private func paneRow(_ tab: TabModel, index: Int, ref: SessionRef,
+                         surface: Ghostty.SurfaceView?,
+                         spine: (first: Bool, last: Bool)?, active: Bool) -> some View {
+        let focused = active && (registry.focusedPaneIndex.map { $0 == index } ?? (index == 0))
+        let age = focused ? nil : tab.lastActive[ref.name]
+        let hovered = hoveredPane.map { $0 == (tab.id, index) } ?? false
+        let userLabel = tab.paneLabels[ref.name]
+        let renaming = registry.renaming == .pane(tab.id, name: ref.name)
         return HStack(spacing: 0) {
             Group {
                 if let spine {
-                    Spine(first: spine.first, last: spine.last)
-                        .stroke(active ? clay : Color.secondary.opacity(0.3), lineWidth: 1)
+                    TimelineView(.periodic(from: .now, by: 30)) { _ in
+                        Spine(first: spine.first, last: spine.last)
+                            .stroke(active ? spineHeat(tab.lastActive.values.max())
+                                           : Color.secondary.opacity(0.3), lineWidth: 1)
+                    }
                 } else {
                     Color.clear
                 }
             }
             .frame(width: 14)
             if renaming {
-                TextField("", text: $renameText, onCommit: commitRename)
-                    .textFieldStyle(.plain).font(.system(size: 12))
-                    .focused($renameFieldFocused)
-                    .onExitCommand { renamingTab = nil }
-                    .onAppear { renameFieldFocused = true }
-                    .onChange(of: renameFieldFocused) { focused in
-                        // Nil-targeted selectAll would route to SurfaceView (CLAUDE.md "Sheet ⌘V").
-                        // onChange fires *after* SwiftUI installs the field editor, so we can
-                        // verify firstResponder is text before sending.
-                        guard focused, NSApp.keyWindow?.firstResponder is NSTextView else { return }
-                        NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
-                    }
+                renameField(seed: userLabel ?? ref.name, font: .system(size: 12))
+            } else if let surface {
+                PaneLabel(surface: surface, userLabel: userLabel, fallback: ref.name, active: active)
             } else {
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(label).font(.system(size: 12)).lineLimit(1)
-                        .foregroundStyle(active ? .primary : .secondary)
-                    if let subtitle {
-                        Text(subtitle).font(.system(size: 9)).lineLimit(1)
-                            .foregroundStyle(.tertiary)
-                    }
-                }
+                Text(userLabel ?? ref.name).font(.system(size: 12)).lineLimit(1)
+                    .foregroundStyle(active ? .primary : .secondary)
             }
             Spacer()
-            if head {
+            if index == 0 {
                 Button { controller?.kickRedraw(tabID: tab.id) } label: {
                     Image(systemName: "arrow.clockwise").font(.system(size: 9))
                 }
@@ -220,15 +232,21 @@ struct SidebarView: View {
             }
         }
         .padding(.trailing, 12).frame(minHeight: 28)
-        .background(focused ? clay.opacity(0.14) : .clear,
-                    in: RoundedRectangle(cornerRadius: 5))
+        .background(
+            focused ? clay.opacity(0.14) : hovered ? Color.primary.opacity(0.06) : .clear,
+            in: RoundedRectangle(cornerRadius: 5))
         .contentShape(Rectangle())
+        .onHover { inside in
+            if inside { hoveredPane = (tab.id, index) }
+            else if hovered { hoveredPane = nil }
+        }
         .onTapGesture { controller?.activate(tab: tab.id, paneIndex: index) }
         .simultaneousGesture(TapGesture(count: 2).onEnded {
-            if head { beginRename(tab) }
+            registry.setRenaming(.pane(tab.id, name: ref.name))
         })
         .contextMenu {
-            if head { Button("Rename…") { beginRename(tab) } }
+            Button("Rename Pane…") { registry.setRenaming(.pane(tab.id, name: ref.name)) }
+            Button("Rename Tab…") { beginRename(tab) }
             Button("Close Tab") { controller?.closeForkTab(tab.id) }
             Divider()
             Button("Kill Session…", role: .destructive) { controller?.confirmKill(tab) }
@@ -238,23 +256,91 @@ struct SidebarView: View {
     // MARK: -
 
     private func beginRename(_ tab: TabModel) {
-        renameText = tab.title
-        renamingTab = tab.id
+        registry.setRenaming(.tab(tab.id))
+    }
+
+    private func renameField(seed: String, font: Font) -> some View {
+        TextField("", text: $renameText, onCommit: commitRename)
+            .textFieldStyle(.plain).font(font)
+            .focused($renameFieldFocused)
+            .onExitCommand { registry.setRenaming(nil) }
+            .onAppear {
+                renameText = seed
+                // @FocusState can't steal firstResponder from SurfaceView unprompted —
+                // resign it explicitly after the field mounts (InspectorView.swift:47 idiom).
+                DispatchQueue.main.async {
+                    _ = controller?.focusedSurface?.resignFirstResponder()
+                    renameFieldFocused = true
+                }
+            }
+            .onChange(of: renameFieldFocused) { focused in
+                // Nil-targeted selectAll would route to SurfaceView (CLAUDE.md "Sheet ⌘V").
+                guard focused, NSApp.keyWindow?.firstResponder is NSTextView else { return }
+                NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
+            }
     }
 
     private func ageStyle(_ date: Date?) -> AnyShapeStyle {
         switch date.map({ Date().timeIntervalSince($0) }) {
-        case .some(..<300):  return AnyShapeStyle(.green)
+        case .some(..<300):  return AnyShapeStyle(clay)
         case .some(..<3600): return AnyShapeStyle(.secondary)
         default:             return AnyShapeStyle(.tertiary)
         }
     }
 
-    private func commitRename() {
-        if let id = renamingTab, !renameText.isEmpty {
-            registry.renameTab(id, to: renameText)
+    private func spineHeat(_ freshest: Date?) -> Color {
+        switch freshest.map({ Date().timeIntervalSince($0) }) {
+        case .some(..<300):  return clay
+        case .some(..<3600): return clay.opacity(0.6)
+        default:             return clay.opacity(0.35)
         }
-        renamingTab = nil
+    }
+
+    private func commitRename() {
+        switch registry.renaming {
+        case .tab(let id):
+            // Empty ⇢ reset to first session name → heading condition becomes false → row hides.
+            let fallback = registry.tabs.first { $0.id == id }?.tree.leafRefs.first?.name
+            if let title = renameText.isEmpty ? fallback : renameText {
+                registry.renameTab(id, to: title)
+            }
+        case .pane(let id, let name):
+            registry.setPaneLabel(tab: id, name: name, to: renameText.isEmpty ? nil : renameText)
+        case nil: break
+        }
+        registry.setRenaming(nil)
+    }
+}
+
+/// `surface.title` is `@Published`; observing it here means only the label re-renders
+/// when the shell sends OSC 0/2 — not the whole sidebar.
+private struct PaneLabel: View {
+    @ObservedObject var surface: Ghostty.SurfaceView
+    let userLabel: String?
+    let fallback: String
+    let active: Bool
+    var body: some View {
+        // Upstream's `titleFallbackTimer` sets `"👻"` after 500ms if no OSC title arrived
+        // (SurfaceView_AppKit.swift:323) — treat it as "no title" so the session name shows.
+        let t = surface.title
+        let label = userLabel ?? (t.isEmpty || t == "👻" ? fallback : t)
+        return VStack(alignment: .leading, spacing: 0) {
+            Text(label).font(.system(size: 12)).lineLimit(1)
+                .foregroundStyle(active ? .primary : .secondary)
+            if label != fallback {
+                Text(fallback).font(.system(size: 9)).lineLimit(1).foregroundStyle(.tertiary)
+            }
+        }
+    }
+}
+
+private struct HoverHighlight: ViewModifier {
+    @State private var hovered = false
+    func body(content: Content) -> some View {
+        content
+            .background(hovered ? Color.primary.opacity(0.06) : .clear,
+                        in: RoundedRectangle(cornerRadius: 5))
+            .onHover { hovered = $0 }
     }
 }
 
