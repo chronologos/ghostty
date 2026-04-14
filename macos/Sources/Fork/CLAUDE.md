@@ -70,7 +70,8 @@ Fork/
     ZmxAdapter.swift           surfaceConfig/list/kill/detachedScript; Transport.wrap/controlArgv
   UI/
     ForkWindowController.swift the controller; tab switching = swap surfaceTree
-    SidebarView.swift          host sections; tabs as pane rows (spine connector groups multi-pane)
+    SidebarView.swift          host sections; per-pane rows show paneLabel › surface.title › ref.name;
+                               optional tab-title heading; ⌘I/⌘⇧I → inline rename
     NewSessionView.swift       ⌘T sheet
     SplitPickerView.swift      ⌘D picker (new vs attach-existing)
     SessionMetaLabel.swift     shared row trailer: client-count + age
@@ -108,6 +109,11 @@ Fork/
   on switch — same idiom upstream uses at `BaseTerminalController.swift:226`.
 - **iOS target shares `Sources/`** via the synchronized group. Every file under `Fork/` must
   be wrapped in `#if os(macOS) … #endif`.
+- **Three pane-title layers**: `paneLabels[ref.name]` (fork-persisted, ⌘I) › `surface.title`
+  (OSC-driven, per-`SurfaceView`-instance, lost on restart) › `ref.name` (zmx session id).
+  Upstream's `titleFallbackTimer` writes `"👻"` 500ms after surface init — `PaneLabel` treats
+  it as no-title. `zmx attach` replays buffer but not OSC, so `surface.title` stays empty
+  until the next prompt.
 - **Codable defaults aren't optional**: adding a non-Optional field with a default to a
   persisted type breaks decode of old `fork.json`. Use `decodeIfPresent` in a custom
   `init(from:)`.
@@ -156,6 +162,10 @@ jj git push --bookmark fork --remote origin   # never push to upstream
 
 ## Known limitations
 
+- First cold launch may freeze ≤2s if `zmx` isn't in env/PATH or the hardcoded dir
+  list (ZmxAdapter.swift:15). `static let` is swift_once-serialized, so the login-shell
+  probe can't be moved off main; it's forced eagerly in `install()` so the stall lands
+  before the first window draws. Set `GHOSTTY_FORK_ZMX=/abs/path` to skip the probe.
 - `refs` is never pruned (see undo gotcha) — closed-split entries leak until quit;
   `isConnected()` may stay green slightly stale. In-memory only, not persisted.
 
