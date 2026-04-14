@@ -136,6 +136,11 @@ final class SessionRegistry: ObservableObject {
         if let label { tabs[i].paneLabels[name] = label } else { tabs[i].paneLabels.removeValue(forKey: name) }
     }
 
+    func setPaneTag(tab id: TabModel.ID, name: String, to tag: PaneTag?) {
+        guard let i = tabs.firstIndex(where: { $0.id == id }) else { return }
+        if let tag { tabs[i].paneTags[name] = tag } else { tabs[i].paneTags.removeValue(forKey: name) }
+    }
+
     func bind(surface: UUID, to ref: SessionRef) { refs[surface] = ref }
     func unbind(surface: UUID) { refs.removeValue(forKey: surface) }
     func saveNow() { persistence.save(snapshot()) }
@@ -143,9 +148,10 @@ final class SessionRegistry: ObservableObject {
     func setPersistedTree(_ tree: PersistedTree, for tabID: TabModel.ID) {
         guard let i = tabs.firstIndex(where: { $0.id == tabID }) else { return }
         tabs[i].tree = tree
-        let live = Set(tree.leafRefs.map(\.name))
+        let live = Set(tree.leafRefs.map(\.key))
         tabs[i].lastActive = tabs[i].lastActive.filter { live.contains($0.key) }
         tabs[i].paneLabels = tabs[i].paneLabels.filter { live.contains($0.key) }
+        tabs[i].paneTags = tabs[i].paneTags.filter { live.contains($0.key) }
     }
 
     // MARK: Persistence
