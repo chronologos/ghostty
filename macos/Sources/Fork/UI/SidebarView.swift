@@ -9,9 +9,16 @@ struct SidebarView: View {
     @State private var renameText: String = ""
     @State private var draggingTab: TabModel.ID?
     @State private var hoveredPane: (TabModel.ID, Int)?
+    @State private var tagging: (tab: TabModel.ID, index: Int)?
     @FocusState private var renameFieldFocused: Bool
 
     private let clay = Color(red: 0xD9/255, green: 0x77/255, blue: 0x57/255)
+
+    private var recentTags: [PaneTag] {
+        var seen = Set<PaneTag>()
+        return registry.tabs.flatMap { $0.paneTags.values }
+            .filter { seen.insert($0).inserted }.prefix(5).map { $0 }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -188,10 +195,11 @@ struct SidebarView: View {
                          surface: Ghostty.SurfaceView?,
                          spine: (first: Bool, last: Bool)?, active: Bool) -> some View {
         let focused = active && (registry.focusedPaneIndex.map { $0 == index } ?? (index == 0))
-        let age = focused ? nil : tab.lastActive[ref.name]
+        let age = focused ? nil : tab.lastActive[ref.key]
         let hovered = hoveredPane.map { $0 == (tab.id, index) } ?? false
-        let userLabel = tab.paneLabels[ref.name]
-        let renaming = registry.renaming == .pane(tab.id, name: ref.name)
+        let userLabel = tab.paneLabels[ref.key]
+        let tag = tab.paneTags[ref.key]
+        let renaming = registry.renaming == .pane(tab.id, name: ref.key)
         return HStack(spacing: 0) {
             Group {
                 if let spine {
@@ -214,21 +222,31 @@ struct SidebarView: View {
                     .foregroundStyle(active ? .primary : .secondary)
             }
             Spacer()
-            if index == 0 {
+            if let tag {
+                Text(tag.text)
+                    .font(.system(size: 8, weight: .medium))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 5).padding(.vertical, 2)
+                    .background(Color(hue: tag.hue, saturation: 0.6, brightness: 0.5),
+                                in: RoundedRectangle(cornerRadius: 3))
+                    .padding(.trailing, 6)
+            }
+            if active && index == 0 {
                 Button { controller?.kickRedraw(tabID: tab.id) } label: {
                     Image(systemName: "arrow.clockwise").font(.system(size: 9))
                 }
-                .buttonStyle(.plain).opacity(active ? 0.5 : 0).allowsHitTesting(active)
-                .help("Force redraw all panes")
-                Button { controller?.closeForkTab(tab.id) } label: {
+                .buttonStyle(.plain).opacity(0.5).help("Force redraw all panes")
+                Button { controller?.confirmKill(tab) } label: {
                     Image(systemName: "xmark").font(.system(size: 9))
                 }
-                .buttonStyle(.plain).opacity(active ? 0.6 : 0).allowsHitTesting(active)
-            }
-            TimelineView(.periodic(from: .now, by: 30)) { _ in
-                Text(age?.shortAge ?? "")
-                    .font(.system(size: 9)).foregroundStyle(ageStyle(age))
-                    .frame(width: 24, alignment: .trailing)
+                .buttonStyle(.plain).opacity(0.6)
+                .help("Kill session(s) and close tab")
+            } else {
+                TimelineView(.periodic(from: .now, by: 30)) { _ in
+                    Text(age?.shortAge ?? "")
+                        .font(.system(size: 9)).foregroundStyle(ageStyle(age))
+                        .frame(width: 24, alignment: .trailing)
+                }
             }
         }
         .padding(.trailing, 12).frame(minHeight: 28)
@@ -242,14 +260,34 @@ struct SidebarView: View {
         }
         .onTapGesture { controller?.activate(tab: tab.id, paneIndex: index) }
         .simultaneousGesture(TapGesture(count: 2).onEnded {
-            registry.setRenaming(.pane(tab.id, name: ref.name))
+            registry.setRenaming(.pane(tab.id, name: ref.key))
         })
         .contextMenu {
-            Button("Rename Pane…") { registry.setRenaming(.pane(tab.id, name: ref.name)) }
+            Button("Rename Pane…") { registry.setRenaming(.pane(tab.id, name: ref.key)) }
             Button("Rename Tab…") { beginRename(tab) }
-            Button("Close Tab") { controller?.closeForkTab(tab.id) }
             Divider()
+            ForEach(recentTags, id: \.self) { t in
+                Button { registry.setPaneTag(tab: tab.id, name: ref.key, to: t) } label: {
+                    Label(t.text, systemImage: "circle.fill")
+                        .foregroundStyle(Color(hue: t.hue, saturation: 0.6, brightness: 0.5))
+                }
+            }
+            Button("Tag…") { tagging = (tab.id, index) }
+            if tag != nil {
+                Button("Clear Tag") { registry.setPaneTag(tab: tab.id, name: ref.key, to: nil) }
+            }
+            Divider()
+            Button("Close Tab") { controller?.closeForkTab(tab.id) }
             Button("Kill Session…", role: .destructive) { controller?.confirmKill(tab) }
+        }
+        .popover(isPresented: Binding(
+            get: { tagging.map { $0 == (tab.id, index) } ?? false },
+            set: { if !$0 { tagging = nil } }
+        ), arrowEdge: .trailing) {
+            TagEditView(seed: tag) {
+                registry.setPaneTag(tab: tab.id, name: ref.key, to: $0)
+                tagging = nil
+            }
         }
     }
 
