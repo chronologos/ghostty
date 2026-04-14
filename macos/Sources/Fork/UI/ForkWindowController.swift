@@ -262,7 +262,7 @@ final class ForkWindowController: TerminalController {
         let i = registry.focusedPaneIndex ?? 0
         guard i < refs.count else { return }
         revealRow(on: tab.hostID)
-        registry.setRenaming(.pane(tab.id, name: refs[i].name))
+        registry.setRenaming(.pane(tab.id, name: refs[i].key))
     }
 
     private func revealRow(on hostID: ForkHost.ID) {
@@ -529,8 +529,8 @@ final class ForkWindowController: TerminalController {
         // explicitly when it actually wants the head fallback.
         guard let to else { return }
         registry.setFocusedPane(index: Array(surfaceTree).firstIndex { $0 === to })
-        if let tab = registry.activeTabID, let name = registry.refs[to.id]?.name {
-            registry.touchPane(tab: tab, name: name)
+        if let tab = registry.activeTabID, let key = registry.refs[to.id]?.key {
+            registry.touchPane(tab: tab, name: key)
         }
     }
 
