@@ -118,7 +118,7 @@ final class ForkWindowController: TerminalController {
             if withConfirmation {
                 confirmClose(
                     messageText: "Close Tab?",
-                    informativeText: "The terminal still has a running process. If you close the tab the process will be killed."
+                    informativeText: "Panes will detach; their zmx sessions keep running. Reattach from ⌘T or the split picker."
                 ) { [weak self] in self?.closeForkTab(active) }
             } else {
                 closeForkTab(active)
@@ -149,6 +149,12 @@ final class ForkWindowController: TerminalController {
                 case .command: self.gotoTab(index: n); return nil
                 default: return ev
                 }
+            }
+            // ⌘I (`prompt_surface_title`) dispatches straight to `SurfaceView.promptTitle()`
+            // (Ghostty.App.swift:1669) which doesn't persist; intercept to drive the
+            // sidebar's per-pane label instead. ⌘⇧I goes via `promptTabTitle()`.
+            if mods == .command, ev.charactersIgnoringModifiers == "i" {
+                self.promptPaneTitle(); return nil
             }
             // ⌘[/⌘] are upstream's `goto_split:previous/next` (Config.zig:7016).
             // Sidebar tab nav uses ⌘⇧[/⌘⇧] (upstream's `previous_tab`/`next_tab`).
@@ -229,9 +235,47 @@ final class ForkWindowController: TerminalController {
             if parts.count == 2, let n = Int(parts[1]) { gotoTab(index: n) }
         case "move_tab":
             if parts.count == 2, let d = Int(parts[1]) { moveActiveTab(by: d) }
+        case "prompt_surface_title": promptPaneTitle()
+        case "prompt_tab_title": promptTabTitle()
         default:
             super.performAction(action, on: surfaceView)
         }
+    }
+
+    /// ⌘⇧I and View → Change Tab Title both land here. Upstream pops an NSAlert that
+    /// writes `titleOverride` (which we already drive from `syncWindowTitle()`); redirect
+    /// to the sidebar's heading inline field instead.
+    override func promptTabTitle() {
+        guard !ForkBootstrap.noSidebar, let tab = registry.activeTab else {
+            return super.promptTabTitle()
+        }
+        revealRow(on: tab.hostID)
+        registry.setRenaming(.tab(tab.id))
+    }
+
+    /// ⌘I — sidebar's persisted per-pane label for the focused pane. Upstream's
+    /// `SurfaceView.promptTitle()` writes `surface.title`, which is per-instance and lost
+    /// on restart; `paneLabels` (keyed by `ref.name`) survives via fork.json.
+    func promptPaneTitle() {
+        guard !ForkBootstrap.noSidebar, let tab = registry.activeTab else { return }
+        let refs = tab.tree.leafRefs
+        let i = registry.focusedPaneIndex ?? 0
+        guard i < refs.count else { return }
+        revealRow(on: tab.hostID)
+        registry.setRenaming(.pane(tab.id, name: refs[i].name))
+    }
+
+    private func revealRow(on hostID: ForkHost.ID) {
+        if sidebarWidthConstraint?.constant == 0 { toggleSidebar() }
+        registry.setExpanded(hostID, true)
+    }
+
+    @IBAction override func changeTabTitle(_ sender: Any) { promptTabTitle() }
+
+    /// Live surfaces for a tab in depth-first-leaf order (matches `PersistedTree.leafRefs`).
+    /// Empty for tabs never activated this session — those rebuild lazily on first `activate()`.
+    func surfaces(for tabID: TabModel.ID) -> [Ghostty.SurfaceView] {
+        Array(tabID == registry.activeTabID ? surfaceTree : (liveTabs[tabID] ?? .init()))
     }
 
     /// Jiggle every pane in `tabID`'s tree by 1px to force a SIGWINCH redraw.

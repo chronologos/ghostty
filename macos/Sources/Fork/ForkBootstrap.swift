@@ -27,11 +27,10 @@ enum ForkBootstrap {
     /// PR1: no-op beyond logging. PR2: loads `SessionRegistry` from `fork.json`.
     static func install(ghostty: Ghostty.App) {
         guard enabled else { return }
-        logger.info("fork enabled")
-        // Warm `localZmx` off the main thread — its login-shell probe can take seconds.
-        Task.detached(priority: .utility) {
-            logger.info("zmx resolved: \(ZmxAdapter.localZmx, privacy: .public)")
-        }
+        // Force `localZmx` resolution now. `static let` is swift_once-serialized — a
+        // detached "warm-up" can't beat main to the once-barrier, so we take the hit
+        // here (before any window draws) rather than mid-`newWindow`.
+        logger.info("fork enabled — zmx: \(ZmxAdapter.localZmx, privacy: .public)")
         let clay = NSColor(red: 0xD9/255, green: 0x77/255, blue: 0x57/255, alpha: 1)
         NSApp.applicationIconImage = ColorizedGhosttyIcon(
             screenColors: [.systemOrange, clay],

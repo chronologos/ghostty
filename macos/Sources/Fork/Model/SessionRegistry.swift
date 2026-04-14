@@ -2,6 +2,14 @@
 import Foundation
 import Combine
 
+enum RenameTarget: Hashable {
+    case tab(TabModel.ID)
+    case pane(TabModel.ID, name: String)
+    var tabID: TabModel.ID {
+        switch self { case .tab(let id), .pane(let id, _): id }
+    }
+}
+
 /// Single source of truth for hosts, tabs, and the surface→session map. Sidebar and
 /// controller observe this; all mutations route through it (SPEC §3).
 @MainActor
@@ -14,6 +22,9 @@ final class SessionRegistry: ObservableObject {
     /// Depth-first leaf index of the focused pane within the active tab. Controller-owned
     /// (`activate(tab:)` writes optimistically, `focusedSurfaceDidChange` confirms); not persisted.
     @Published private(set) var focusedPaneIndex: Int?
+    /// Sidebar inline-rename cursor. Controller writes via `promptTabTitle()` / `promptPaneTitle()`
+    /// (⌘⇧I / ⌘I); sidebar writes via double-click / context-menu; not persisted.
+    @Published private(set) var renaming: RenameTarget?
 
     /// Not @Published: pure surface→session bookkeeping the sidebar never renders
     /// directly. `isConnected()` reads it, but every flow that mutates `refs` also
@@ -100,6 +111,7 @@ final class SessionRegistry: ObservableObject {
     func removeTab(_ id: TabModel.ID) {
         tabs.removeAll { $0.id == id }
         if activeTabID == id { activeTabID = nil }
+        if renaming?.tabID == id { renaming = nil }
     }
 
     func moveTab(_ id: TabModel.ID, before target: TabModel.ID) {
@@ -112,10 +124,16 @@ final class SessionRegistry: ObservableObject {
 
     func setActive(tab id: TabModel.ID) { activeTabID = id }
     func setFocusedPane(index: Int?) { if focusedPaneIndex != index { focusedPaneIndex = index } }
+    func setRenaming(_ t: RenameTarget?) { if renaming != t { renaming = t } }
 
     func touchPane(tab id: TabModel.ID, name: String) {
         guard let i = tabs.firstIndex(where: { $0.id == id }) else { return }
         tabs[i].lastActive[name] = Date()
+    }
+
+    func setPaneLabel(tab id: TabModel.ID, name: String, to label: String?) {
+        guard let i = tabs.firstIndex(where: { $0.id == id }) else { return }
+        if let label { tabs[i].paneLabels[name] = label } else { tabs[i].paneLabels.removeValue(forKey: name) }
     }
 
     func bind(surface: UUID, to ref: SessionRef) { refs[surface] = ref }
@@ -127,6 +145,7 @@ final class SessionRegistry: ObservableObject {
         tabs[i].tree = tree
         let live = Set(tree.leafRefs.map(\.name))
         tabs[i].lastActive = tabs[i].lastActive.filter { live.contains($0.key) }
+        tabs[i].paneLabels = tabs[i].paneLabels.filter { live.contains($0.key) }
     }
 
     // MARK: Persistence

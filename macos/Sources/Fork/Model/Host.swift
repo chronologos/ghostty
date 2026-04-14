@@ -85,6 +85,9 @@ struct TabModel: Codable, Identifiable, Hashable {
     var tree: PersistedTree
     /// Last-focused timestamp per pane, keyed by `SessionRef.name` (indices renumber, names don't).
     var lastActive: [String: Date]
+    /// User-set per-pane labels (⌘I / "Rename Pane…"), keyed by `SessionRef.name`. Shown in
+    /// the sidebar over `surface.title`, which is per-`SurfaceView`-instance and lost on restart.
+    var paneLabels: [String: String]
 
     init(id: UUID = UUID(), hostID: ForkHost.ID, title: String, tree: PersistedTree = .empty) {
         self.id = id
@@ -92,6 +95,7 @@ struct TabModel: Codable, Identifiable, Hashable {
         self.title = title
         self.tree = tree
         self.lastActive = [:]
+        self.paneLabels = [:]
     }
 
     init(from d: Decoder) throws {
@@ -101,6 +105,7 @@ struct TabModel: Codable, Identifiable, Hashable {
         title = try c.decode(String.self, forKey: .title)
         tree = try c.decode(PersistedTree.self, forKey: .tree)
         lastActive = try c.decodeIfPresent([String: Date].self, forKey: .lastActive) ?? [:]
+        paneLabels = try c.decodeIfPresent([String: String].self, forKey: .paneLabels) ?? [:]
     }
 }
 

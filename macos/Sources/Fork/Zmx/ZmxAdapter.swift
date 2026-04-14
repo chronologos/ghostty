@@ -13,7 +13,9 @@ enum ZmxAdapter {
         var candidates = [env["GHOSTTY_FORK_ZMX"]]
         candidates += (env["PATH"] ?? "").split(separator: ":").map { "\($0)/zmx" }
         candidates += ["\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin",
-                       "\(home)/.cargo/bin", "\(home)/bin"].map { "\($0)/zmx" }
+                       "\(home)/.cargo/bin", "\(home)/bin", "\(home)/.nix-profile/bin",
+                       "/run/current-system/sw/bin", "/nix/var/nix/profiles/default/bin",
+                       "/opt/local/bin"].map { "\($0)/zmx" }
         if let hit = candidates.compactMap({ $0 }).first(where: fm.isExecutableFile(atPath:)) {
             return hit
         }
