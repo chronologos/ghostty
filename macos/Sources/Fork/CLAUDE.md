@@ -30,6 +30,9 @@ cd macos && xcodebuild test -scheme Ghostty -destination 'platform=macOS' \
 
 # Seam + symbol invariants — run after every rebase
 ./scripts/fork-check.sh
+
+# One-time: self-signed identity so TCC grants survive rebuilds (ad-hoc → new CDHash → re-prompt)
+./scripts/fork-make-cert.sh
 ```
 
 Release build & push: see [Branches & release](#branches--release).
@@ -71,7 +74,9 @@ Fork/
   UI/
     ForkWindowController.swift the controller; tab switching = swap surfaceTree
     SidebarView.swift          host sections; per-pane rows show paneLabel › surface.title › ref.name;
-                               optional tab-title heading; ⌘I/⌘⇧I → inline rename
+                               optional tab-title heading + collapse chevron; ⌘I/⌘⇧I → inline
+                               rename; tag pills; compact toggle (@AppStorage) hides age + subtitle
+    TagEditView.swift          right-click "Tag…" popover (text + 8 hue swatches)
     NewSessionView.swift       ⌘T sheet
     SplitPickerView.swift      ⌘D picker (new vs attach-existing)
     SessionMetaLabel.swift     shared row trailer: client-count + age
@@ -109,7 +114,10 @@ Fork/
   on switch — same idiom upstream uses at `BaseTerminalController.swift:226`.
 - **iOS target shares `Sources/`** via the synchronized group. Every file under `Fork/` must
   be wrapped in `#if os(macOS) … #endif`.
-- **Three pane-title layers**: `paneLabels[ref.name]` (fork-persisted, ⌘I) › `surface.title`
+- **`SessionRef.name` is not unique within a tab**: `ZmxAdapter` strips the `{tabID}-` prefix
+  on list parse, so a tab-owned `acr` and an external-attached `acr` collide. Per-tab dicts
+  (`paneLabels`/`paneTags`/`lastActive`) key on `SessionRef.key` (`@`-prefix for external).
+- **Three pane-title layers**: `paneLabels[ref.key]` (fork-persisted, ⌘I) › `surface.title`
   (OSC-driven, per-`SurfaceView`-instance, lost on restart) › `ref.name` (zmx session id).
   Upstream's `titleFallbackTimer` writes `"👻"` 500ms after surface init — `PaneLabel` treats
   it as no-title. `zmx attach` replays buffer but not OSC, so `surface.title` stays empty
@@ -140,7 +148,8 @@ jj rebase -b fork -d main@upstream
 jj bookmark set fork -r @-
 jj git push --bookmark fork --remote origin   # never push to upstream
 
-# Optimized build → macos/build/ReleaseLocal/Ghostty.app (ad-hoc signed)
+# Optimized build → macos/build/ReleaseLocal/Ghostty.app
+# Re-signed with `ghostty-fork-dev` (or $FORK_SIGN_IDENTITY) so TCC grants persist.
 ./scripts/fork-release.sh
 ```
 
@@ -159,6 +168,11 @@ jj git push --bookmark fork --remote origin   # never push to upstream
   AppleScript matters.
 - **Detached-pane list-probe** (SPEC §5) — `detachedScript` reattaches blindly; should
   `zmx list` first and show "session ended — start fresh?" if absent.
+- ssh attach to a re-keyed host behind a ProxyCommand dies opaque (`UNKNOWN port 65535`)
+  at the host-key prompt — consider `-o StrictHostKeyChecking=accept-new` or a clearer
+  error surface in `ZmxAdapter.swift:175`.
+- ↻/× buttons hidden when active tab is collapsed; "Kill Session…" missing from
+  the heading context menu.
 
 ## Known limitations
 

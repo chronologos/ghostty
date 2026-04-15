@@ -25,6 +25,9 @@ final class SessionRegistry: ObservableObject {
     /// Sidebar inline-rename cursor. Controller writes via `promptTabTitle()` / `promptPaneTitle()`
     /// (⌘⇧I / ⌘I); sidebar writes via double-click / context-menu; not persisted.
     @Published private(set) var renaming: RenameTarget?
+    /// MRU of applied tags (newest first, ≤8). `paneTags.values` is hash-order so deriving
+    /// "recent" from it is arbitrary; this is the source of truth for the context-menu shortlist.
+    @Published private(set) var recentTags: [PaneTag]
 
     /// Not @Published: pure surface→session bookkeeping the sidebar never renders
     /// directly. `isConnected()` reads it, but every flow that mutates `refs` also
@@ -39,6 +42,7 @@ final class SessionRegistry: ObservableObject {
         self.hosts = state.hosts.isEmpty ? [.local] : state.hosts
         self.tabs = state.tabs
         self.activeTabID = state.activeTabID
+        self.recentTags = state.recentTags
         saveDebounce = objectWillChange
             .debounce(for: .milliseconds(500), scheduler: DispatchQueue.main)
             .sink { [weak self] _ in self?.persistence.save(self?.snapshot()) }
@@ -123,6 +127,11 @@ final class SessionRegistry: ObservableObject {
     }
 
     func setActive(tab id: TabModel.ID) { activeTabID = id }
+
+    func setCollapsed(_ id: TabModel.ID, _ v: Bool) {
+        guard let i = tabs.firstIndex(where: { $0.id == id }), tabs[i].collapsed != v else { return }
+        tabs[i].collapsed = v
+    }
     func setFocusedPane(index: Int?) { if focusedPaneIndex != index { focusedPaneIndex = index } }
     func setRenaming(_ t: RenameTarget?) { if renaming != t { renaming = t } }
 
@@ -138,7 +147,14 @@ final class SessionRegistry: ObservableObject {
 
     func setPaneTag(tab id: TabModel.ID, name: String, to tag: PaneTag?) {
         guard let i = tabs.firstIndex(where: { $0.id == id }) else { return }
-        if let tag { tabs[i].paneTags[name] = tag } else { tabs[i].paneTags.removeValue(forKey: name) }
+        if let tag {
+            tabs[i].paneTags[name] = tag
+            recentTags.removeAll { $0 == tag }
+            recentTags.insert(tag, at: 0)
+            if recentTags.count > 8 { recentTags.removeLast() }
+        } else {
+            tabs[i].paneTags.removeValue(forKey: name)
+        }
     }
 
     func bind(surface: UUID, to ref: SessionRef) { refs[surface] = ref }
@@ -157,7 +173,7 @@ final class SessionRegistry: ObservableObject {
     // MARK: Persistence
 
     func snapshot() -> ForkPersistence.State {
-        .init(hosts: hosts, tabs: tabs, activeTabID: activeTabID)
+        .init(hosts: hosts, tabs: tabs, activeTabID: activeTabID, recentTags: recentTags)
     }
 
     static func autoName(base: String = "shell", suffixLen: Int = 3) -> String {
