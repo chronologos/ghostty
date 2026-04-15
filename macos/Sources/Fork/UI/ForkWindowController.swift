@@ -255,7 +255,7 @@ final class ForkWindowController: TerminalController {
 
     /// ⌘I — sidebar's persisted per-pane label for the focused pane. Upstream's
     /// `SurfaceView.promptTitle()` writes `surface.title`, which is per-instance and lost
-    /// on restart; `paneLabels` (keyed by `ref.name`) survives via fork.json.
+    /// on restart; `paneLabels` (keyed by `ref.key`) survives via fork.json.
     func promptPaneTitle() {
         guard !ForkBootstrap.noSidebar, let tab = registry.activeTab else { return }
         let refs = tab.tree.leafRefs
@@ -310,6 +310,41 @@ final class ForkWindowController: TerminalController {
             activate(tab: next)
         } else {
             surfaceTree = .init()
+        }
+    }
+
+    func confirmKillPane(tab: TabModel, ref: SessionRef, surface: Ghostty.SurfaceView?) {
+        guard let window, let host = registry.host(id: tab.hostID) else { return }
+        let alert = NSAlert()
+        alert.messageText = "Kill zmx session '\(ref.name)'?"
+        alert.informativeText = tab.tree.paneCount > 1
+            ? "Other panes in '\(tab.title)' stay attached."
+            : "This is the only pane; the tab will close."
+        alert.addButton(withTitle: "Kill")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        alert.beginSheetModal(for: window) { [weak self] resp in
+            guard resp == .alertFirstButtonReturn, let self else { return }
+            // Unbind first so the pty-death → placeholder path short-circuits.
+            if let surface { registry.unbind(surface: surface.id) }
+            Task { try? await ZmxAdapter.kill(host: host, ref: ref) }
+            dropPane(tab: tab, ref: ref, surface: surface)
+        }
+    }
+
+    private func dropPane(tab: TabModel, ref: SessionRef, surface: Ghostty.SurfaceView?) {
+        guard tab.tree.paneCount > 1 else { closeForkTab(tab.id); return }
+        if let live = liveTabs[tab.id], let surface,
+           let node = live.root?.node(view: surface) {
+            if tab.id == registry.activeTabID {
+                super.closeSurface(node, withConfirmation: false)
+            } else {
+                let pruned = live.removing(node)
+                liveTabs[tab.id] = pruned
+                registry.setPersistedTree(project(pruned.root), for: tab.id)
+            }
+        } else {
+            registry.setPersistedTree(tab.tree.removing(ref), for: tab.id)
         }
     }
 

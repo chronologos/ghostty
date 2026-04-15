@@ -11,14 +11,11 @@ struct SidebarView: View {
     @State private var hoveredPane: (TabModel.ID, Int)?
     @State private var tagging: (tab: TabModel.ID, index: Int)?
     @FocusState private var renameFieldFocused: Bool
+    @AppStorage("forkSidebarCompact") private var compact = false
 
     private let clay = Color(red: 0xD9/255, green: 0x77/255, blue: 0x57/255)
 
-    private var recentTags: [PaneTag] {
-        var seen = Set<PaneTag>()
-        return registry.tabs.flatMap { $0.paneTags.values }
-            .filter { seen.insert($0).inserted }.prefix(5).map { $0 }
-    }
+    private var recentTags: ArraySlice<PaneTag> { registry.recentTags.prefix(5) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -48,6 +45,10 @@ struct SidebarView: View {
             }
             actionRow(icon: "sidebar.left", label: "Hide sidebar", keys: nil) {
                 controller?.toggleSidebar()
+            }
+            actionRow(icon: compact ? "rectangle.expand.vertical" : "rectangle.compress.vertical",
+                      label: compact ? "Show details" : "Hide details", keys: nil) {
+                withAnimation(.snappy(duration: 0.12)) { compact.toggle() }
             }
         }
         .padding(6)
@@ -141,7 +142,7 @@ struct SidebarView: View {
     }
 
     // MARK: Tab → pane rows
-    // Each row's label is `paneLabels[ref.name]` (persisted, ⌘I) › `surface.title` (OSC, live)
+    // Each row's label is `paneLabels[ref.key]` (persisted, ⌘I) › `surface.title` (OSC, live)
     // › `ref.name`, with `ref.name` as subtitle when the label differs. `tab.title` is a heading
     // above the group, shown only when it diverges from the first session name (⌘⇧I edits it).
     // Cold-restored tabs have no live surfaces until first activated.
@@ -151,14 +152,18 @@ struct SidebarView: View {
         let refs = tab.tree.leafRefs
         let surfaces = controller?.surfaces(for: tab.id) ?? []
         let renaming = registry.renaming == .tab(tab.id)
-        let heading = renaming || tab.title != refs.first?.name
+        let heading = renaming || tab.collapsed || tab.title != refs.first?.name
         return VStack(alignment: .leading, spacing: 0) {
-            if heading { tabHeading(tab, renaming: renaming, active: active) }
-            ForEach(Array(refs.enumerated()), id: \.offset) { i, ref in
-                paneRow(tab, index: i, ref: ref,
-                        surface: i < surfaces.count ? surfaces[i] : nil,
-                        spine: refs.count > 1 ? (i == 0, i == refs.count - 1) : nil,
-                        active: active)
+            if heading {
+                tabHeading(tab, renaming: renaming, active: active, paneCount: refs.count)
+            }
+            if !tab.collapsed {
+                ForEach(Array(refs.enumerated()), id: \.offset) { i, ref in
+                    paneRow(tab, index: i, ref: ref,
+                            surface: i < surfaces.count ? surfaces[i] : nil,
+                            spine: refs.count > 1 ? (i == 0, i == refs.count - 1) : nil,
+                            active: active)
+                }
             }
         }
         .onDrag {
@@ -169,9 +174,20 @@ struct SidebarView: View {
             target: tab.id, dragging: $draggingTab, registry: registry))
     }
 
-    private func tabHeading(_ tab: TabModel, renaming: Bool, active: Bool) -> some View {
+    private func tabHeading(_ tab: TabModel, renaming: Bool, active: Bool,
+                            paneCount: Int) -> some View {
         HStack(spacing: 0) {
-            Color.clear.frame(width: 14)
+            Button {
+                withAnimation(.snappy(duration: 0.15)) {
+                    registry.setCollapsed(tab.id, !tab.collapsed)
+                }
+            } label: {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 8, weight: .semibold)).foregroundStyle(.secondary)
+                    .rotationEffect(.degrees(tab.collapsed ? 0 : 90))
+                    .frame(width: 14, alignment: .leading)
+            }
+            .buttonStyle(.plain)
             if renaming {
                 renameField(seed: tab.title, font: .system(size: 10, weight: .semibold))
             } else {
@@ -180,6 +196,9 @@ struct SidebarView: View {
                     .foregroundStyle(clay.opacity(active ? 1 : 0.6))
             }
             Spacer()
+            if tab.collapsed {
+                Text("\(paneCount)").font(.system(size: 9)).foregroundStyle(.tertiary)
+            }
         }
         .padding(.top, 4).padding(.trailing, 12).frame(height: 20)
         .contentShape(Rectangle())
@@ -187,6 +206,9 @@ struct SidebarView: View {
         .simultaneousGesture(TapGesture(count: 2).onEnded { beginRename(tab) })
         .contextMenu {
             Button("Rename Tab…") { beginRename(tab) }
+            Button(tab.collapsed ? "Expand Panes" : "Minimize Panes") {
+                registry.setCollapsed(tab.id, !tab.collapsed)
+            }
             Button("Close Tab") { controller?.closeForkTab(tab.id) }
         }
     }
@@ -216,7 +238,8 @@ struct SidebarView: View {
             if renaming {
                 renameField(seed: userLabel ?? ref.name, font: .system(size: 12))
             } else if let surface {
-                PaneLabel(surface: surface, userLabel: userLabel, fallback: ref.name, active: active)
+                PaneLabel(surface: surface, userLabel: userLabel, fallback: ref.name,
+                          active: active, compact: compact)
             } else {
                 Text(userLabel ?? ref.name).font(.system(size: 12)).lineLimit(1)
                     .foregroundStyle(active ? .primary : .secondary)
@@ -241,7 +264,7 @@ struct SidebarView: View {
                 }
                 .buttonStyle(.plain).opacity(0.6)
                 .help("Kill session(s) and close tab")
-            } else {
+            } else if !compact {
                 TimelineView(.periodic(from: .now, by: 30)) { _ in
                     Text(age?.shortAge ?? "")
                         .font(.system(size: 9)).foregroundStyle(ageStyle(age))
@@ -277,8 +300,12 @@ struct SidebarView: View {
                 Button("Clear Tag") { registry.setPaneTag(tab: tab.id, name: ref.key, to: nil) }
             }
             Divider()
+            Button("Minimize Panes") { registry.setCollapsed(tab.id, true) }
             Button("Close Tab") { controller?.closeForkTab(tab.id) }
-            Button("Kill Session…", role: .destructive) { controller?.confirmKill(tab) }
+            Button("Kill This Session…", role: .destructive) {
+                controller?.confirmKillPane(tab: tab, ref: ref, surface: surface)
+            }
+            Button("Kill All & Close Tab…", role: .destructive) { controller?.confirmKill(tab) }
         }
         .popover(isPresented: Binding(
             get: { tagging.map { $0 == (tab.id, index) } ?? false },
@@ -357,6 +384,7 @@ private struct PaneLabel: View {
     let userLabel: String?
     let fallback: String
     let active: Bool
+    let compact: Bool
     var body: some View {
         // Upstream's `titleFallbackTimer` sets `"👻"` after 500ms if no OSC title arrived
         // (SurfaceView_AppKit.swift:323) — treat it as "no title" so the session name shows.
@@ -365,7 +393,7 @@ private struct PaneLabel: View {
         return VStack(alignment: .leading, spacing: 0) {
             Text(label).font(.system(size: 12)).lineLimit(1)
                 .foregroundStyle(active ? .primary : .secondary)
-            if label != fallback {
+            if !compact && label != fallback {
                 Text(fallback).font(.system(size: 9)).lineLimit(1).foregroundStyle(.tertiary)
             }
         }
