@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Builds an optimized, ad-hoc-signed Ghostty.app for the fork.
+# Builds an optimized fork Ghostty.app, re-signed with a stable self-signed
+# identity so TCC keys grants on the cert leaf (not the per-build CDHash).
 #   - libghostty: zig ReleaseFast (xcframework only; we drive xcodebuild ourselves)
-#   - Swift app:  xcodebuild ReleaseLocal (CODE_SIGN_IDENTITY="-")
+#   - Swift app:  xcodebuild ReleaseLocal (ad-hoc), then post-hoc codesign
 set -euo pipefail
 cd "$(dirname "$0")/.."
+ROOT="$(pwd)"
+IDENTITY="${FORK_SIGN_IDENTITY:-ghostty-fork-dev}"
 
 ./scripts/fork-check.sh
 
@@ -27,6 +30,25 @@ env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
     build
 
 out="macos/build/ReleaseLocal/Ghostty.app"
+
+if security find-identity 2>/dev/null | grep -q "\"${IDENTITY}\""; then
+  echo "→ re-sign with '${IDENTITY}'"
+  ent="${ROOT}/macos/GhosttyReleaseLocal.entitlements"
+  # Inside-out: nested code first (no entitlements), then the app shell.
+  codesign --force --deep --sign "${IDENTITY}" \
+    "${out}/Contents/Frameworks/Sparkle.framework"
+  codesign --force --sign "${IDENTITY}" \
+    "${out}/Contents/PlugIns/DockTilePlugin.plugin"
+  codesign --force --options runtime --entitlements "${ent}" \
+    --sign "${IDENTITY}" "${out}"
+  codesign --verify --strict --verbose=2 "${out}" 2>&1
+  echo "  designated requirement:"
+  codesign -dr - "${out}" 2>&1 | sed -n 's/^designated => /    /p'
+else
+  echo "⚠ identity '${IDENTITY}' not found — left ad-hoc; TCC will re-prompt every build"
+  echo "  fix: scripts/fork-make-cert.sh   (or: FORK_SIGN_IDENTITY='Apple Development: …')"
+fi
+
 echo
 echo "✓ ${out}"
 du -sh "${out}"

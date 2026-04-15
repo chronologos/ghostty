@@ -18,7 +18,7 @@ struct TagEditView: View {
         VStack(alignment: .leading, spacing: 10) {
             TextField("tag", text: $text)
                 .textFieldStyle(.roundedBorder)
-                .onSubmit { onCommit(PaneTag(text: text, hue: hue)) }
+                .onSubmit { if !text.isEmpty { onCommit(PaneTag(text: text, hue: hue)) } }
             HStack(spacing: 6) {
                 ForEach(Self.hues, id: \.self) { h in
                     Circle()
