@@ -93,12 +93,13 @@ struct TabModel: Codable, Identifiable, Hashable {
     var hostID: ForkHost.ID
     var title: String
     var tree: PersistedTree
-    /// Last-focused timestamp per pane, keyed by `SessionRef.name` (indices renumber, names don't).
+    /// Last-focused timestamp per pane, keyed by `SessionRef.key` (indices renumber, keys don't).
     var lastActive: [String: Date]
-    /// User-set per-pane labels (⌘I / "Rename Pane…"), keyed by `SessionRef.name`. Shown in
+    /// User-set per-pane labels (⌘I / "Rename Pane…"), keyed by `SessionRef.key`. Shown in
     /// the sidebar over `surface.title`, which is per-`SurfaceView`-instance and lost on restart.
     var paneLabels: [String: String]
     var paneTags: [String: PaneTag]
+    var collapsed: Bool
 
     init(id: UUID = UUID(), hostID: ForkHost.ID, title: String, tree: PersistedTree = .empty) {
         self.id = id
@@ -108,6 +109,7 @@ struct TabModel: Codable, Identifiable, Hashable {
         self.lastActive = [:]
         self.paneLabels = [:]
         self.paneTags = [:]
+        self.collapsed = false
     }
 
     init(from d: Decoder) throws {
@@ -119,6 +121,7 @@ struct TabModel: Codable, Identifiable, Hashable {
         lastActive = try c.decodeIfPresent([String: Date].self, forKey: .lastActive) ?? [:]
         paneLabels = try c.decodeIfPresent([String: String].self, forKey: .paneLabels) ?? [:]
         paneTags = try c.decodeIfPresent([String: PaneTag].self, forKey: .paneTags) ?? [:]
+        collapsed = try c.decodeIfPresent(Bool.self, forKey: .collapsed) ?? false
     }
 }
 
@@ -142,6 +145,18 @@ indirect enum PersistedTree: Codable, Hashable {
         case .empty: []
         case .leaf(let r): r.map { [$0] } ?? []
         case .split(_, _, let a, let b): a.leafRefs + b.leafRefs
+        }
+    }
+
+    func removing(_ ref: SessionRef) -> PersistedTree {
+        switch self {
+        case .empty: .empty
+        case .leaf(let r): r == ref ? .empty : self
+        case .split(let h, let ratio, let a, let b):
+            switch (a.removing(ref), b.removing(ref)) {
+            case (.empty, let s), (let s, .empty): s
+            case (let na, let nb): .split(horizontal: h, ratio: ratio, a: na, b: nb)
+            }
         }
     }
 }
