@@ -31,12 +31,35 @@ enum ForkBootstrap {
         // detached "warm-up" can't beat main to the once-barrier, so we take the hit
         // here (before any window draws) rather than mid-`newWindow`.
         logger.info("fork enabled — zmx: \(ZmxAdapter.localZmx, privacy: .public)")
-        let clay = NSColor(red: 0xD9/255, green: 0x77/255, blue: 0x57/255, alpha: 1)
-        NSApp.applicationIconImage = ColorizedGhosttyIcon(
-            screenColors: [.systemOrange, clay],
+        let violet = NSColor(red: 0x7C/255, green: 0x5C/255, blue: 0xD3/255, alpha: 1)
+        let icon = ColorizedGhosttyIcon(
+            screenColors: [.systemPurple, violet],
             ghostColor: .white,
             frame: .aluminum
         ).makeImage(in: .main)
+        NSApp.applicationIconImage = icon.flatMap { degauss($0, px: 6) } ?? icon
+    }
+
+    /// Chromatic-aberration "degauss" — split RGB, offset R/B by ±px, recombine. Channels
+    /// are orthogonal so per-component max ≡ add; alpha stays correct via max(a,a,a)=a.
+    private static func degauss(_ img: NSImage, px: CGFloat) -> NSImage? {
+        guard let tiff = img.tiffRepresentation, let src = CIImage(data: tiff) else { return nil }
+        func channel(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat, dx: CGFloat, dy: CGFloat) -> CIImage {
+            src.applyingFilter("CIColorMatrix", parameters: [
+                "inputRVector": CIVector(x: r, y: 0, z: 0, w: 0),
+                "inputGVector": CIVector(x: 0, y: g, z: 0, w: 0),
+                "inputBVector": CIVector(x: 0, y: 0, z: b, w: 0),
+            ]).transformed(by: .init(translationX: dx, y: dy))
+        }
+        let composed = channel(0, 0, 1, dx: px, dy: -px)
+            .applyingFilter("CIMaximumCompositing",
+                            parameters: [kCIInputBackgroundImageKey: channel(0, 1, 0, dx: 0, dy: 0)])
+            .applyingFilter("CIMaximumCompositing",
+                            parameters: [kCIInputBackgroundImageKey: channel(1, 0, 0, dx: -px, dy: px)])
+            .cropped(to: src.extent)
+        let out = NSImage(size: img.size)
+        out.addRepresentation(NSCIImageRep(ciImage: composed))
+        return out
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
         ) { _ in SessionRegistry.shared.saveNow() }
