@@ -33,3 +33,5 @@ vgcore.*
 
 /sprite_face_test*
 do_not_commit/
+
+*.profraw
