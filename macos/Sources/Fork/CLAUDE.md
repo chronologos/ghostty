@@ -36,6 +36,7 @@ cd macos && xcodebuild test -scheme Ghostty -destination 'platform=macOS' \
 ```
 
 Release build & push: see [Branches & release](#branches--release).
+macOS privacy prompts (TCC, container access, FDA): see [Signing & TCC](#signing--tcc).
 
 ## The one architectural rule
 
@@ -173,6 +174,18 @@ jj git push --bookmark fork --remote origin   # never push to upstream
   error surface in `ZmxAdapter.swift:175`.
 - ↻/× buttons hidden when active tab is collapsed; "Kill Session…" missing from
   the heading context menu.
+
+## Signing & TCC
+
+A terminal that runs arbitrary shells will trip every macOS privacy surface. Three layers:
+
+| Prompt | Why | Fix |
+|---|---|---|
+| Files / Photos / Desktop etc., **re-asks after every build** | Ad-hoc signature → new CDHash per compile → TCC's `csreq` (`cdhash H"…"`) never matches again | `scripts/fork-make-cert.sh` once, then always run via `scripts/fork-release.sh`. The re-sign step makes the DR `certificate leaf = H"<cert-sha1>"` — stable across rebuilds. Debug builds stay ad-hoc; don't daily-drive them. |
+| **"wants to access data from other apps"** with no always-allow | Per-container data protection (macOS 15+). Fires on any `stat()` into `~/Library/{Group ,}Containers/<app>/` — `ls`, `fd`, shell-history/dir-jump tools, prompt git checks. Each target container is a separate session-scoped grant by design. | Grant **Full Disk Access** to the ReleaseLocal app (Privacy & Security → Full Disk Access → `+`). FDA is a superset; suppresses this and the row above. Keyed on the DR, so it survives rebuilds *only because of* the self-signed cert. |
+| Gatekeeper "unidentified developer" on first launch | Self-signed isn't notarized | Right-click → Open once, or `xattr -dr com.apple.quarantine <app>`. |
+
+`FORK_SIGN_IDENTITY="Apple Development: …"` overrides the cert if you'd rather use a real Team ID.
 
 ## Known limitations
 
