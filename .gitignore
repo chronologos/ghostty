@@ -32,3 +32,4 @@ vgcore.*
 
 do_not_commit/
 
+*.profraw
