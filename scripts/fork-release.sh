@@ -13,6 +13,7 @@ IDENTITY="${FORK_SIGN_IDENTITY:-ghostty-fork-dev}"
 echo "→ libghostty (ReleaseFast)"
 PATH="$(pwd)/scripts/shims:$PATH" zig build \
   -Doptimize=ReleaseFast \
+  -Demit-xcframework \
   -Demit-macos-app=false
 
 echo "→ Ghostty.app (ReleaseLocal)"

@@ -19,7 +19,8 @@ See `do_not_commit/ghostty-fork/SPEC.md` for the full spec.
 ```sh
 # zig 0.15.2 can't link the macOS 26.4 SDK (ziglang/zig#31658).
 # scripts/shims/xcrun redirects its SDK probe to 15.4. Remove once a fixed zig ships.
-PATH=$(pwd)/scripts/shims:$PATH zig build
+# -Demit-xcframework: upstream's libghostty-vt split made the xcframework non-default.
+PATH=$(pwd)/scripts/shims:$PATH zig build -Demit-xcframework -Demit-macos-app=false
 
 # Run the fork (debug builds are opt-in; ReleaseLocal via fork-release.sh defaults on)
 GHOSTTY_FORK=1 open macos/build/Debug/Ghostty.app
