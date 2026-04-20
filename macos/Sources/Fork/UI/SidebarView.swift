@@ -180,16 +180,18 @@ struct SidebarView: View {
 
     private func tabHeading(_ tab: TabModel, renaming: Bool, active: Bool,
                             paneCount: Int) -> some View {
-        HStack(spacing: 0) {
-            Button {
-                withAnimation(.snappy(duration: 0.15)) {
-                    registry.setCollapsed(tab.id, !tab.collapsed)
-                }
-            } label: {
+        let toggle = {
+            withAnimation(.snappy(duration: 0.15)) {
+                registry.setCollapsed(tab.id, !tab.collapsed)
+            }
+        }
+        return HStack(spacing: 0) {
+            Button(action: toggle) {
                 Image(systemName: "chevron.right")
                     .font(.system(size: 8, weight: .semibold)).foregroundStyle(.secondary)
                     .rotationEffect(.degrees(tab.collapsed ? 0 : 90))
-                    .frame(width: 14, alignment: .leading)
+                    .frame(width: 14, height: 20, alignment: .leading)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             if renaming {
@@ -206,7 +208,10 @@ struct SidebarView: View {
         }
         .padding(.top, 4).padding(.trailing, 12).frame(height: 20)
         .contentShape(Rectangle())
-        .onTapGesture { controller?.activate(tab: tab.id) }
+        .onTapGesture {
+            if tab.collapsed { toggle() }
+            controller?.activate(tab: tab.id)
+        }
         .simultaneousGesture(TapGesture(count: 2).onEnded { beginRename(tab) })
         .contextMenu {
             Button("Rename Tab…") { beginRename(tab) }
@@ -250,13 +255,22 @@ struct SidebarView: View {
             }
             Spacer()
             if let tag {
-                Text(tag.text)
-                    .font(.system(size: 8, weight: .medium))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 5).padding(.vertical, 2)
-                    .background(Color(hue: tag.hue, saturation: 0.6, brightness: 0.5),
-                                in: RoundedRectangle(cornerRadius: 3))
-                    .padding(.trailing, 6)
+                let c = Color(hue: tag.hue, saturation: 0.6, brightness: dark ? 0.55 : 0.45)
+                HStack(spacing: 4) {
+                    Circle().strokeBorder(c, lineWidth: 1.5)
+                        .background(Circle().fill(hovered ? c : .clear))
+                        .frame(width: 8, height: 8)
+                    if hovered {
+                        Text(tag.text).font(.system(size: 8, weight: .medium))
+                            .foregroundStyle(c).fixedSize()
+                            .transition(.opacity.combined(with: .move(edge: .leading)))
+                    }
+                }
+                .padding(.horizontal, hovered ? 5 : 0).padding(.vertical, hovered ? 2 : 0)
+                .background(hovered ? c.opacity(0.12) : .clear, in: Capsule())
+                .animation(.snappy(duration: 0.15), value: hovered)
+                .help(tag.text)
+                .padding(.trailing, 6)
             }
             if active && index == 0 {
                 Button { controller?.kickRedraw(tabID: tab.id) } label: {
