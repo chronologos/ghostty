@@ -12,8 +12,10 @@ struct SidebarView: View {
     @State private var tagging: (tab: TabModel.ID, index: Int)?
     @FocusState private var renameFieldFocused: Bool
     @AppStorage("forkSidebarCompact") private var compact = false
+    @Environment(\.colorScheme) private var scheme
 
     private let clay = Color(red: 0xD9/255, green: 0x77/255, blue: 0x57/255)
+    private var dark: Bool { scheme == .dark }
 
     private var recentTags: ArraySlice<PaneTag> { registry.recentTags.prefix(5) }
 
@@ -133,9 +135,11 @@ struct SidebarView: View {
                 ForEach(tabs) { tab in tabRow(tab) }
             }
             .padding(6)
-            .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 6))
+            .background(dark ? Color.black.opacity(0.18)
+                             : Color(nsColor: .controlBackgroundColor).opacity(0.6),
+                        in: RoundedRectangle(cornerRadius: 6))
             .overlay(RoundedRectangle(cornerRadius: 6)
-                .stroke(Color.secondary.opacity(0.15), lineWidth: 0.5))
+                .stroke(Color.secondary.opacity(dark ? 0.15 : 0.1), lineWidth: 0.5))
             .padding(.horizontal, 8)
             .transition(.opacity)
         }
@@ -274,7 +278,8 @@ struct SidebarView: View {
         }
         .padding(.trailing, 12).frame(minHeight: 28)
         .background(
-            focused ? clay.opacity(0.14) : hovered ? Color.primary.opacity(0.06) : .clear,
+            focused ? clay.opacity(dark ? 0.14 : 0.20)
+                    : hovered ? Color.primary.opacity(0.06) : .clear,
             in: RoundedRectangle(cornerRadius: 5))
         .contentShape(Rectangle())
         .onHover { inside in
