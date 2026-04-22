@@ -407,8 +407,11 @@ private struct PaneLabel: View {
     var body: some View {
         // Upstream's `titleFallbackTimer` sets `"👻"` after 500ms if no OSC title arrived
         // (SurfaceView_AppKit.swift:323) — treat it as "no title" so the session name shows.
+        // A path-shaped title (OMZ-style `%n@%m:%~`, `$PWD`, `~/…`) also counts as no-title:
+        // the user wants the zmx session id, not whatever the shell reports as cwd.
         let t = surface.title
-        let label = userLabel ?? (t.isEmpty || t == "👻" ? fallback : t)
+        let isPathish = t.hasPrefix("/") || t.hasPrefix("~") || t.contains(":/") || t.contains(":~")
+        let label = userLabel ?? (t.isEmpty || t == "👻" || isPathish ? fallback : t)
         return VStack(alignment: .leading, spacing: 0) {
             Text(label).font(.system(size: 12)).lineLimit(1)
                 .foregroundStyle(active ? .primary : .secondary)
