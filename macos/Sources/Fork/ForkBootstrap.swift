@@ -38,6 +38,11 @@ enum ForkBootstrap {
             frame: .aluminum
         ).makeImage(in: .main)
         NSApp.applicationIconImage = icon.flatMap { degauss($0, px: 6) } ?? icon
+        // Flush pending debounced fork.json writes at quit — `$objectWillChange.debounce(500ms)`
+        // means rename/tag/tab-switch made within the last half-second would otherwise be lost.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { _ in MainActor.assumeIsolated { SessionRegistry.shared.saveNow() } }
     }
 
     /// Chromatic-aberration "degauss" — split RGB, offset R/B by ±px, recombine. Channels
@@ -60,9 +65,6 @@ enum ForkBootstrap {
         let out = NSImage(size: img.size)
         out.addRepresentation(NSCIImageRep(ciImage: composed))
         return out
-        NotificationCenter.default.addObserver(
-            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
-        ) { _ in SessionRegistry.shared.saveNow() }
     }
 
     /// Seam #2 — called from `TerminalController.newWindow` before it constructs a controller.
