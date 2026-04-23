@@ -170,6 +170,44 @@ final class SessionRegistry: ObservableObject {
         tabs[i].paneTags = tabs[i].paneTags.filter { live.contains($0.key) }
     }
 
+    // MARK: Pane move / tab merge (PR21)
+    //
+    // Persisted-side surgery only — live `SurfaceView` reparenting stays in the
+    // controller per the "one architectural rule" in Fork/CLAUDE.md. These methods
+    // keep the zmx session alive: they don't touch `refs` (surface→session map) so
+    // whatever `SurfaceView` owns the pty continues running; the controller is
+    // expected to reparent that view in the live `SplitTree` after calling these.
+
+    /// Move a leaf from `src` to `dst` (same host only). Migrates per-pane state
+    /// (labels/tags/lastActive) BEFORE `setPersistedTree` since that prunes non-live
+    /// keys. `dst`'s tree gets `ref` appended on the right; `src`'s tree may become
+    /// `.empty` — the controller is responsible for detecting that and closing src.
+    /// Returns true on success, false if refused (cross-host, missing tab, ref not
+    /// in src, src == dst).
+    @discardableResult
+    func movePanePersisted(from src: TabModel.ID, ref: SessionRef, to dst: TabModel.ID) -> Bool {
+        guard src != dst,
+              let si = tabs.firstIndex(where: { $0.id == src }),
+              let di = tabs.firstIndex(where: { $0.id == dst }),
+              tabs[si].hostID == tabs[di].hostID,
+              tabs[si].tree.leafRefs.contains(ref) else { return false }
+        let key = ref.key
+        let label = tabs[si].paneLabels[key]
+        let tag = tabs[si].paneTags[key]
+        let last = tabs[si].lastActive[key]
+        if let label { tabs[di].paneLabels[key] = label }
+        if let tag { tabs[di].paneTags[key] = tag }
+        if let last { tabs[di].lastActive[key] = last }
+        setPersistedTree(tabs[di].tree.appending(leaf: ref), for: dst)
+        setPersistedTree(tabs[si].tree.removing(ref), for: src)
+        return true
+    }
+
+    // `moveToNewTabPersisted` and `mergeTabPersisted` are intentionally absent —
+    // the controller doesn't use them (it creates new tabs via `newTab` and folds
+    // merges through `movePane`), and keeping "tests-only" variants diverges from
+    // the controller's live-tree shape, which the tests couldn't catch.
+
     // MARK: Persistence
 
     func snapshot() -> ForkPersistence.State {
