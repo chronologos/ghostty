@@ -12,6 +12,7 @@ struct SidebarView: View {
     @State private var tagging: (tab: TabModel.ID, index: Int)?
     @FocusState private var renameFieldFocused: Bool
     @AppStorage("forkSidebarCompact") private var compact = false
+    @AppStorage("forkSidebarFilterTagged") private var filterTagged = false
     @Environment(\.colorScheme) private var scheme
 
     private let clay = Color(red: 0xD9/255, green: 0x77/255, blue: 0x57/255)
@@ -52,16 +53,23 @@ struct SidebarView: View {
                       label: compact ? "Show details" : "Hide details", keys: nil) {
                 withAnimation(.snappy(duration: 0.12)) { compact.toggle() }
             }
+            actionRow(icon: filterTagged ? "tag.fill" : "tag",
+                      label: filterTagged ? "Show all" : "Tagged only",
+                      keys: nil,
+                      iconTint: filterTagged ? clay : nil) {
+                withAnimation(.snappy(duration: 0.12)) { filterTagged.toggle() }
+            }
         }
         .padding(6)
     }
 
     private func actionRow(icon: String, label: String, keys: [String]?,
+                           iconTint: Color? = nil,
                            perform: @escaping () -> Void) -> some View {
         Button(action: perform) {
             HStack(spacing: 8) {
                 Image(systemName: icon).font(.system(size: 11))
-                    .foregroundStyle(.secondary).frame(width: 14)
+                    .foregroundStyle(iconTint ?? .secondary).frame(width: 14)
                 Text(label).font(.system(size: 12))
                 Spacer()
                 if let keys { kbd(keys) }
@@ -90,10 +98,21 @@ struct SidebarView: View {
 
     @ViewBuilder
     private func hostSection(_ host: ForkHost) -> some View {
-        let tabs = registry.tabs(on: host.id)
-        let connected = registry.isConnected(host.id)
+        let allTabs = registry.tabs(on: host.id)
+        let tabs = filterTagged ? allTabs.filter(tabHasTag) : allTabs
+        // Filter-on + no tagged tabs on this host → hide the whole section so the
+        // sidebar isn't cluttered with empty host cards.
+        if !(filterTagged && tabs.isEmpty) {
+            hostHeader(host, tabs: tabs)
+            if host.expanded && !tabs.isEmpty {
+                hostBody(tabs: tabs)
+            }
+        }
+    }
 
-        Button {
+    private func hostHeader(_ host: ForkHost, tabs: [TabModel]) -> some View {
+        let connected = registry.isConnected(host.id)
+        return Button {
             withAnimation(.snappy(duration: 0.15)) { registry.setExpanded(host.id, !host.expanded) }
         } label: {
             HStack(spacing: 8) {
@@ -129,20 +148,25 @@ struct SidebarView: View {
                 }
             }
         }
+    }
 
-        if host.expanded && !tabs.isEmpty {
-            VStack(alignment: .leading, spacing: 2) {
-                ForEach(tabs) { tab in tabRow(tab) }
-            }
-            .padding(6)
-            .background(dark ? Color.black.opacity(0.18)
-                             : Color(nsColor: .controlBackgroundColor).opacity(0.6),
-                        in: RoundedRectangle(cornerRadius: 6))
-            .overlay(RoundedRectangle(cornerRadius: 6)
-                .stroke(Color.secondary.opacity(dark ? 0.15 : 0.1), lineWidth: 0.5))
-            .padding(.horizontal, 8)
-            .transition(.opacity)
+    private func hostBody(tabs: [TabModel]) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(tabs) { tab in tabRow(tab) }
         }
+        .padding(6)
+        .background(dark ? Color.black.opacity(0.18)
+                         : Color(nsColor: .controlBackgroundColor).opacity(0.6),
+                    in: RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6)
+            .stroke(Color.secondary.opacity(dark ? 0.15 : 0.1), lineWidth: 0.5))
+        .padding(.horizontal, 8)
+        .transition(.opacity)
+    }
+
+    /// True if any pane in this tab has a tag assigned. Used by the `filterTagged` toggle.
+    private func tabHasTag(_ tab: TabModel) -> Bool {
+        tab.tree.leafRefs.contains { tab.paneTags[$0.key] != nil }
     }
 
     // MARK: Tab → pane rows
@@ -153,19 +177,24 @@ struct SidebarView: View {
 
     private func tabRow(_ tab: TabModel) -> some View {
         let active = tab.id == registry.activeTabID
-        let refs = tab.tree.leafRefs
+        let allRefs = tab.tree.leafRefs
         let surfaces = controller?.surfaces(for: tab.id) ?? []
+        // Preserve original indexes so `paneRow` keeps pointing at the right
+        // surface/spine endpoint when untagged panes are hidden.
+        let shown: [(Int, SessionRef)] = filterTagged
+            ? allRefs.enumerated().compactMap { tab.paneTags[$0.element.key] != nil ? ($0.offset, $0.element) : nil }
+            : Array(allRefs.enumerated())
         let renaming = registry.renaming == .tab(tab.id)
-        let heading = renaming || tab.collapsed || tab.title != refs.first?.name
+        let heading = renaming || tab.collapsed || tab.title != allRefs.first?.name
         return VStack(alignment: .leading, spacing: 0) {
             if heading {
-                tabHeading(tab, renaming: renaming, active: active, paneCount: refs.count)
+                tabHeading(tab, renaming: renaming, active: active, paneCount: shown.count)
             }
             if !tab.collapsed {
-                ForEach(Array(refs.enumerated()), id: \.offset) { i, ref in
+                ForEach(shown, id: \.0) { i, ref in
                     paneRow(tab, index: i, ref: ref,
                             surface: i < surfaces.count ? surfaces[i] : nil,
-                            spine: refs.count > 1 ? (i == 0, i == refs.count - 1) : nil,
+                            spine: allRefs.count > 1 ? (i == 0, i == allRefs.count - 1) : nil,
                             active: active)
                 }
             }
@@ -319,6 +348,9 @@ struct SidebarView: View {
                 Button("Clear Tag") { registry.setPaneTag(tab: tab.id, name: ref.key, to: nil) }
             }
             Divider()
+            if let surface {
+                Button("Force Repaint") { forkWigglePane(surface) }
+            }
             Button("Minimize Panes") { registry.setCollapsed(tab.id, true) }
             Button("Close Tab") { controller?.closeForkTab(tab.id) }
             Button("Kill This Session…", role: .destructive) {
