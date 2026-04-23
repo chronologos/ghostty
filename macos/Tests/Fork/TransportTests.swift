@@ -90,5 +90,51 @@ struct TransportTests {
                                     a: leaf,
                                     b: .split(horizontal: false, ratio: 0.5, a: leaf, b: leaf)).paneCount == 3)
     }
+
+    @Test func appendingLeafOnEmpty() {
+        let ref = SessionRef(hostID: "h", name: "a")
+        let t = PersistedTree.empty.appending(leaf: ref)
+        #expect(t == .leaf(ref))
+    }
+
+    @Test func appendingLeafOnSplit() {
+        let a = SessionRef(hostID: "h", name: "a")
+        let b = SessionRef(hostID: "h", name: "b")
+        let c = SessionRef(hostID: "h", name: "c")
+        let split = PersistedTree.split(horizontal: false, ratio: 0.5,
+                                        a: .leaf(a), b: .leaf(b))
+        let t = split.appending(leaf: c)
+        #expect(t.paneCount == 3)
+        #expect(t.leafRefs == [a, b, c])
+        // Appended leaf lives on the right of a new 50/50 horizontal split.
+        if case .split(let h, let ratio, _, let rhs) = t {
+            #expect(h == true)
+            #expect(ratio == 0.5)
+            #expect(rhs == .leaf(c))
+        } else {
+            Issue.record("expected split at root")
+        }
+    }
+
+    @Test func mergingConcatsLeavesInOrder() {
+        let a = SessionRef(hostID: "h", name: "a")
+        let b = SessionRef(hostID: "h", name: "b")
+        let c = SessionRef(hostID: "h", name: "c")
+        let left = PersistedTree.leaf(a)
+        let right = PersistedTree.split(horizontal: true, ratio: 0.5,
+                                        a: .leaf(b), b: .leaf(c))
+        #expect(left.merging(right).leafRefs == [a, b, c])
+        // Merging into empty flattens other's shape to a right-leaning chain,
+        // starting with its first leaf as a bare leaf.
+        #expect(PersistedTree.empty.merging(right).leafRefs == [b, c])
+    }
+
+    @Test func mergingEmptyIsIdentity() {
+        let a = SessionRef(hostID: "h", name: "a")
+        let t = PersistedTree.split(horizontal: false, ratio: 0.5,
+                                    a: .leaf(a), b: .leaf(a))
+        #expect(t.merging(.empty) == t)
+        #expect(PersistedTree.empty.merging(.empty) == .empty)
+    }
 }
 #endif
