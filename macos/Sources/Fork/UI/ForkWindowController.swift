@@ -368,6 +368,86 @@ final class ForkWindowController: TerminalController {
         }
     }
 
+    // MARK: Move pane / merge tab (PR21b)
+
+    /// Move a pane from one tab into another (same host). `to == nil` creates a
+    /// new destination tab. The live `SurfaceView` is reparented — its pty (zmx
+    /// attach) keeps running since `registry.refs` isn't touched.
+    ///
+    /// Sequencing nuances: write `liveTabs[src]` / `liveTabs[dst]` BEFORE any
+    /// `surfaceTree =` so `closeForkTab` (if src empties) reads the post-move
+    /// state and doesn't unbind the moved surface. Skip `surfaceTree =` for the
+    /// active-and-empty case — the sibling `activate(tab:)` inside closeForkTab
+    /// will replace surfaceTree wholesale, avoiding an in-flight debounced
+    /// `persistActive(empty)` landing under the newly-active sibling's id.
+    func movePane(from src: TabModel.ID, ref: SessionRef, to dstOrNil: TabModel.ID?) {
+        guard let srcTab = registry.tabs.first(where: { $0.id == src }),
+              srcTab.tree.leafRefs.contains(ref) else { return }
+
+        // Resolve destination.
+        let dst: TabModel.ID
+        if let existing = dstOrNil {
+            guard let dstTab = registry.tabs.first(where: { $0.id == existing }),
+                  dstTab.hostID == srcTab.hostID, existing != src else { return }
+            dst = existing
+        } else {
+            dst = registry.newTab(on: srcTab.hostID, title: ref.name).id
+        }
+
+        let srcLive = (src == registry.activeTabID) ? surfaceTree : (liveTabs[src] ?? .init())
+        // Live surface is required. Operating off persisted alone would let the
+        // closeForkTab(src) check below unbind live panes that weren't moved — the
+        // persisted ↔ live divergence window before the 80ms debounce settles.
+        guard let surface = srcLive.first(where: { registry.refs[$0.id] == ref }),
+              let srcNode = srcLive.root?.node(view: surface) else { return }
+
+        let prunedSrc = srcLive.removing(srcNode)
+        let dstLive = (dst == registry.activeTabID) ? surfaceTree : (liveTabs[dst] ?? .init())
+        let extendedDst: SplitTree<Ghostty.SurfaceView>
+        // Rightmost leaf + `.right` makes the depth-first-left traversal yield
+        // `[...existing, moved]` — matches PersistedTree.appending(leaf:) so live
+        // and persisted shapes agree even when dst is inactive (no debounced
+        // persistActive.project() to paper over a mismatch).
+        if let anchor = Array(dstLive).last {
+            extendedDst = (try? dstLive.inserting(view: surface, at: anchor, direction: .right)) ?? dstLive
+        } else {
+            extendedDst = .init(view: surface)
+        }
+        liveTabs[src] = prunedSrc
+        liveTabs[dst] = extendedDst
+        if src == registry.activeTabID && !prunedSrc.isEmpty {
+            surfaceTree = prunedSrc
+        } else if dst == registry.activeTabID {
+            surfaceTree = extendedDst
+        }
+
+        registry.movePanePersisted(from: src, ref: ref, to: dst)
+        undoManager?.removeAllActions(withTarget: self)
+        // Close src off LIVE state (prunedSrc), not the persisted tree. Persisted
+        // can lag by up to 80ms after a recent split; reading it would auto-close
+        // a tab whose live state still has panes.
+        if prunedSrc.isEmpty {
+            closeForkTab(src)
+        }
+    }
+
+    /// Fold every pane from `src` into `dst` (same host). Src auto-closes after.
+    /// Iterates the LIVE tree (matches `movePane`'s surface requirement) and skips
+    /// external (`@`-keyed) refs — moving an external reattaches someone else's
+    /// session under a different tab, which is the split/merge-externals rabbit
+    /// hole we're deliberately deferring per Fork/CLAUDE.md §Gotchas.
+    func mergeTab(from src: TabModel.ID, into dst: TabModel.ID) {
+        guard src != dst,
+              let srcTab = registry.tabs.first(where: { $0.id == src }),
+              let dstTab = registry.tabs.first(where: { $0.id == dst }),
+              srcTab.hostID == dstTab.hostID else { return }
+        let liveSrc = (src == registry.activeTabID) ? surfaceTree : (liveTabs[src] ?? .init())
+        let refs = Array(liveSrc).compactMap { registry.refs[$0.id] }.filter { !$0.external }
+        for ref in refs {
+            movePane(from: src, ref: ref, to: dst)
+        }
+    }
+
     // MARK: ⌘T / ⌘W — replace upstream's native-NSWindow-tab actions with sidebar tabs.
 
     @IBAction override func newTab(_ sender: Any?) {
