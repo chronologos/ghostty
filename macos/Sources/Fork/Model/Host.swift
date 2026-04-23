@@ -159,5 +159,22 @@ indirect enum PersistedTree: Codable, Hashable {
             }
         }
     }
+
+    /// Append a leaf to the right. Empty → `.leaf(ref)`; non-empty → horizontal split
+    /// 50/50 with `self` on the left. Matches the ⌘D `newSplit(direction: .right)` shape
+    /// so "move pane into tab" feels like "split off the right".
+    func appending(leaf ref: SessionRef) -> PersistedTree {
+        switch self {
+        case .empty: .leaf(ref)
+        default: .split(horizontal: true, ratio: 0.5, a: self, b: .leaf(ref))
+        }
+    }
+
+    /// Concat `other`'s leaves into `self` via repeated `appending(leaf:)`. Preserves
+    /// `self`'s internal shape; `other`'s shape is flattened. Merging with both shapes
+    /// intact would nest into an unreadable tree — explicit flatten is the lesser evil.
+    func merging(_ other: PersistedTree) -> PersistedTree {
+        other.leafRefs.reduce(self) { $0.appending(leaf: $1) }
+    }
 }
 #endif
