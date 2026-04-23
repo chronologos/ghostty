@@ -247,7 +247,44 @@ struct SidebarView: View {
             Button(tab.collapsed ? "Expand Panes" : "Minimize Panes") {
                 registry.setCollapsed(tab.id, !tab.collapsed)
             }
+            mergeIntoMenu(tab)
             Button("Close Tab") { controller?.closeForkTab(tab.id) }
+        }
+    }
+
+    /// "Move Pane to ▸" — move a single pane to a new tab or another same-host tab.
+    /// Hidden for external (`@`-keyed) refs per v1 scope (see Fork/CLAUDE.md §Gotchas).
+    @ViewBuilder
+    private func movePaneMenu(_ tab: TabModel, ref: SessionRef) -> some View {
+        if !ref.external {
+            let targets = registry.tabs(on: tab.hostID).filter { $0.id != tab.id }
+            Menu("Move Pane to…") {
+                Button("New Tab") { controller?.movePane(from: tab.id, ref: ref, to: nil) }
+                if !targets.isEmpty {
+                    Divider()
+                    ForEach(targets) { dst in
+                        Button(dst.title.isEmpty ? "(untitled)" : dst.title) {
+                            controller?.movePane(from: tab.id, ref: ref, to: dst.id)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// "Merge Into ▸" — fold all of `tab`'s panes into another tab on the same host.
+    /// Hidden when no valid destination exists.
+    @ViewBuilder
+    private func mergeIntoMenu(_ tab: TabModel) -> some View {
+        let targets = registry.tabs(on: tab.hostID).filter { $0.id != tab.id }
+        if !targets.isEmpty {
+            Menu("Merge Into…") {
+                ForEach(targets) { dst in
+                    Button(dst.title.isEmpty ? "(untitled)" : dst.title) {
+                        controller?.mergeTab(from: tab.id, into: dst.id)
+                    }
+                }
+            }
         }
     }
 
@@ -348,6 +385,7 @@ struct SidebarView: View {
                 Button("Clear Tag") { registry.setPaneTag(tab: tab.id, name: ref.key, to: nil) }
             }
             Divider()
+            movePaneMenu(tab, ref: ref)
             if let surface {
                 Button("Force Repaint") { forkWigglePane(surface) }
             }
