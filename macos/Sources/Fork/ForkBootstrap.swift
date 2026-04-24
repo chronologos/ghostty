@@ -69,13 +69,33 @@ enum ForkBootstrap {
 
     /// Seam #2 — called from `TerminalController.newWindow` before it constructs a controller.
     /// Returning non-nil short-circuits upstream window creation.
+    ///
+    /// `parent` is intentionally ignored: upstream uses it for native NSWindow tab-grouping,
+    /// but the fork is single-window (sidebar tabs), so there is no second window to group.
     static func intercept(
         _ ghostty: Ghostty.App,
         withBaseConfig baseConfig: Ghostty.SurfaceConfiguration?,
         withParent parent: NSWindow?
     ) -> TerminalController? {
         guard enabled else { return nil }
-        return ForkWindowController.newWindow(ghostty)
+        // Shortcuts/AppleScript/Finder-open carry cwd/command in baseConfig. The fork is
+        // zmx-native, so translate to a NewSessionIntent (cwd/cmd become the initial state of
+        // a fresh zmx session) instead of passing the raw config to libghostty.
+        let intent: NewSessionIntent? = baseConfig.flatMap { cfg in
+            guard cfg.workingDirectory != nil || cfg.command != nil else { return nil }
+            return NewSessionIntent(
+                hostID: ForkHost.local.id,
+                name: nil,
+                cwd: cfg.workingDirectory,
+                // AppleScript hands `command` over as a single shell-line string
+                // (`vim "/tmp/with space.txt"`). Naive split-on-space mangles
+                // quoted args; `sh -c` gives the user the shell semantics they
+                // typed. Each argv element is shq'd downstream so the line itself
+                // never touches an outer shell unquoted.
+                cmd: cfg.command.map { ["/bin/sh", "-c", $0] }
+            )
+        }
+        return ForkWindowController.newWindow(ghostty, intent: intent)
     }
 }
 #endif

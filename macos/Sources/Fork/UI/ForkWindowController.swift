@@ -21,25 +21,33 @@ final class ForkWindowController: TerminalController {
     // *inside* super.init (BaseTerminalController.init:142 assigns surfaceTree → didSet
     // → TerminalController.surfaceTreeDidChange reads self.window → nib loads).
 
-    static func newWindow(_ ghostty: Ghostty.App) -> ForkWindowController {
+    static func newWindow(_ ghostty: Ghostty.App, intent: NewSessionIntent? = nil) -> ForkWindowController {
         if let existing = instance, existing.window != nil {
             existing.window?.makeKeyAndOrderFront(nil)
+            // Scripting paths (Shortcuts/AppleScript/Finder open) carry a payload — open
+            // it as a fresh tab instead of just raising the window.
+            if let intent { existing.newForkTab(intent: intent) }
             return existing
         }
         let registry = SessionRegistry.shared
         let c: ForkWindowController
         if registry.tabs.isEmpty {
-            let ref = SessionRef(hostID: ForkHost.local.id, name: registry.uniqueAutoName())
-            c = ForkWindowController(ghostty, withBaseConfig: ZmxAdapter.surfaceConfig(host: .local, ref: ref))
+            let host: ForkHost = intent.flatMap { registry.host(id: $0.hostID) } ?? .local
+            let ref = SessionRef(hostID: host.id, name: intent?.name ?? registry.uniqueAutoName())
+            let cfg = ZmxAdapter.surfaceConfig(host: host, ref: ref,
+                                               initialCmd: intent?.cmd, cwd: intent?.cwd)
+            c = ForkWindowController(ghostty, withBaseConfig: cfg)
             if case let .leaf(view) = c.surfaceTree.root {
                 registry.bind(surface: view.id, to: ref)
-                let tab = registry.newTab(on: ForkHost.local.id, title: ref.name)
+                let tab = registry.newTab(on: host.id, title: ref.name)
                 c.liveTabs[tab.id] = c.surfaceTree
                 c.activate(tab: tab.id)
             }
         } else {
             c = ForkWindowController(ghostty, withSurfaceTree: .init())
-            if let active = registry.activeTabID ?? registry.tabs.first?.id {
+            if let intent {
+                c.newForkTab(intent: intent)
+            } else if let active = registry.activeTabID ?? registry.tabs.first?.id {
                 c.activate(tab: active)
             }
         }
@@ -279,18 +287,11 @@ final class ForkWindowController: TerminalController {
     }
 
     /// Jiggle every pane in `tabID`'s tree by 1px to force a SIGWINCH redraw.
-    /// `ghostty_surface_set_size` only emits SIGWINCH on dimension change.
+    /// Force every surface in a tab to repaint. The 16ms-gap SIGWINCH wiggle is
+    /// in `forkWigglePane`; back-to-back `set_size` here used to coalesce in the
+    /// kernel and no-op for alt-screen TUIs (see SurfaceWiggle.swift).
     func kickRedraw(tabID: TabModel.ID) {
-        let tree = (tabID == registry.activeTabID) ? surfaceTree : (liveTabs[tabID] ?? .init())
-        for view in tree {
-            guard let surface = view.surface else { continue }
-            let s = view.convertToBacking(view.frame.size)
-            let w = UInt32(s.width), h = UInt32(s.height)
-            guard w > 0, h > 1 else { continue }
-            ghostty_surface_set_size(surface, w, h - 1)
-            ghostty_surface_set_size(surface, w, h)
-            ghostty_surface_draw(surface)
-        }
+        for view in liveTree(for: tabID) { forkWigglePane(view) }
     }
 
     func gotoHost(index n: Int) {
@@ -394,7 +395,7 @@ final class ForkWindowController: TerminalController {
             dst = registry.newTab(on: srcTab.hostID, title: ref.name).id
         }
 
-        let srcLive = (src == registry.activeTabID) ? surfaceTree : (liveTabs[src] ?? .init())
+        let srcLive = liveTree(for: src)
         // Live surface is required. Operating off persisted alone would let the
         // closeForkTab(src) check below unbind live panes that weren't moved — the
         // persisted ↔ live divergence window before the 80ms debounce settles.
@@ -402,7 +403,7 @@ final class ForkWindowController: TerminalController {
               let srcNode = srcLive.root?.node(view: surface) else { return }
 
         let prunedSrc = srcLive.removing(srcNode)
-        let dstLive = (dst == registry.activeTabID) ? surfaceTree : (liveTabs[dst] ?? .init())
+        let dstLive = liveTree(for: dst)
         let extendedDst: SplitTree<Ghostty.SurfaceView>
         // Rightmost leaf + `.right` makes the depth-first-left traversal yield
         // `[...existing, moved]` — matches PersistedTree.appending(leaf:) so live
@@ -428,6 +429,9 @@ final class ForkWindowController: TerminalController {
         // a tab whose live state still has panes.
         if prunedSrc.isEmpty {
             closeForkTab(src)
+            // closeForkTab's sibling-pick lands on src's neighbour, not the tab we
+            // just created. Follow the moved pane when the user asked for a new tab.
+            if dstOrNil == nil { activate(tab: dst) }
         }
     }
 
@@ -441,8 +445,7 @@ final class ForkWindowController: TerminalController {
               let srcTab = registry.tabs.first(where: { $0.id == src }),
               let dstTab = registry.tabs.first(where: { $0.id == dst }),
               srcTab.hostID == dstTab.hostID else { return }
-        let liveSrc = (src == registry.activeTabID) ? surfaceTree : (liveTabs[src] ?? .init())
-        let refs = Array(liveSrc).compactMap { registry.refs[$0.id] }.filter { !$0.external }
+        let refs = Array(liveTree(for: src)).compactMap { registry.refs[$0.id] }.filter { !$0.external }
         for ref in refs {
             movePane(from: src, ref: ref, to: dst)
         }
@@ -603,7 +606,11 @@ final class ForkWindowController: TerminalController {
     func activate(tab id: TabModel.ID, paneIndex: Int? = nil) {
         let current = registry.activeTabID
         if current != id {
-            if let current {
+            // Snapshot the outgoing tab ONLY if it's been hydrated this session. On
+            // cold start `current` is the disk-loaded id but `surfaceTree` is the
+            // placeholder `.init()` — snapshotting that would set `current`'s persisted
+            // tree to `.empty` and prune its labels/tags/lastActive.
+            if let current, liveTabs[current] != nil {
                 liveTabs[current] = surfaceTree
                 registry.setPersistedTree(project(surfaceTree.root), for: current)
             }
@@ -614,11 +621,8 @@ final class ForkWindowController: TerminalController {
         }
         // Relaunch arrives with `current == id` (registry loads activeTabID from disk) but
         // no `liveTabs` entry — must still rebuild, or `persistActive(.init())` wipes it.
-        if let tree = liveTabs[id] {
-            if current != id { surfaceTree = tree }
-        } else {
-            rebuildTree(for: id)
-        }
+        if liveTabs[id] == nil { rebuildTree(for: id) }
+        if current != id, let tree = liveTabs[id] { surfaceTree = tree }
         // `surfaceTree.leaves()` and `PersistedTree.leafRefs` are both depth-first-left,
         // so the sidebar's pane-row offset addresses the matching live SurfaceView.
         // Write the highlight index in the same tick as `setActive` above; the async
@@ -658,6 +662,9 @@ final class ForkWindowController: TerminalController {
         registry.bind(surface: surface.id, to: ref)
         let tab = registry.newTab(on: host.id, title: ref.name)
         liveTabs[tab.id] = .init(view: surface)
+        // Match `gotoHost`/`revealRow`: force-expand so the new row is visible. Without this,
+        // ⌘T onto a collapsed host swaps the terminal in but the sidebar shows nothing new.
+        registry.setExpanded(host.id, true)
         activate(tab: tab.id)
     }
 
@@ -775,9 +782,18 @@ final class ForkWindowController: TerminalController {
             }
         }
         let root = revive(tab.tree) ?? revive(.leaf(nil))
-        let tree = SplitTree<Ghostty.SurfaceView>(root: root, zoomed: nil)
-        liveTabs[tabID] = tree
-        surfaceTree = tree
+        liveTabs[tabID] = SplitTree<Ghostty.SurfaceView>(root: root, zoomed: nil)
+    }
+
+    /// Live tree for a tab, hydrating from persisted if it's never been activated this
+    /// session. Distinguishes the three states: active → `surfaceTree`, parked-inactive
+    /// → cached `liveTabs[id]`, never-activated → `rebuildTree` then return the cache.
+    /// Never returns the `?? .init()` lie that lets a single-leaf write later poison
+    /// `persistActive` — see PR21 review (movePane into dormant dst dropped panes).
+    private func liveTree(for id: TabModel.ID) -> SplitTree<Ghostty.SurfaceView> {
+        if id == registry.activeTabID { return surfaceTree }
+        if liveTabs[id] == nil { rebuildTree(for: id) }
+        return liveTabs[id] ?? .init()
     }
 }
 #endif
