@@ -120,21 +120,79 @@ final class ForkWindowController: TerminalController {
             } catch {}
         }
 
-        // `TerminalController.closeSurface` (`:656-669`) routes root-node close to
-        // `closeWindow(nil)` for single-window. For us that's "close the sidebar tab".
-        if surfaceTree.root == node, let active = registry.activeTabID {
-            if withConfirmation {
-                confirmClose(
-                    messageText: "Close Tab?",
-                    informativeText: "Panes will detach; their zmx sessions keep running. Reattach from ⌘T or the split picker."
-                ) { [weak self] in self?.closeForkTab(active) }
-            } else {
-                closeForkTab(active)
-            }
+        // ⌘W on the last pane → tab-level Detach/Kill. `TerminalController.closeSurface`
+        // (`:656-669`) would route this to `closeWindow(nil)`; we route to the sidebar tab.
+        if surfaceTree.root == node, let tab = registry.activeTab,
+           let host = registry.host(id: tab.hostID) {
+            let live = liveTabs[tab.id]?.compactMap { registry.refs[$0.id] } ?? []
+            let refs = Array(Set(live.isEmpty ? tab.tree.leafRefs : live))
+            confirmDetachOrKill(
+                messageText: "Close tab '\(tab.title)'?",
+                informativeText: refs.isEmpty
+                    ? "No zmx sessions are bound to this tab."
+                    : "Detach leaves \(refs.count) zmx session\(refs.count == 1 ? "" : "s") running. Reattach from ⌘T or the split picker.",
+                killTitle: refs.count > 1 ? "Kill \(refs.count) Sessions" : "Kill Session",
+                killEnabled: !refs.isEmpty,
+                onDetach: { [weak self] in self?.closeForkTab(tab.id) },
+                onKill: { [weak self] in
+                    Task {
+                        for ref in refs { try? await ZmxAdapter.kill(host: host, ref: ref) }
+                        await MainActor.run { self?.closeForkTab(tab.id) }
+                    }
+                }
+            )
             return
         }
 
-        super.closeSurface(node, withConfirmation: withConfirmation)
+        // ⌘W on one pane of several → per-pane Detach/Kill.
+        if case let .leaf(surface) = node, let ref = registry.refs[surface.id],
+           let host = registry.host(id: ref.hostID), let tab = registry.activeTab {
+            confirmDetachOrKill(
+                messageText: "Close pane '\(ref.name)'?",
+                informativeText: "Detach leaves the zmx session running. Reattach from ⌘T or the split picker.",
+                onDetach: { [weak self] in self?.dropPane(tab: tab, ref: ref, surface: surface) },
+                onKill: { [weak self] in
+                    guard let self else { return }
+                    // Unbind first so the pty-death → placeholder path short-circuits.
+                    self.registry.unbind(surface: surface.id)
+                    Task { try? await ZmxAdapter.kill(host: host, ref: ref) }
+                    self.dropPane(tab: tab, ref: ref, surface: surface)
+                }
+            )
+            return
+        }
+
+        super.closeSurface(node, withConfirmation: false)
+    }
+
+    /// ⌘W sheet: Detach (⏎, default) / Kill (K, destructive) / Cancel (Esc).
+    private func confirmDetachOrKill(
+        messageText: String,
+        informativeText: String,
+        killTitle: String = "Kill Session",
+        killEnabled: Bool = true,
+        onDetach: @escaping () -> Void,
+        onKill: @escaping () -> Void
+    ) {
+        guard let window else { onDetach(); return }
+        let alert = NSAlert()
+        alert.messageText = messageText
+        alert.informativeText = informativeText + "\n\n⏎ Detach · K Kill · Esc Cancel"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Detach")
+        let kill = alert.addButton(withTitle: killTitle)
+        kill.keyEquivalent = "k"
+        kill.hasDestructiveAction = true
+        kill.isEnabled = killEnabled
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { resp in
+            alert.window.orderOut(nil)
+            switch resp {
+            case .alertFirstButtonReturn: onDetach()
+            case .alertSecondButtonReturn: onKill()
+            default: break
+            }
+        }
     }
 
     // MARK: ⌘[/⌘]/⌘1-9/⌘⌥1-9 — sidebar-tab navigation (SPEC §10).
@@ -286,14 +344,6 @@ final class ForkWindowController: TerminalController {
         Array(tabID == registry.activeTabID ? surfaceTree : (liveTabs[tabID] ?? .init()))
     }
 
-    /// Jiggle every pane in `tabID`'s tree by 1px to force a SIGWINCH redraw.
-    /// Force every surface in a tab to repaint. The 16ms-gap SIGWINCH wiggle is
-    /// in `forkWigglePane`; back-to-back `set_size` here used to coalesce in the
-    /// kernel and no-op for alt-screen TUIs (see SurfaceWiggle.swift).
-    func kickRedraw(tabID: TabModel.ID) {
-        for view in liveTree(for: tabID) { forkWigglePane(view) }
-    }
-
     func gotoHost(index n: Int) {
         guard registry.hosts.indices.contains(n - 1) else { return }
         let host = registry.hosts[n - 1]
@@ -393,6 +443,11 @@ final class ForkWindowController: TerminalController {
             dst = existing
         } else {
             dst = registry.newTab(on: srcTab.hostID, title: ref.name).id
+            // Fresh tab has tree == .empty and no liveTabs entry. Without this seed,
+            // `liveTree(for: dst)` below falls into rebuildTree → `revive(.empty) ??
+            // revive(.leaf(nil))` and spawns a stray auto-named zmx session that the
+            // moved pane gets inserted *alongside* (2 live leaves, 1 persisted).
+            liveTabs[dst] = .init()
         }
 
         let srcLive = liveTree(for: src)
@@ -429,9 +484,8 @@ final class ForkWindowController: TerminalController {
         // a tab whose live state still has panes.
         if prunedSrc.isEmpty {
             closeForkTab(src)
-            // closeForkTab's sibling-pick lands on src's neighbour, not the tab we
-            // just created. Follow the moved pane when the user asked for a new tab.
-            if dstOrNil == nil { activate(tab: dst) }
+            // closeForkTab's sibling-pick lands on src's neighbour; follow the moved pane.
+            activate(tab: dst)
         }
     }
 
@@ -454,7 +508,7 @@ final class ForkWindowController: TerminalController {
     // MARK: ⌘T / ⌘W — replace upstream's native-NSWindow-tab actions with sidebar tabs.
 
     @IBAction override func newTab(_ sender: Any?) {
-        showNewSessionSheet()
+        showSessionPicker(on: registry.activeHost ?? .local)
     }
 
     @IBAction override func closeTab(_ sender: Any?) {
@@ -620,9 +674,11 @@ final class ForkWindowController: TerminalController {
             registry.setActive(tab: id)
         }
         // Relaunch arrives with `current == id` (registry loads activeTabID from disk) but
-        // no `liveTabs` entry — must still rebuild, or `persistActive(.init())` wipes it.
-        if liveTabs[id] == nil { rebuildTree(for: id) }
-        if current != id, let tree = liveTabs[id] { surfaceTree = tree }
+        // no `liveTabs` entry — must still rebuild AND assign, or `persistActive(.init())`
+        // wipes it. `cold` discriminates that from a warm re-click on the active tab.
+        let cold = liveTabs[id] == nil
+        if cold { rebuildTree(for: id) }
+        if current != id || cold, let tree = liveTabs[id] { surfaceTree = tree }
         // `surfaceTree.leaves()` and `PersistedTree.leafRefs` are both depth-first-left,
         // so the sidebar's pane-row offset addresses the matching live SurfaceView.
         // Write the highlight index in the same tick as `setActive` above; the async
