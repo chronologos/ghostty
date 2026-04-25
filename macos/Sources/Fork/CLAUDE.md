@@ -173,8 +173,7 @@ jj git push --bookmark fork --remote origin   # never push to upstream
 - ssh attach to a re-keyed host behind a ProxyCommand dies opaque (`UNKNOWN port 65535`)
   at the host-key prompt — consider `-o StrictHostKeyChecking=accept-new` or a clearer
   error surface in `ZmxAdapter.swift:175`.
-- ↻/× buttons hidden when active tab is collapsed; "Kill Session…" missing from
-  the heading context menu.
+- "Kill Session…" missing from the heading context menu.
 
 ## Signing & TCC
 
