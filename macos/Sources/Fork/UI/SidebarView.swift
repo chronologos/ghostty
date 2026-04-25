@@ -8,7 +8,6 @@ struct SidebarView: View {
     @EnvironmentObject private var registry: SessionRegistry
     @State private var renameText: String = ""
     @State private var draggingTab: TabModel.ID?
-    @State private var hoveredPane: (TabModel.ID, Int)?
     @State private var tagging: (tab: TabModel.ID, index: Int)?
     @FocusState private var renameFieldFocused: Bool
     @AppStorage("forkSidebarCompact") private var compact = false
@@ -25,12 +24,17 @@ struct SidebarView: View {
             header
             Divider().padding(.horizontal, 8)
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 4) {
+                // Eager VStack: lazy materialisation made the overlay scroller jump
+                // because each `hostSection` is variable-height and the content-size
+                // estimate corrected on every scroll. Sidebar row counts are small
+                // enough that rendering all of them is cheaper than the instability.
+                VStack(alignment: .leading, spacing: 4) {
                     ForEach(registry.hosts) { host in
                         hostSection(host)
                     }
                 }
                 .padding(.vertical, 8)
+                .background(OverlayScroller())
             }
         }
         .background(.ultraThinMaterial)
@@ -39,59 +43,35 @@ struct SidebarView: View {
     // MARK: Header
 
     private var header: some View {
-        VStack(spacing: 2) {
-            actionRow(icon: "plus", label: "New tab", keys: ["⌘", "T"]) {
-                controller?.showNewSessionSheet()
-            }
-            actionRow(icon: "server.rack", label: "Add host", keys: nil) {
-                controller?.showNewHostSheet()
-            }
-            actionRow(icon: "sidebar.left", label: "Hide sidebar", keys: nil) {
-                controller?.toggleSidebar()
-            }
-            actionRow(icon: compact ? "rectangle.expand.vertical" : "rectangle.compress.vertical",
-                      label: compact ? "Show details" : "Hide details", keys: nil) {
+        HStack(spacing: 4) {
+            iconButton("plus", help: "New tab") { controller?.showNewSessionSheet() }
+            iconButton("server.rack", help: "Add host") { controller?.showNewHostSheet() }
+            iconButton("sidebar.left", help: "Hide sidebar") { controller?.toggleSidebar() }
+            iconButton(compact ? "rectangle.expand.vertical" : "rectangle.compress.vertical",
+                       help: compact ? "Show details" : "Hide details") {
                 withAnimation(.snappy(duration: 0.12)) { compact.toggle() }
             }
-            actionRow(icon: filterTagged ? "tag.fill" : "tag",
-                      label: filterTagged ? "Show all" : "Tagged only",
-                      keys: nil,
-                      iconTint: filterTagged ? clay : nil) {
+            iconButton(filterTagged ? "tag.fill" : "tag",
+                       help: filterTagged ? "Show all" : "Tagged only",
+                       tint: filterTagged ? clay : nil) {
                 withAnimation(.snappy(duration: 0.12)) { filterTagged.toggle() }
             }
+            Spacer()
         }
-        .padding(6)
+        .padding(.horizontal, 10).padding(.vertical, 6)
     }
 
-    private func actionRow(icon: String, label: String, keys: [String]?,
-                           iconTint: Color? = nil,
-                           perform: @escaping () -> Void) -> some View {
+    private func iconButton(_ icon: String, help: String, tint: Color? = nil,
+                            perform: @escaping () -> Void) -> some View {
         Button(action: perform) {
-            HStack(spacing: 8) {
-                Image(systemName: icon).font(.system(size: 11))
-                    .foregroundStyle(iconTint ?? .secondary).frame(width: 14)
-                Text(label).font(.system(size: 12))
-                Spacer()
-                if let keys { kbd(keys) }
-            }
-            .padding(.horizontal, 10).frame(height: 28)
-            .contentShape(Rectangle())
+            Image(systemName: icon).font(.system(size: 12))
+                .foregroundStyle(tint ?? .secondary)
+                .frame(width: 24, height: 24)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .modifier(HoverHighlight())
-    }
-
-    private func kbd(_ keys: [String]) -> some View {
-        HStack(spacing: 2) {
-            ForEach(keys, id: \.self) { k in
-                Text(k)
-                    .font(.system(size: 10)).foregroundStyle(.secondary)
-                    .frame(minWidth: 12)
-                    .padding(.horizontal, 4).padding(.vertical, 1)
-                    .background(Color.secondary.opacity(0.12),
-                                in: RoundedRectangle(cornerRadius: 3))
-            }
-        }
+        .help(help)
     }
 
     // MARK: Host section
@@ -277,7 +257,8 @@ struct SidebarView: View {
     @ViewBuilder
     private func mergeIntoMenu(_ tab: TabModel) -> some View {
         let targets = registry.tabs(on: tab.hostID).filter { $0.id != tab.id }
-        if !targets.isEmpty {
+        // mergeTab skips externals; an external-only src would be a dead menu item.
+        if !targets.isEmpty, tab.tree.leafRefs.contains(where: { !$0.external }) {
             Menu("Merge Into…") {
                 ForEach(targets) { dst in
                     Button(dst.title.isEmpty ? "(untitled)" : dst.title) {
@@ -293,78 +274,65 @@ struct SidebarView: View {
                          spine: (first: Bool, last: Bool)?, active: Bool) -> some View {
         let focused = active && (registry.focusedPaneIndex.map { $0 == index } ?? (index == 0))
         let age = focused ? nil : tab.lastActive[ref.key]
-        let hovered = hoveredPane.map { $0 == (tab.id, index) } ?? false
         let userLabel = tab.paneLabels[ref.key]
         let tag = tab.paneTags[ref.key]
         let renaming = registry.renaming == .pane(tab.id, name: ref.key)
-        return HStack(spacing: 0) {
-            Group {
-                if let spine {
-                    TimelineView(.periodic(from: .now, by: 30)) { _ in
-                        Spine(first: spine.first, last: spine.last)
-                            .stroke(active ? spineHeat(tab.lastActive.values.max())
-                                           : Color.secondary.opacity(0.3), lineWidth: 1)
+        return Hovering { hovered in
+            HStack(spacing: 0) {
+                Group {
+                    if let spine {
+                        TimelineView(.periodic(from: .now, by: 30)) { _ in
+                            Spine(first: spine.first, last: spine.last)
+                                .stroke(active ? spineHeat(tab.lastActive.values.max())
+                                               : Color.secondary.opacity(0.3), lineWidth: 1)
+                        }
+                    } else {
+                        Color.clear
                     }
+                }
+                .frame(width: 14)
+                if renaming {
+                    renameField(seed: userLabel ?? ref.name, font: .system(size: 12))
+                } else if let surface {
+                    PaneLabel(surface: surface, userLabel: userLabel, fallback: ref.name,
+                              active: active, compact: compact)
                 } else {
-                    Color.clear
+                    Text(userLabel ?? ref.name).font(.system(size: 12)).lineLimit(1)
+                        .foregroundStyle(active ? .primary : .secondary)
                 }
-            }
-            .frame(width: 14)
-            if renaming {
-                renameField(seed: userLabel ?? ref.name, font: .system(size: 12))
-            } else if let surface {
-                PaneLabel(surface: surface, userLabel: userLabel, fallback: ref.name,
-                          active: active, compact: compact)
-            } else {
-                Text(userLabel ?? ref.name).font(.system(size: 12)).lineLimit(1)
-                    .foregroundStyle(active ? .primary : .secondary)
-            }
-            Spacer()
-            if let tag {
-                let c = Color(hue: tag.hue, saturation: 0.6, brightness: dark ? 0.55 : 0.45)
-                HStack(spacing: 4) {
-                    Circle().strokeBorder(c, lineWidth: 1.5)
-                        .background(Circle().fill(hovered ? c : .clear))
-                        .frame(width: 8, height: 8)
-                    if hovered {
-                        Text(tag.text).font(.system(size: 8, weight: .medium))
-                            .foregroundStyle(c).fixedSize()
-                            .transition(.opacity.combined(with: .move(edge: .leading)))
+                Spacer()
+                if let tag {
+                    let c = Color(hue: tag.hue, saturation: 0.6, brightness: dark ? 0.55 : 0.45)
+                    HStack(spacing: 4) {
+                        Circle().strokeBorder(c, lineWidth: 1.5)
+                            .background(Circle().fill(hovered ? c : .clear))
+                            .frame(width: 8, height: 8)
+                        if hovered {
+                            Text(tag.text).font(.system(size: 8, weight: .medium))
+                                .foregroundStyle(c).fixedSize()
+                                .transition(.opacity.combined(with: .move(edge: .leading)))
+                        }
+                    }
+                    .padding(.horizontal, hovered ? 5 : 0).padding(.vertical, hovered ? 2 : 0)
+                    .background(hovered ? c.opacity(0.12) : .clear, in: Capsule())
+                    .animation(.snappy(duration: 0.15), value: hovered)
+                    .help(tag.text)
+                    .padding(.trailing, 6)
+                }
+                if !compact {
+                    TimelineView(.periodic(from: .now, by: 30)) { _ in
+                        Text(age?.shortAge ?? "")
+                            .font(.system(size: 9)).foregroundStyle(ageStyle(age))
+                            .frame(width: 24, alignment: .trailing)
                     }
                 }
-                .padding(.horizontal, hovered ? 5 : 0).padding(.vertical, hovered ? 2 : 0)
-                .background(hovered ? c.opacity(0.12) : .clear, in: Capsule())
-                .animation(.snappy(duration: 0.15), value: hovered)
-                .help(tag.text)
-                .padding(.trailing, 6)
             }
-            if active && index == 0 {
-                Button { controller?.kickRedraw(tabID: tab.id) } label: {
-                    Image(systemName: "arrow.clockwise").font(.system(size: 9))
-                }
-                .buttonStyle(.plain).opacity(0.5).help("Force redraw all panes")
-                Button { controller?.confirmKill(tab) } label: {
-                    Image(systemName: "xmark").font(.system(size: 9))
-                }
-                .buttonStyle(.plain).opacity(0.6)
-                .help("Kill session(s) and close tab")
-            } else if !compact {
-                TimelineView(.periodic(from: .now, by: 30)) { _ in
-                    Text(age?.shortAge ?? "")
-                        .font(.system(size: 9)).foregroundStyle(ageStyle(age))
-                        .frame(width: 24, alignment: .trailing)
-                }
-            }
-        }
-        .padding(.trailing, 12).frame(minHeight: 28)
-        .background(
-            focused ? clay.opacity(dark ? 0.14 : 0.20)
-                    : hovered ? Color.primary.opacity(0.06) : .clear,
-            in: RoundedRectangle(cornerRadius: 5))
-        .contentShape(Rectangle())
-        .onHover { inside in
-            if inside { hoveredPane = (tab.id, index) }
-            else if hovered { hoveredPane = nil }
+            .padding(.trailing, 12).frame(minHeight: 28)
+            .background(
+                focused ? clay.opacity(dark ? 0.14 : 0.20)
+                        : hovered ? Color.primary.opacity(0.06) : .clear,
+                in: RoundedRectangle(cornerRadius: 5))
+            .contentShape(Rectangle())
         }
         .onTapGesture { controller?.activate(tab: tab.id, paneIndex: index) }
         .simultaneousGesture(TapGesture(count: 2).onEnded {
@@ -489,6 +457,36 @@ private struct PaneLabel: View {
                 Text(fallback).font(.system(size: 9)).lineLimit(1).foregroundStyle(.tertiary)
             }
         }
+    }
+}
+
+/// Force the enclosing `NSScrollView` to overlay (slim, auto-fading) scrollers even when
+/// the system preference is "Always". The legacy 15pt gutter eats ~8% of a 200pt sidebar.
+/// AppKit resets `scrollerStyle` on `preferredScrollerStyleDidChange` (mouse hot-plug),
+/// hence the observer. Registration leaks for app lifetime — sidebar is a singleton.
+private struct OverlayScroller: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        DispatchQueue.main.async { [weak v] in
+            v?.enclosingScrollView?.scrollerStyle = .overlay
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSScroller.preferredScrollerStyleDidChangeNotification,
+            object: nil, queue: .main
+        ) { [weak v] _ in v?.enclosingScrollView?.scrollerStyle = .overlay }
+        return v
+    }
+    func updateNSView(_: NSView, context: Context) {}
+}
+
+/// Row-local hover scope. Hover changes re-render `content(hovered)` only — not
+/// the enclosing `SidebarView.body` — so scrolling past rows doesn't storm the
+/// `ScrollView` diff.
+private struct Hovering<Content: View>: View {
+    @State private var hovered = false
+    @ViewBuilder let content: (Bool) -> Content
+    var body: some View {
+        content(hovered).onHover { hovered = $0 }
     }
 }
 
