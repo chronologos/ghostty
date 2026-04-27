@@ -28,6 +28,12 @@ final class SessionRegistry: ObservableObject {
     /// MRU of applied tags (newest first, ≤8). `paneTags.values` is hash-order so deriving
     /// "recent" from it is arbitrary; this is the source of truth for the context-menu shortlist.
     @Published private(set) var recentTags: [PaneTag]
+    /// Surfaces with a one-shot watch armed (⌘⌥A). Mirrors keys of the controller's
+    /// private `watching` cancellable dict so SidebarView can render the eye; ephemeral.
+    @Published private(set) var watchedSurfaces: Set<UUID> = []
+    func setWatching(_ id: UUID, _ on: Bool) {
+        if on { watchedSurfaces.insert(id) } else { watchedSurfaces.remove(id) }
+    }
 
     /// Not @Published: pure surface→session bookkeeping the sidebar never renders
     /// directly. `isConnected()` reads it, but every flow that mutates `refs` also
