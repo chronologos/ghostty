@@ -3,6 +3,7 @@ import AppKit
 import SwiftUI
 import Combine
 import GhosttyKit
+import UserNotifications
 
 /// The fork's single window. Subclasses `TerminalController` so the inherited `surfaceTree`,
 /// `TerminalSplitTreeView`, split IBActions and focus nav work unchanged (SPEC §2.1).
@@ -222,18 +223,83 @@ final class ForkWindowController: TerminalController {
             if mods == .command, ev.charactersIgnoringModifiers == "i" {
                 self.promptPaneTitle(); return nil
             }
+            // ⌘⌥A — one-shot watch on focused pane. keyCode 0 = kVK_ANSI_A;
+            // `charactersIgnoringModifiers` doesn't strip Option (see digit comment above).
+            if mods == [.command, .option], ev.keyCode == 0 {
+                self.toggleWatch(); return nil
+            }
             // ⌘[/⌘] are upstream's `goto_split:previous/next` (Config.zig:7016).
             // Sidebar tab nav uses ⌘⇧[/⌘⇧] (upstream's `previous_tab`/`next_tab`).
             guard mods == [.command, .shift] else { return ev }
             switch ev.charactersIgnoringModifiers {
             case "{", "[": self.stepTab(-1); return nil
             case "}", "]": self.stepTab(1); return nil
+            case "b", "B": self.toggleSidebar(); return nil
             default: return ev
             }
         }
         NotificationCenter.default.addObserver(
             self, selector: #selector(parkedSurfaceDidExit(_:)),
             name: Ghostty.Notification.ghosttyCloseSurface, object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(bellDidRing(_:)),
+            name: .ghosttyBellDidRing, object: nil)
+    }
+
+    // MARK: Watch (⌘⌥A) — one-shot alert on completion (PR24).
+    //
+    // Fires on the first of: BEL (`.ghosttyBellDidRing`; also posted by upstream's
+    // OSC 133;D handler when `notify-on-command-finish-action` includes `bell`, and
+    // by ANY raw `\a` in the pty stream — hostile/noisy input can trip it), or OSC
+    // 9;4 progress non-nil→nil (`SurfaceView.$progressReport`, ConEmu-style; what
+    // Claude Code emits on idle). Both reach Swift without seams; `progress-style`
+    // config defaults true (Config.zig:3671). Caveat: upstream's `progressReport`
+    // didSet (SurfaceView_AppKit.swift:31) auto-nils after 15s of no fresh 9;4, so
+    // a process that emits progress then stalls >15s reads as "finished".
+
+    private var watching: [UUID: AnyCancellable] = [:]
+
+    func isWatching(_ surface: Ghostty.SurfaceView) -> Bool { watching[surface.id] != nil }
+
+    func toggleWatch(on target: Ghostty.SurfaceView? = nil) {
+        guard let surface = target ?? focusedSurface else { return }
+        if watching.removeValue(forKey: surface.id) != nil {
+            registry.setWatching(surface.id, false)
+            return
+        }
+        registry.setWatching(surface.id, true)
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        var sawProgress = false
+        watching[surface.id] = surface.$progressReport
+            .sink { [weak self, weak surface] report in
+                if report != nil { sawProgress = true; return }
+                guard sawProgress, let surface else { return }
+                self?.watchDidFire(on: surface)
+            }
+    }
+
+    @objc private func bellDidRing(_ n: Notification) {
+        guard let surface = n.object as? Ghostty.SurfaceView,
+              watching[surface.id] != nil else { return }
+        watchDidFire(on: surface)
+    }
+
+    private func watchDidFire(on surface: Ghostty.SurfaceView) {
+        guard watching.removeValue(forKey: surface.id) != nil else { return }
+        registry.setWatching(surface.id, false)
+        let ref = registry.refs[surface.id]
+        let tab = registry.tabs.first { surfaces(for: $0.id).contains { $0 === surface } }
+        let osc = (surface.title.isEmpty || surface.title == "👻") ? nil : surface.title
+        let label = ref.flatMap { tab?.paneLabels[$0.key] } ?? osc ?? ref?.name ?? "Pane"
+        // `shouldPresentNotification` (Ghostty.App.swift:449) requires the userInfo
+        // surface to resolve via `findSurface(forUUID:)` AND have `window != nil`. A
+        // watched pane in a parked tab fails both; post against an in-tree surface so
+        // the banner shows while Ghostty is foreground.
+        let poster = surfaceTree.contains { $0 === surface } ? surface
+                   : (Array(surfaceTree).first ?? surface)
+        poster.showUserNotification(title: "\(label) finished",
+                                    body: tab.map { "Tab '\($0.title)'" } ?? "",
+                                    requireFocus: false)
     }
 
     // MARK: Sidebar visibility
@@ -483,9 +549,14 @@ final class ForkWindowController: TerminalController {
         // can lag by up to 80ms after a recent split; reading it would auto-close
         // a tab whose live state still has panes.
         if prunedSrc.isEmpty {
-            closeForkTab(src)
-            // closeForkTab's sibling-pick lands on src's neighbour; follow the moved pane.
+            // Land on dst BEFORE closing src so closeForkTab's positional-neighbour
+            // pick never runs — it would `rebuildTree` a dormant sibling and spawn its
+            // zmx/ssh sessions for one frame. `nil` (not the empty tree) so
+            // `activate(dst)`'s outgoing-snapshot guard and `closeForkTab`'s unbind
+            // loop both skip src; the moved surface lives in dst now.
+            liveTabs[src] = nil
             activate(tab: dst)
+            closeForkTab(src)
         }
     }
 
@@ -726,7 +797,12 @@ final class ForkWindowController: TerminalController {
 
     func closeForkTab(_ id: TabModel.ID) {
         if let tree = liveTabs[id] {
-            for surface in tree { registry.unbind(surface: surface.id) }
+            for surface in tree {
+                registry.unbind(surface: surface.id)
+                if watching.removeValue(forKey: surface.id) != nil {
+                    registry.setWatching(surface.id, false)
+                }
+            }
         }
         liveTabs.removeValue(forKey: id)
         let wasActive = registry.activeTabID == id
