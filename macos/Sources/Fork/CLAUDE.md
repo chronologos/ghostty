@@ -202,3 +202,4 @@ A terminal that runs arbitrary shells will trip every macOS privacy surface. Thr
 - ⌘⇧[/⌘⇧] tab nav matches `{`/`}` (US-layout); other layouts won't fire.
   Digit shortcuts (⌘1-9, ⌘⌥1-9) are layout-independent via `keyCode`.
   ⌘[/⌘] left to upstream's `goto_split` (Config.zig:7016).
+  ⌘⌥A watch matches physical `kVK_ANSI_A` (keyCode 0); AZERTY gets it on ⌘⌥Q.
