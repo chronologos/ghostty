@@ -301,6 +301,12 @@ struct SidebarView: View {
                         .foregroundStyle(active ? .primary : .secondary)
                 }
                 Spacer()
+                if let surface, registry.watchedSurfaces.contains(surface.id) {
+                    Image(systemName: "eye")
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                        .padding(.trailing, 4)
+                        .help("Watching — ⌘⌥A to disarm")
+                }
                 if let tag {
                     let c = Color(hue: tag.hue, saturation: 0.6, brightness: dark ? 0.55 : 0.45)
                     HStack(spacing: 4) {
@@ -355,6 +361,9 @@ struct SidebarView: View {
             Divider()
             movePaneMenu(tab, ref: ref)
             if let surface {
+                Button(controller?.isWatching(surface) == true ? "Stop Watching" : "Watch (⌘⌥A)") {
+                    controller?.toggleWatch(on: surface)
+                }
                 Button("Force Repaint") { forkWigglePane(surface) }
             }
             Button("Minimize Panes") { registry.setCollapsed(tab.id, true) }
