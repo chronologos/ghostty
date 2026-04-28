@@ -148,14 +148,19 @@ indirect enum PersistedTree: Codable, Hashable {
         }
     }
 
+    /// Remove the first (leftmost depth-first) leaf matching `ref`. The split-picker lets a
+    /// tab attach the same session twice, so remove-all would over-prune `[a,a]` → `.empty`
+    /// and desync `movePanePersisted`/`mergeTab` from the controller's single-surface move.
     func removing(_ ref: SessionRef) -> PersistedTree {
         switch self {
-        case .empty: .empty
-        case .leaf(let r): r == ref ? .empty : self
+        case .empty: return .empty
+        case .leaf(let r): return r == ref ? .empty : self
         case .split(let h, let ratio, let a, let b):
-            switch (a.removing(ref), b.removing(ref)) {
-            case (.empty, let s), (let s, .empty): s
-            case (let na, let nb): .split(horizontal: h, ratio: ratio, a: na, b: nb)
+            let na = a.removing(ref)
+            let nb = na == a ? b.removing(ref) : b
+            switch (na, nb) {
+            case (.empty, let s), (let s, .empty): return s
+            case (let na, let nb): return .split(horizontal: h, ratio: ratio, a: na, b: nb)
             }
         }
     }

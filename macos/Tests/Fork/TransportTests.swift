@@ -97,6 +97,16 @@ struct TransportTests {
         #expect(t == .leaf(ref))
     }
 
+    @Test func removingFirstMatchOnly() {
+        // Split-picker can attach the same session twice in one tab; removing(ref)
+        // must drop one leaf, not all — see Host.swift:151.
+        let a = SessionRef(hostID: "h", name: "a")
+        let dup = PersistedTree.empty.appending(leaf: a).appending(leaf: a)
+        #expect(dup.paneCount == 2)
+        #expect(dup.removing(a).paneCount == 1)
+        #expect(dup.removing(a).removing(a) == .empty)
+    }
+
     @Test func appendingLeafOnSplit() {
         let a = SessionRef(hostID: "h", name: "a")
         let b = SessionRef(hostID: "h", name: "b")
