@@ -157,8 +157,6 @@ jj git push --bookmark fork --remote origin   # never push to upstream
 
 ## Backlog
 
-- **⌘K command palette** (SPEC §8) — fork-hosted `CommandPaletteView` listing
-  sessions/hosts/actions. Reuse upstream's `CommandPaletteView(options:)`.
 - 3rd seam for `keybind = all:cmd+t=new_tab` config edge — leaks through
   `AppDelegate.ghosttyNewTab` since `ForkWindowController is TerminalController`.
 - Host rename in sidebar context menu (registry method exists, no UI).
@@ -203,3 +201,8 @@ A terminal that runs arbitrary shells will trip every macOS privacy surface. Thr
   Digit shortcuts (⌘1-9, ⌘⌥1-9) are layout-independent via `keyCode`.
   ⌘[/⌘] left to upstream's `goto_split` (Config.zig:7016).
   ⌘⌥A watch matches physical `kVK_ANSI_A` (keyCode 0); AZERTY gets it on ⌘⌥Q.
+  ⌘K/⌘⇧K shadow upstream's `clear_screen` (Config.zig:6927); rebind via
+  `keybind = cmd+ctrl+k=clear_screen` if wanted.
+- ⌘⇧K scrollback search fetches full `zmx history` per session and matches
+  client-side (keeps user input out of `controlArgv`'s shell). Slow over ssh
+  for large buffers; per-ref 10s timeout means a stalled remote silently drops.
