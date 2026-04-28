@@ -127,6 +127,11 @@ enum ZmxAdapter {
         _ = try await run(argv: argv, timeout: 5)
     }
 
+    static func history(host: ForkHost, ref: SessionRef) async throws -> String {
+        let argv = host.transport.controlArgv([zmx(on: host), "history", wireName(ref)])
+        return try await run(argv: argv, timeout: 10)
+    }
+
     // MARK: -
 
     private static func run(argv: [String], timeout: TimeInterval) async throws -> String {
@@ -142,9 +147,16 @@ enum ZmxAdapter {
         return try await withTaskCancellationHandler {
             try await withThrowingTaskGroup(of: String.self) { group in
                 group.addTask {
-                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                    p.waitUntilExit()
-                    return String(decoding: data, as: UTF8.self)
+                    // Blocking read on GCD global, not the cooperative pool — under
+                    // N-way fanout (⌘⇧K), pool-blocking reads would starve the
+                    // timeout sleeper below and defeat the bound it's meant to enforce.
+                    await withCheckedContinuation { cont in
+                        DispatchQueue.global().async {
+                            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                            p.waitUntilExit()
+                            cont.resume(returning: String(decoding: data, as: UTF8.self))
+                        }
+                    }
                 }
                 group.addTask {
                     try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
