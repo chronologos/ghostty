@@ -470,7 +470,11 @@ final class ForkWindowController: TerminalController {
     }
 
     private func dropPane(tab: TabModel, ref: SessionRef, surface: Ghostty.SurfaceView?) {
-        guard tab.tree.paneCount > 1 else { closeForkTab(tab.id); return }
+        // Live count for the active tab — `tab.tree` lags `surfaceTree` by up to 80ms via
+        // the debounced `persistActive`, so a ⌘W landing right after a split would see
+        // paneCount==1 and closeForkTab the freshly-split tree (see movePane :568-570).
+        let count = tab.id == registry.activeTabID ? Array(surfaceTree).count : tab.tree.paneCount
+        guard count > 1 else { closeForkTab(tab.id); return }
         if let live = liveTabs[tab.id], let surface,
            let node = live.root?.node(view: surface) {
             if tab.id == registry.activeTabID {
