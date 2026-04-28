@@ -12,6 +12,7 @@ struct SidebarView: View {
     @FocusState private var renameFieldFocused: Bool
     @AppStorage("forkSidebarCompact") private var compact = false
     @AppStorage("forkSidebarFilterTagged") private var filterTagged = false
+    @AppStorage("forkSidebarFocus") private var focusMode = false
     @Environment(\.colorScheme) private var scheme
 
     private let clay = Color(red: 0xD9/255, green: 0x77/255, blue: 0x57/255)
@@ -29,8 +30,12 @@ struct SidebarView: View {
                 // estimate corrected on every scroll. Sidebar row counts are small
                 // enough that rendering all of them is cheaper than the instability.
                 VStack(alignment: .leading, spacing: 4) {
-                    ForEach(registry.hosts) { host in
-                        hostSection(host)
+                    if focusMode {
+                        focusSection
+                    } else {
+                        ForEach(registry.hosts) { host in
+                            hostSection(host)
+                        }
                     }
                 }
                 .padding(.vertical, 8)
@@ -56,6 +61,11 @@ struct SidebarView: View {
                        tint: filterTagged ? clay : nil) {
                 withAnimation(.snappy(duration: 0.12)) { filterTagged.toggle() }
             }
+            iconButton("scope",
+                       help: focusMode ? "All hosts" : "Focus (recent only)",
+                       tint: focusMode ? clay : nil) {
+                withAnimation(.snappy(duration: 0.12)) { focusMode.toggle() }
+            }
             Spacer()
         }
         .padding(.horizontal, 10).padding(.vertical, 6)
@@ -72,6 +82,40 @@ struct SidebarView: View {
         .buttonStyle(.plain)
         .modifier(HoverHighlight())
         .help(help)
+    }
+
+    // MARK: Focus section — flat MRU-first list across all hosts.
+    // `filterTagged` composes: off → last-8h; on → tagged-only, no time cutoff.
+
+    private var focusTabs: [TabModel] {
+        let cutoff = Date().addingTimeInterval(-8 * 3600)
+        let tagged = filterTagged
+        let active = registry.activeTabID
+        // `newTab` synchronously publishes with `lastActive == [:]` before async focus
+        // settlement fires `touchPane`; treat active as `.distantFuture` so it both
+        // passes the cutoff and sorts first instead of flashing at the bottom.
+        func mru(_ t: TabModel) -> Date {
+            t.id == active ? .distantFuture : (t.lastActive.values.max() ?? .distantPast)
+        }
+        return registry.tabs
+            .filter { $0.id == active || (tagged ? !$0.paneTags.isEmpty : mru($0) > cutoff) }
+            .sorted { mru($0) > mru($1) }
+    }
+
+    private var focusSection: some View {
+        let tabs = focusTabs
+        // Own VStack so `.animation(value:)` sees the row positions it lays out;
+        // attaching to the outer body VStack would also animate host-mode reflow.
+        return VStack(alignment: .leading, spacing: 4) {
+            if tabs.isEmpty {
+                Text(filterTagged ? "No tagged panes" : "Nothing in the last 8h")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .padding(.horizontal, 16).padding(.top, 12)
+            } else {
+                ForEach(tabs) { tabRow($0).padding(.horizontal, 8) }
+            }
+        }
+        .animation(.snappy(duration: 0.2), value: tabs.map(\.id))
     }
 
     // MARK: Host section
@@ -159,19 +203,14 @@ struct SidebarView: View {
         let active = tab.id == registry.activeTabID
         let allRefs = tab.tree.leafRefs
         let surfaces = controller?.surfaces(for: tab.id) ?? []
-        // Preserve original indexes so `paneRow` keeps pointing at the right
-        // surface/spine endpoint when untagged panes are hidden.
-        let shown: [(Int, SessionRef)] = filterTagged
-            ? allRefs.enumerated().compactMap { tab.paneTags[$0.element.key] != nil ? ($0.offset, $0.element) : nil }
-            : Array(allRefs.enumerated())
         let renaming = registry.renaming == .tab(tab.id)
         let heading = renaming || tab.collapsed || tab.title != allRefs.first?.name
         return VStack(alignment: .leading, spacing: 0) {
             if heading {
-                tabHeading(tab, renaming: renaming, active: active, paneCount: shown.count)
+                tabHeading(tab, renaming: renaming, active: active, paneCount: allRefs.count)
             }
             if !tab.collapsed {
-                ForEach(shown, id: \.0) { i, ref in
+                ForEach(Array(allRefs.enumerated()), id: \.0) { i, ref in
                     paneRow(tab, index: i, ref: ref,
                             surface: i < surfaces.count ? surfaces[i] : nil,
                             spine: allRefs.count > 1 ? (i == 0, i == allRefs.count - 1) : nil,

@@ -121,6 +121,20 @@ final class ForkWindowController: TerminalController {
             } catch {}
         }
 
+        // A re-reattached placeholder dying (`detachedPlaceholders.contains` blocks the
+        // swap above), or any unbound dead leaf — close silently. PR23 dropped the
+        // `withConfirmation` gate on the branches below, so without this a background
+        // pty death would pop the Detach/Kill sheet for an already-exited process.
+        // Root case must route to `closeForkTab` — `super` on root → `closeWindow(nil)`.
+        if case let .leaf(dead) = node, dead.processExited {
+            if surfaceTree.root == node, let tab = registry.activeTab {
+                closeForkTab(tab.id)
+            } else {
+                super.closeSurface(node, withConfirmation: false)
+            }
+            return
+        }
+
         // ⌘W on the last pane → tab-level Detach/Kill. `TerminalController.closeSurface`
         // (`:656-669`) would route this to `closeWindow(nil)`; we route to the sidebar tab.
         if surfaceTree.root == node, let tab = registry.activeTab,
@@ -227,6 +241,12 @@ final class ForkWindowController: TerminalController {
             // `charactersIgnoringModifiers` doesn't strip Option (see digit comment above).
             if mods == [.command, .option], ev.keyCode == 0 {
                 self.toggleWatch(); return nil
+            }
+            // ⌘K / ⌘⇧K — pane palette / scrollback search. keyCode 40 = kVK_ANSI_K.
+            // Shadows upstream's `clear_screen` (Config.zig:6927).
+            if ev.keyCode == 40 {
+                if mods == .command { self.showPanePalette(); return nil }
+                if mods == [.command, .shift] { self.showScrollbackSearch(); return nil }
             }
             // ⌘[/⌘] are upstream's `goto_split:previous/next` (Config.zig:7016).
             // Sidebar tab nav uses ⌘⇧[/⌘⇧] (upstream's `previous_tab`/`next_tab`).
@@ -626,6 +646,18 @@ final class ForkWindowController: TerminalController {
         }
     }
 
+    func showPanePalette() {
+        presentSheet(size: .init(width: 560, height: 400)) { [weak self] in
+            ForkPanePalette(controller: self, onDone: { self?.endSheet() })
+        }
+    }
+
+    func showScrollbackSearch() {
+        presentSheet(size: .init(width: 600, height: 420)) { [weak self] in
+            ScrollbackSearchView(controller: self, onDone: { self?.endSheet() })
+        }
+    }
+
     private func presentSheet<V: View>(size: CGSize, @ViewBuilder _ content: () -> V) {
         guard let window, sheetPanel == nil else { return }
         let host = NSHostingController(rootView: content().environmentObject(registry))
@@ -754,9 +786,17 @@ final class ForkWindowController: TerminalController {
         // so the sidebar's pane-row offset addresses the matching live SurfaceView.
         // Write the highlight index in the same tick as `setActive` above; the async
         // focus roundtrip lands a frame later and would briefly show the prior tab's index.
+        let leaves = Array(surfaceTree)
+        // Synchronous MRU touch: `focusedSurfaceDidChange` → `touchPane` is async via
+        // `@FocusedValue.onChange`, and the `paneIndex == nil` path below never sets
+        // `focusedSurface`, so a new tab could be switched away from with `lastActive`
+        // still empty (drops off focus-mode's 8h list).
+        let touchIdx = paneIndex ?? 0
+        if leaves.indices.contains(touchIdx), let key = registry.refs[leaves[touchIdx].id]?.key {
+            registry.touchPane(tab: id, name: key)
+        }
         registry.setFocusedPane(index: paneIndex)
         guard let paneIndex else { return }
-        let leaves = Array(surfaceTree)
         guard leaves.indices.contains(paneIndex) else { return }
         let target = leaves[paneIndex]
         // The sidebar click already stole firstResponder; writing `focusedSurface` (even
