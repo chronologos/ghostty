@@ -85,10 +85,10 @@ struct SidebarView: View {
     }
 
     // MARK: Focus section — flat MRU-first list across all hosts.
-    // `filterTagged` composes: off → last-8h; on → tagged-only, no time cutoff.
+    // `filterTagged` composes: off → last-16h; on → tagged-only, no time cutoff.
 
     private var focusTabs: [TabModel] {
-        let cutoff = Date().addingTimeInterval(-8 * 3600)
+        let cutoff = Date().addingTimeInterval(-16 * 3600)
         let tagged = filterTagged
         let active = registry.activeTabID
         // `newTab` synchronously publishes with `lastActive == [:]` before async focus
@@ -108,7 +108,7 @@ struct SidebarView: View {
         // attaching to the outer body VStack would also animate host-mode reflow.
         return VStack(alignment: .leading, spacing: 4) {
             if tabs.isEmpty {
-                Text(filterTagged ? "No tagged panes" : "Nothing in the last 8h")
+                Text(filterTagged ? "No tagged panes" : "Nothing in the last 16h")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
                     .padding(.horizontal, 16).padding(.top, 12)
             } else {
