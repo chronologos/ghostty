@@ -25,8 +25,9 @@ final class SessionRegistry: ObservableObject {
     /// Sidebar inline-rename cursor. Controller writes via `promptTabTitle()` / `promptPaneTitle()`
     /// (⌘⇧I / ⌘I); sidebar writes via double-click / context-menu; not persisted.
     @Published private(set) var renaming: RenameTarget?
-    /// MRU of applied tags (newest first, ≤8). `paneTags.values` is hash-order so deriving
+    /// MRU of in-use tags (newest first, ≤8). `paneTags.values` is hash-order so deriving
     /// "recent" from it is arbitrary; this is the source of truth for the context-menu shortlist.
+    /// Pruned to live `paneTags` on every mutation that can drop the last user of a tag.
     @Published private(set) var recentTags: [PaneTag]
     /// Surfaces with a one-shot watch armed (⌘⌥A). Mirrors keys of the controller's
     /// private `watching` cancellable dict so SidebarView can render the eye; ephemeral.
@@ -49,6 +50,7 @@ final class SessionRegistry: ObservableObject {
         self.tabs = state.tabs
         self.activeTabID = state.activeTabID
         self.recentTags = state.recentTags
+        pruneRecentTags()
         saveDebounce = objectWillChange
             .debounce(for: .milliseconds(500), scheduler: DispatchQueue.main)
             .sink { [weak self] _ in self?.persistence.save(self?.snapshot()) }
@@ -89,6 +91,7 @@ final class SessionRegistry: ObservableObject {
         hosts.removeAll { $0.id == id }
         tabs.removeAll { $0.hostID == id }
         if let active = activeTabID, !tabs.contains(where: { $0.id == active }) { activeTabID = nil }
+        pruneRecentTags()
     }
 
     func renameHost(_ id: ForkHost.ID, to label: String) {
@@ -122,6 +125,7 @@ final class SessionRegistry: ObservableObject {
         tabs.removeAll { $0.id == id }
         if activeTabID == id { activeTabID = nil }
         if renaming?.tabID == id { renaming = nil }
+        pruneRecentTags()
     }
 
     func moveTab(_ id: TabModel.ID, before target: TabModel.ID) {
@@ -161,6 +165,13 @@ final class SessionRegistry: ObservableObject {
         } else {
             tabs[i].paneTags.removeValue(forKey: name)
         }
+        pruneRecentTags()
+    }
+
+    private func pruneRecentTags() {
+        let live = Set(tabs.flatMap(\.paneTags.values))
+        let kept = recentTags.filter(live.contains)
+        if kept.count != recentTags.count { recentTags = kept }
     }
 
     func bind(surface: UUID, to ref: SessionRef) { refs[surface] = ref }
@@ -174,6 +185,7 @@ final class SessionRegistry: ObservableObject {
         tabs[i].lastActive = tabs[i].lastActive.filter { live.contains($0.key) }
         tabs[i].paneLabels = tabs[i].paneLabels.filter { live.contains($0.key) }
         tabs[i].paneTags = tabs[i].paneTags.filter { live.contains($0.key) }
+        pruneRecentTags()
     }
 
     // MARK: Pane move / tab merge (PR21)
