@@ -794,7 +794,7 @@ final class ForkWindowController: TerminalController {
         // Synchronous MRU touch: `focusedSurfaceDidChange` → `touchPane` is async via
         // `@FocusedValue.onChange`, and the `paneIndex == nil` path below never sets
         // `focusedSurface`, so a new tab could be switched away from with `lastActive`
-        // still empty (drops off focus-mode's 8h list).
+        // still empty (drops off focus-mode's 16h list).
         let touchIdx = paneIndex ?? 0
         if leaves.indices.contains(touchIdx), let key = registry.refs[leaves[touchIdx].id]?.key {
             registry.touchPane(tab: id, name: key)
