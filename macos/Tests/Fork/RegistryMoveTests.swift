@@ -127,5 +127,27 @@ struct RegistryMoveTests {
         #expect(dstTab.paneLabels["acr"] == "owned-label")
         #expect(dstTab.paneLabels["@acr"] == "shadow-label")
     }
+
+    @Test func recentTags_prunedWhenLastUserCleared() {
+        let r = reset()
+        let t = makeTab(r, names: ["a", "b"])
+        let wip = PaneTag(text: "wip", hue: 0.5)
+        r.setPaneTag(tab: t, name: "a", to: wip)
+        r.setPaneTag(tab: t, name: "b", to: wip)
+        #expect(r.recentTags == [wip])
+        r.setPaneTag(tab: t, name: "a", to: nil)
+        #expect(r.recentTags == [wip])           // b still has it
+        r.setPaneTag(tab: t, name: "b", to: nil)
+        #expect(r.recentTags.isEmpty)
+    }
+
+    @Test func recentTags_prunedWhenPaneClosed() {
+        let r = reset()
+        let t = makeTab(r, names: ["a", "b"])
+        r.setPaneTag(tab: t, name: "b", to: PaneTag(text: "hot", hue: 0.0))
+        #expect(r.recentTags.count == 1)
+        r.setPersistedTree(.leaf(SessionRef(hostID: "local", name: "a")), for: t)
+        #expect(r.recentTags.isEmpty)
+    }
 }
 #endif
