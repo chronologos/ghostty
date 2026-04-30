@@ -49,6 +49,7 @@ struct ScrollbackSearchView: View {
     @State private var query = ""
     @State private var hits: [Hit] = []
     @State private var searching = false
+    @State private var generation = 0
     @State private var searchTask: Task<Void, Never>?
     @State private var debounce: Task<Void, Never>?
     @FocusState private var fieldFocused: Bool
@@ -119,6 +120,8 @@ struct ScrollbackSearchView: View {
     private func search() {
         searchTask?.cancel()
         hits = []
+        generation += 1
+        let gen = generation
         let q = query
         guard !q.isEmpty else { searching = false; return }
         debounce?.cancel()
@@ -143,10 +146,10 @@ struct ScrollbackSearchView: View {
                 }
                 for await hit in group {
                     if Task.isCancelled { break }
-                    if let hit { await MainActor.run { hits.append(hit) } }
+                    if let hit { await MainActor.run { if gen == generation { hits.append(hit) } } }
                 }
             }
-            if !Task.isCancelled { await MainActor.run { searching = false } }
+            await MainActor.run { if gen == generation { searching = false } }
         }
     }
 }
