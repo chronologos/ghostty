@@ -30,7 +30,7 @@ struct ForkPanePalette: View {
             CommandOption(
                 title: p.tab.paneLabels[p.ref.key] ?? p.ref.name,
                 subtitle: "\(p.tab.title) · \(p.host.label)",
-                leadingColor: ForkHost.accent(for: p.host),
+                leadingColor: p.host.accent,
                 badge: p.tab.paneTags[p.ref.key]?.text
             ) { [weak controller, id = p.tab.id, i = p.index] in
                 controller?.activate(tab: id, paneIndex: i)
@@ -139,7 +139,7 @@ struct ScrollbackSearchView: View {
                             tabID: p.tab.id, paneIndex: p.index,
                             label: p.tab.paneLabels[p.ref.key] ?? p.ref.name,
                             crumb: "· \(p.tab.title) · \(p.host.label)",
-                            accent: ForkHost.accent(for: p.host),
+                            accent: p.host.accent,
                             snippet: String(line).trimmingCharacters(in: .whitespaces)
                         )
                     }

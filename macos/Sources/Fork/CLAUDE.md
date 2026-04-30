@@ -75,15 +75,17 @@ Fork/
     ZmxAdapter.swift           surfaceConfig/list/kill/detachedScript; Transport.wrap/controlArgv
   UI/
     ForkWindowController.swift the controller; tab switching = swap surfaceTree
-    SidebarView.swift          host sections; per-pane rows show paneLabel › surface.title › ref.name;
-                               optional tab-title heading + collapse chevron; ⌘I/⌘⇧I → inline
-                               rename; tag pills; compact toggle (@AppStorage) hides age + subtitle
+    SidebarView.swift          host sections (drag-reorder); per-pane rows show paneLabel ›
+                               surface.title › ref.name; optional tab-title heading + collapse
+                               chevron; ⌘I/⌘⇧I → inline rename; tag pills; compact toggle
+                               (@AppStorage) hides age + subtitle; focus mode prefixes each tab
+                               with its host's SF-Symbol badge
     TagEditView.swift          right-click "Tag…" popover (text + 8 hue swatches)
     NewSessionView.swift       ⌘T sheet
     SplitPickerView.swift      ⌘D picker (new vs attach-existing)
     SessionMetaLabel.swift     shared row trailer: client-count + age
     NewHostView.swift          add-host sheet
-    HostDetailView.swift       manage-host sheet (rename, accent hue, remove)
+    HostDetailView.swift       manage-host sheet (rename, accent hue, SF-Symbol icon, remove)
     ForkSheetPanel.swift       NSWindow.performKeyEquivalent → ⌘V/C/X/A/Z to firstResponder
 ```
 

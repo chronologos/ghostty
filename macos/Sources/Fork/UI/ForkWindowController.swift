@@ -150,10 +150,8 @@ final class ForkWindowController: TerminalController {
                 killEnabled: !refs.isEmpty,
                 onDetach: { [weak self] in self?.closeForkTab(tab.id) },
                 onKill: { [weak self] in
-                    Task {
-                        for ref in refs { try? await ZmxAdapter.kill(host: host, ref: ref) }
-                        await MainActor.run { self?.closeForkTab(tab.id) }
-                    }
+                    for ref in refs { Task { try? await ZmxAdapter.kill(host: host, ref: ref) } }
+                    self?.closeForkTab(tab.id)
                 }
             )
             return
@@ -350,11 +348,11 @@ final class ForkWindowController: TerminalController {
     @objc private func revealSidebar(_ sender: Any?) { toggleSidebar() }
 
     private func stepTab(_ delta: Int) {
-        guard let active = registry.activeTabID,
-              let i = registry.tabs.firstIndex(where: { $0.id == active }),
-              !registry.tabs.isEmpty else { return }
-        let j = ((i + delta) % registry.tabs.count + registry.tabs.count) % registry.tabs.count
-        activate(tab: registry.tabs[j].id)
+        guard let active = registry.activeTab else { return }
+        let siblings = registry.tabs(on: active.hostID)
+        guard let i = siblings.firstIndex(where: { $0.id == active.id }) else { return }
+        let n = siblings.count
+        activate(tab: siblings[((i + delta) % n + n) % n].id)
     }
 
     func gotoTab(index n: Int) {
@@ -502,10 +500,8 @@ final class ForkWindowController: TerminalController {
         alert.alertStyle = .warning
         alert.beginSheetModal(for: window) { [weak self] resp in
             guard resp == .alertFirstButtonReturn else { return }
-            Task {
-                for ref in refs { try? await ZmxAdapter.kill(host: host, ref: ref) }
-                await MainActor.run { self?.closeForkTab(tab.id) }
-            }
+            for ref in refs { Task { try? await ZmxAdapter.kill(host: host, ref: ref) } }
+            self?.closeForkTab(tab.id)
         }
     }
 
@@ -644,7 +640,11 @@ final class ForkWindowController: TerminalController {
         }
     }
 
-    func showHostDetail(_ host: ForkHost) {
+    /// `id` not `ForkHost`: the only call site is a `.contextMenu` closure, which on macOS
+    /// caches its content past body re-renders, so a captured struct goes stale and the
+    /// sheet opens showing the pre-edit hue/icon. The id is immutable; look up fresh here.
+    func showHostDetail(_ id: ForkHost.ID) {
+        guard let host = registry.host(id: id) else { return }
         presentSheet(size: .init(width: 420, height: 360)) { [weak self] in
             HostDetailView(host: host, onDone: { self?.endSheet() })
         }

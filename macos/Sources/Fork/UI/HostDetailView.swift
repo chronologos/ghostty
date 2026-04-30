@@ -9,6 +9,7 @@ struct HostDetailView: View {
     @EnvironmentObject private var registry: SessionRegistry
     @State private var label: String
     @State private var hue: Double?
+    @State private var icon: String?
     @State private var sessions = ZmxAdapter.ListResult()
     @State private var loading = true
 
@@ -17,6 +18,11 @@ struct HostDetailView: View {
         self.onDone = onDone
         self._label = State(initialValue: host.label)
         self._hue = State(initialValue: host.accentHue)
+        self._icon = State(initialValue: host.icon)
+    }
+
+    private var previewAccent: Color {
+        var h = host; h.accentHue = hue; return h.accent
     }
 
     var body: some View {
@@ -31,6 +37,7 @@ struct HostDetailView: View {
             TextField("Label", text: $label)
 
             HuePicker(hue: $hue)
+            IconPicker(icon: $icon, tint: previewAccent)
 
             Divider()
 
@@ -103,29 +110,58 @@ struct HostDetailView: View {
     private func save() {
         if label != host.label && !label.isEmpty { registry.renameHost(host.id, to: label) }
         if hue != host.accentHue { registry.setAccentHue(host.id, hue) }
+        if icon != host.icon { registry.setIcon(host.id, icon) }
+    }
+}
+
+/// Curated SF Symbol palette. `nil` = no icon (sidebar falls back to the connection dot).
+struct IconPicker: View {
+    @Binding var icon: String?
+    let tint: Color
+    private static let presets = ["server.rack", "desktopcomputer", "laptopcomputer", "cloud.fill",
+                                  "globe", "bolt.fill", "cpu", "terminal", "network", "house.fill"]
+
+    var body: some View {
+        HStack(spacing: 6) {
+            cell(nil)
+            ForEach(Self.presets, id: \.self) { cell($0) }
+        }
+    }
+
+    private func cell(_ name: String?) -> some View {
+        let selected = name == icon
+        return Image(systemName: name ?? "circle.dashed")
+            .font(.system(size: 13))
+            .foregroundStyle(name == nil ? Color.secondary : tint)
+            .frame(width: 22, height: 22)
+            .background(selected ? Color.primary.opacity(0.12) : .clear,
+                        in: RoundedRectangle(cornerRadius: 4))
+            .contentShape(Rectangle())
+            .onTapGesture { icon = name }
+            .help(name ?? "none")
     }
 }
 
 /// Preset hue swatch row. `nil` = auto (hash-derived).
 struct HuePicker: View {
     @Binding var hue: Double?
-    private let presets: [Double] = [0.02, 0.08, 0.14, 0.28, 0.42, 0.55, 0.68, 0.80, 0.92]
+    private static let presets: [Double] = [0.02, 0.08, 0.14, 0.28, 0.42, 0.55, 0.68, 0.80, 0.92]
 
     var body: some View {
         HStack(spacing: 6) {
-            swatch(nil, label: "auto")
-            ForEach(presets, id: \.self) { swatch($0) }
+            swatch(nil)
+            ForEach(Self.presets, id: \.self) { swatch($0) }
         }
     }
 
-    private func swatch(_ h: Double?, label: String? = nil) -> some View {
+    private func swatch(_ h: Double?) -> some View {
         let selected = h == hue
         let color = h.map { Color(hue: $0, saturation: 0.45, brightness: 0.7) } ?? Color.secondary
         return Circle()
             .fill(h == nil ? AnyShapeStyle(.secondary.opacity(0.3)) : AnyShapeStyle(color))
             .frame(width: 18, height: 18)
             .overlay(Circle().stroke(selected ? Color.primary : .clear, lineWidth: 1.5))
-            .help(label ?? "")
+            .help(h == nil ? "auto" : "")
             .onTapGesture { hue = h }
     }
 }
