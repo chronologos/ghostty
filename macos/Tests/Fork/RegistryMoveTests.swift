@@ -149,5 +149,17 @@ struct RegistryMoveTests {
         r.setPersistedTree(.leaf(SessionRef(hostID: "local", name: "a")), for: t)
         #expect(r.recentTags.isEmpty)
     }
+
+    @Test func moveHost_reorders() {
+        let r = reset()
+        r.addHost(ForkHost(id: "a", label: "a", transport: .ssh(.init(host: "a"))))
+        r.addHost(ForkHost(id: "b", label: "b", transport: .ssh(.init(host: "b"))))
+        #expect(r.hosts.map(\.id) == ["local", "a", "b"])
+        // Drag-swap semantics (matches moveTab): moved host lands at target's slot.
+        r.moveHost("b", before: "local")
+        #expect(r.hosts.map(\.id) == ["b", "local", "a"])
+        r.moveHost("b", before: "a")
+        #expect(r.hosts.map(\.id) == ["local", "a", "b"])
+    }
 }
 #endif

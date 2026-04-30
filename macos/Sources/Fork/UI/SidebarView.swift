@@ -8,6 +8,7 @@ struct SidebarView: View {
     @EnvironmentObject private var registry: SessionRegistry
     @State private var renameText: String = ""
     @State private var draggingTab: TabModel.ID?
+    @State private var draggingHost: ForkHost.ID?
     @State private var tagging: (tab: TabModel.ID, index: Int)?
     @FocusState private var renameFieldFocused: Bool
     @AppStorage("forkSidebarCompact") private var compact = false
@@ -112,10 +113,26 @@ struct SidebarView: View {
                     .font(.system(size: 11)).foregroundStyle(.secondary)
                     .padding(.horizontal, 16).padding(.top, 12)
             } else {
-                ForEach(tabs) { tabRow($0).padding(.horizontal, 8) }
+                ForEach(tabs) { tab in
+                    HStack(alignment: .top, spacing: 6) {
+                        hostBadge(tab.hostID)
+                        tabRow(tab)
+                    }
+                    .padding(.horizontal, 8)
+                }
             }
         }
         .animation(.snappy(duration: 0.2), value: tabs.map(\.id))
+    }
+
+    private func hostBadge(_ id: ForkHost.ID) -> some View {
+        let h = registry.host(id: id)
+        return Image(systemName: h?.icon ?? "circle.fill")
+            .font(.system(size: 10))
+            .foregroundStyle(h?.accent ?? .secondary)
+            .frame(width: 14)
+            .padding(.top, 5)
+            .help(h?.label ?? "")
     }
 
     // MARK: Host section
@@ -145,9 +162,15 @@ struct SidebarView: View {
                     .foregroundStyle(.secondary)
                     .rotationEffect(.degrees(host.expanded ? 90 : 0))
                     .frame(width: 10)
-                Circle()
-                    .fill(connected ? ForkHost.accent(for: host) : Color.secondary.opacity(0.4))
-                    .frame(width: 7, height: 7)
+                Group {
+                    if let icon = host.icon {
+                        Image(systemName: icon).font(.system(size: 11, weight: .medium))
+                    } else {
+                        Circle().frame(width: 7, height: 7)
+                    }
+                }
+                .foregroundStyle(connected ? host.accent : Color.secondary.opacity(0.4))
+                .frame(width: 14)
                 Text(host.label)
                     .font(.system(size: 12, weight: .medium, design: .monospaced))
                     .foregroundStyle(connected ? .primary : .secondary)
@@ -160,11 +183,17 @@ struct SidebarView: View {
         .buttonStyle(.plain)
         .modifier(HoverHighlight())
         .padding(.horizontal, 8)
+        .onDrag {
+            draggingTab = nil; draggingHost = host.id
+            return NSItemProvider(object: host.id as NSString)
+        }
+        .onDrop(of: [.text], delegate: ReorderDelegate(
+            target: host.id, dragging: $draggingHost, move: registry.moveHost))
         .contextMenu {
             Button("New Session on \(host.label)…") {
                 controller?.showSessionPicker(on: host)
             }
-            Button("Manage Host…") { controller?.showHostDetail(host) }
+            Button("Manage Host…") { controller?.showHostDetail(host.id) }
             if host.id != ForkHost.local.id {
                 Divider()
                 Button("Remove Host", role: .destructive) {
@@ -219,11 +248,11 @@ struct SidebarView: View {
             }
         }
         .onDrag {
-            draggingTab = tab.id
+            draggingHost = nil; draggingTab = tab.id
             return NSItemProvider(object: tab.id.uuidString as NSString)
         }
-        .onDrop(of: [.text], delegate: TabDropDelegate(
-            target: tab.id, dragging: $draggingTab, registry: registry))
+        .onDrop(of: [.text], delegate: ReorderDelegate(
+            target: tab.id, dragging: $draggingTab, move: registry.moveTab))
     }
 
     private func tabHeading(_ tab: TabModel, renaming: Bool, active: Bool,
@@ -562,25 +591,27 @@ private struct Spine: Shape {
     }
 }
 
-private struct TabDropDelegate: DropDelegate {
-    let target: TabModel.ID
-    @Binding var dragging: TabModel.ID?
-    let registry: SessionRegistry
+/// Live-swap reorder for both host and tab drag — the `dragging` binding (not the
+/// `.text` payload) discriminates which kind is in flight. SwiftUI gives no drag-cancel
+/// hook, so each `.onDrag` clears the *other* binding first; otherwise a cancelled tab
+/// drag would leak into the next host drag's `dropEntered` and fire a spurious `moveTab`.
+private struct ReorderDelegate<ID: Equatable>: DropDelegate {
+    let target: ID
+    @Binding var dragging: ID?
+    let move: (ID, ID) -> Void
 
     func dropEntered(info: DropInfo) {
         guard let dragging, dragging != target else { return }
-        withAnimation(.easeInOut(duration: 0.15)) {
-            registry.moveTab(dragging, before: target)
-        }
+        withAnimation(.easeInOut(duration: 0.15)) { move(dragging, target) }
     }
     func dropUpdated(info: DropInfo) -> DropProposal? { .init(operation: .move) }
     func performDrop(info: DropInfo) -> Bool { dragging = nil; return true }
 }
 
 extension ForkHost {
-    static func accent(for host: ForkHost) -> Color {
-        let hue = host.accentHue ?? {
-            let h = host.id.utf8.reduce(UInt32(2166136261)) { ($0 &* 16777619) ^ UInt32($1) }
+    var accent: Color {
+        let hue = accentHue ?? {
+            let h = id.utf8.reduce(UInt32(2166136261)) { ($0 &* 16777619) ^ UInt32($1) }
             return Double(h % 360) / 360
         }()
         return Color(hue: hue, saturation: 0.45, brightness: 0.7)

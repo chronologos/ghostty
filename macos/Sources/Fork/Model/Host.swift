@@ -15,13 +15,14 @@ struct ForkHost: Codable, Identifiable, Hashable {
     var transport: Transport
     var expanded: Bool = true
     var accentHue: Double?
+    var icon: String?
 
     static let local = ForkHost(id: "local", label: "localhost", transport: .local)
 
     init(id: String, label: String, transport: Transport,
-         expanded: Bool = true, accentHue: Double? = nil) {
+         expanded: Bool = true, accentHue: Double? = nil, icon: String? = nil) {
         self.id = id; self.label = label; self.transport = transport
-        self.expanded = expanded; self.accentHue = accentHue
+        self.expanded = expanded; self.accentHue = accentHue; self.icon = icon
     }
 
     init(from d: Decoder) throws {
@@ -31,6 +32,7 @@ struct ForkHost: Codable, Identifiable, Hashable {
         transport = try c.decode(Transport.self, forKey: .transport)
         expanded = try c.decodeIfPresent(Bool.self, forKey: .expanded) ?? true
         accentHue = try c.decodeIfPresent(Double.self, forKey: .accentHue)
+        icon = try c.decodeIfPresent(String.self, forKey: .icon)
     }
 
     enum Transport: Codable, Hashable {
