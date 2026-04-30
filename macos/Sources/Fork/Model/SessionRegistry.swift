@@ -94,19 +94,21 @@ final class SessionRegistry: ObservableObject {
         pruneRecentTags()
     }
 
-    func renameHost(_ id: ForkHost.ID, to label: String) {
+    private func updateHost(_ id: ForkHost.ID, _ f: (inout ForkHost) -> Void) {
         guard let i = hosts.firstIndex(where: { $0.id == id }) else { return }
-        hosts[i].label = label
+        f(&hosts[i])
     }
 
-    func setAccentHue(_ id: ForkHost.ID, _ hue: Double?) {
-        guard let i = hosts.firstIndex(where: { $0.id == id }) else { return }
-        hosts[i].accentHue = hue
-    }
+    func renameHost(_ id: ForkHost.ID, to label: String) { updateHost(id) { $0.label = label } }
+    func setAccentHue(_ id: ForkHost.ID, _ hue: Double?) { updateHost(id) { $0.accentHue = hue } }
+    func setIcon(_ id: ForkHost.ID, _ icon: String?)     { updateHost(id) { $0.icon = icon } }
+    func setExpanded(_ id: ForkHost.ID, _ v: Bool)       { updateHost(id) { $0.expanded = v } }
 
-    func setExpanded(_ hostID: ForkHost.ID, _ v: Bool) {
-        guard let i = hosts.firstIndex(where: { $0.id == hostID }) else { return }
-        hosts[i].expanded = v
+    func moveHost(_ id: ForkHost.ID, before target: ForkHost.ID) {
+        guard id != target,
+              let from = hosts.firstIndex(where: { $0.id == id }),
+              let to = hosts.firstIndex(where: { $0.id == target }) else { return }
+        hosts.move(fromOffsets: [from], toOffset: to > from ? to + 1 : to)
     }
 
     @discardableResult
