@@ -28,10 +28,18 @@ enum ZmxAdapter {
         p.standardError = FileHandle.nullDevice
         p.terminationHandler = { _ in done.signal() }
         if (try? p.run()) != nil {
-            if done.wait(timeout: .now() + 2) == .timedOut { p.terminate() }
-            let out = String(decoding: pipe.fileHandleForReading.availableData, as: UTF8.self)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if fm.isExecutableFile(atPath: out) { return out }
+            if done.wait(timeout: .now() + 2) == .timedOut {
+                // Interactive zsh ignores SIGTERM; with the pipe still open the read
+                // below would block past the 2s bound and wedge this swift_once init.
+                Darwin.kill(p.processIdentifier, SIGKILL)
+            } else {
+                // `-i` sources .zshrc, which may chatter to stdout (nvm/pyenv init, fortune) —
+                // `command -v` is the last line.
+                let out = String(decoding: pipe.fileHandleForReading.availableData, as: UTF8.self)
+                    .split(separator: "\n").last.map(String.init) ?? ""
+                if (out as NSString).lastPathComponent == "zmx",
+                   fm.isExecutableFile(atPath: out) { return out }
+            }
         }
         ForkBootstrap.logger.warning("zmx not resolved; falling back to PATH lookup")
         return "zmx"
@@ -67,6 +75,7 @@ enum ZmxAdapter {
         var clients: Int
         var created: Date
         var external: Bool
+        var pid: Int32?
     }
 
     struct ListResult {
@@ -108,18 +117,29 @@ enum ZmxAdapter {
               let created = kv["created"].flatMap({ TimeInterval($0) })
         else { return nil }
         return .init(name: String(name), clients: clients,
-                     created: Date(timeIntervalSince1970: created), external: true)
+                     created: Date(timeIntervalSince1970: created), external: true,
+                     pid: kv["pid"].flatMap { Int32($0) })
     }
 
     /// Shell command for a detached-placeholder surface: shows a prompt, waits for ⏎,
-    /// then execs `zmx attach` for the same ref via the host's transport.
-    static func detachedScript(host: ForkHost, ref: SessionRef) -> String {
+    /// then execs `zmx attach` for the same ref via the host's transport. `ccName` is the
+    /// cached `tab.ccNames[ref.key]` — printed dim on a second line so a cold-restored
+    /// pane whose session is gone still says what it used to be.
+    static func detachedScript(host: ForkHost, ref: SessionRef, ccName: String? = nil) -> String {
         // `attach` is already a fully shq'd command line (each token single-quoted),
         // so it's interpolated *unquoted* after `exec` — wrapping it again would make
         // it one word. shq is total (POSIX `'` → `'\''`); see TransportTests.wrapSshInjection.
         let attach = host.transport.wrap([zmx(on: host), "attach", wireName(ref)])
         let msg = "session \(ref.name) — press ⏎ to reattach, ⌘⇧W to close"
-        return shq(["sh", "-c", "printf '%s\\n' \(shq(msg)); read _; exec \(attach)"])
+        let was = ccName.map { "; printf '\\033[2m  was: %s\\033[0m\\n' \(shq($0))" } ?? ""
+        return shq(["sh", "-c", "printf '%s\\n' \(shq(msg))\(was); read _; exec \(attach)"])
+    }
+
+    /// `initialCmd` for a cold-restored leaf with a cached CC name. `zmx attach` only runs
+    /// the trailing argv when *creating* the session, so an existing session ignores this and
+    /// a fresh one shows the banner above its first prompt.
+    static func restoreCmd(ccName: String) -> [String] {
+        ["sh", "-c", "printf '\\033[2m  was: %s\\033[0m\\n\\n' \(shq(ccName)); exec ${SHELL:-/bin/sh}"]
     }
 
     static func kill(host: ForkHost, ref: SessionRef) async throws {
@@ -134,7 +154,7 @@ enum ZmxAdapter {
 
     // MARK: -
 
-    private static func run(argv: [String], timeout: TimeInterval) async throws -> String {
+    static func run(argv: [String], timeout: TimeInterval) async throws -> String {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         p.arguments = argv
@@ -142,8 +162,18 @@ enum ZmxAdapter {
         p.standardOutput = pipe
         p.standardError = FileHandle.nullDevice
         try p.run()
-        // `onCancel` + inner `defer` ensure the process is killed on parent-task cancellation
-        // *and* on timeout — otherwise the synchronous reader child pins a cooperative thread.
+        // Close our copy of the write-end now: the child has its dup, and with ours gone
+        // `readDataToEndOfFile` sees EOF as soon as the child's copy closes. Otherwise a
+        // grandchild that inherited the FD (ssh-via-ProxyCommand) can hold it open past the
+        // child's death and the reader never returns.
+        try? pipe.fileHandleForWriting.close()
+        // `withThrowingTaskGroup` implicitly awaits ALL children at scope exit, so the
+        // timeout only bounds wall-clock if the reader is guaranteed to return; SIGTERM
+        // doesn't guarantee that, SIGKILL on the process group does (`Process` puts the
+        // child in its own pgid, so `-pid` reaches grandchildren too).
+        let abort: @Sendable () -> Void = {
+            if p.isRunning { Darwin.kill(-p.processIdentifier, SIGKILL) }
+        }
         return try await withTaskCancellationHandler {
             try await withThrowingTaskGroup(of: String.self) { group in
                 group.addTask {
@@ -152,8 +182,9 @@ enum ZmxAdapter {
                     // timeout sleeper below and defeat the bound it's meant to enforce.
                     await withCheckedContinuation { cont in
                         DispatchQueue.global().async {
+                            // No `waitUntilExit()` — we only need stdout, and `abort()`
+                            // reaps anything still alive on the way out.
                             let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                            p.waitUntilExit()
                             cont.resume(returning: String(decoding: data, as: UTF8.self))
                         }
                     }
@@ -162,13 +193,13 @@ enum ZmxAdapter {
                     try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
                     throw CancellationError()
                 }
-                defer { if p.isRunning { p.terminate() } }
+                defer { abort() }
                 let result = try await group.next()!
                 group.cancelAll()
                 return result
             }
         } onCancel: {
-            p.terminate()
+            abort()
         }
     }
 }
@@ -178,13 +209,18 @@ extension ForkHost.Transport {
     /// SECURITY: only place untrusted-ish data meets a shell. argv is single-quoted (layer 1);
     /// for remote, the joined remote command is single-quoted again (layer 2).
     func wrap(_ argv: [String]) -> String {
-        let remote = shq(argv)
         switch self {
         case .local:
-            return remote
+            return shq(argv)
         case .ssh(let t):
             precondition(t.isValid)
-            return shq(["ssh", "-t", "--", t.connectionString]) + " " + shq(remote)
+            // ssh forwards $TERM but not $TERM_PROGRAM*; CC's OSC 9;4 emission gates on
+            // those env vars. Prefixing the remote argv
+            // sets the *creation* env for zmx-new sessions; existing sessions keep their
+            // frozen env until restarted. Version is the minimum CC checks for, not the
+            // bundle version — this is a capability flag.
+            let env = ["env", "TERM_PROGRAM=ghostty", "TERM_PROGRAM_VERSION=1.2.0"]
+            return shq(["ssh", "-t", "--", t.connectionString]) + " " + shq(shq(env + argv))
         }
     }
 
