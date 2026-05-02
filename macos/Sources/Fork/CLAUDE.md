@@ -66,6 +66,9 @@ in fork-check.sh in the same commit*.
 ```
 Fork/
   ForkBootstrap.swift          enabled flag (env GHOSTTY_FORK=1), seam entry points
+  Notify.swift                 UN delegate proxy (wraps AppDelegate's); userInfo["forkTab"]
+                               → foreground banner + click→activate(tab:); dock badge =
+                               .waiting count
   Model/
     Host.swift                 ForkHost, Transport, SSHTarget, SessionRef, TabModel, PersistedTree
     SessionRegistry.swift      @MainActor singleton; @Published hosts/tabs/activeTabID/focusedPaneIndex (refs is plain var)
@@ -73,6 +76,8 @@ Fork/
   Zmx/
     ShellQuote.swift           shq() — POSIX single-quote
     ZmxAdapter.swift           surfaceConfig/list/kill/detachedScript; Transport.wrap/controlArgv
+    CCProbe.swift              zmx pid → ~/.claude/sessions/<pid>.json via ps-tree BFS;
+                               keyed by SessionRef.key; nil-on-failure so poll keeps last-known
   UI/
     ForkWindowController.swift the controller; tab switching = swap surfaceTree
     SidebarView.swift          host sections (drag-reorder); per-pane rows show paneLabel ›
@@ -86,6 +91,7 @@ Fork/
     SessionMetaLabel.swift     shared row trailer: client-count + age
     NewHostView.swift          add-host sheet
     HostDetailView.swift       manage-host sheet (rename, accent hue, SF-Symbol icon, remove)
+    CheatsheetView.swift       hold-⌘ shortcut overlay (600ms debounce; flagsChanged monitor)
     ForkSheetPanel.swift       NSWindow.performKeyEquivalent → ⌘V/C/X/A/Z to firstResponder
 ```
 
@@ -162,7 +168,7 @@ jj git push --bookmark fork --remote origin   # never push to upstream
 - 3rd seam for `keybind = all:cmd+t=new_tab` config edge — leaks through
   `AppDelegate.ghosttyNewTab` since `ForkWindowController is TerminalController`.
 - Host rename in sidebar context menu (registry method exists, no UI).
-- `navMonitor` cleanup on dealloc; `detachedPlaceholders` pruning.
+- `detachedPlaceholders` pruning.
 - `macos-titlebar-style = tabs` config — `tabbingMode = .disallowed` should suppress
   the native tab bar but untested with our sidebar.
 - Scripted splits (`NewTerminalIntent.swift:133`, `ScriptTerminal.swift:105`) hit our
@@ -174,6 +180,10 @@ jj git push --bookmark fork --remote origin   # never push to upstream
   at the host-key prompt — consider `-o StrictHostKeyChecking=accept-new` or a clearer
   error surface in `ZmxAdapter.swift:175`.
 - "Kill Session…" missing from the heading context menu.
+- `ReorderDelegate` accepts external `.text` drops: cancelled internal drag leaves
+  `dragging` stale (no SwiftUI cancel hook), then dragging text from another app
+  onto a row fires a spurious `moveTab`/`moveHost`. Fix needs a private UTType so
+  external drags don't match `.onDrop(of:)`.
 
 ## Signing & TCC
 
@@ -184,6 +194,7 @@ A terminal that runs arbitrary shells will trip every macOS privacy surface. Thr
 | Files / Photos / Desktop etc., **re-asks after every build** | Ad-hoc signature → new CDHash per compile → TCC's `csreq` (`cdhash H"…"`) never matches again | `scripts/fork-make-cert.sh` once, then always run via `scripts/fork-release.sh`. The re-sign step makes the DR `certificate leaf = H"<cert-sha1>"` — stable across rebuilds. Debug builds stay ad-hoc; don't daily-drive them. |
 | **"wants to access data from other apps"** with no always-allow | Per-container data protection (macOS 15+). Fires on any `stat()` into `~/Library/{Group ,}Containers/<app>/` — `ls`, `fd`, shell-history/dir-jump tools, prompt git checks. Each target container is a separate session-scoped grant by design. | Grant **Full Disk Access** to the ReleaseLocal app (Privacy & Security → Full Disk Access → `+`). FDA is a superset; suppresses this and the row above. Keyed on the DR, so it survives rebuilds *only because of* the self-signed cert. |
 | Gatekeeper "unidentified developer" on first launch | Self-signed isn't notarized | Right-click → Open once, or `xattr -dr com.apple.quarantine <app>`. |
+| **SIGKILL "Launch Constraint Violation"** intermittently after rebuild | A nested component (Sparkle's XPCs/Updater.app) wasn't fully re-signed — typically held open by the still-running instance — so the outer seal covers ad-hoc inner code. Shallow `codesign --verify` passes; AMFI's launch-time check is deep. | `fork-release.sh` now `rm -rf`s the bundle pre-build and runs `--verify --deep` post-sign so this fails the script instead of the launch. |
 
 `FORK_SIGN_IDENTITY="Apple Development: …"` overrides the cert if you'd rather use a real Team ID.
 
@@ -203,8 +214,23 @@ A terminal that runs arbitrary shells will trip every macOS privacy surface. Thr
   Digit shortcuts (⌘1-9, ⌘⌥1-9) are layout-independent via `keyCode`.
   ⌘[/⌘] left to upstream's `goto_split` (Config.zig:7016).
   ⌘⌥A watch matches physical `kVK_ANSI_A` (keyCode 0); AZERTY gets it on ⌘⌥Q.
+  Bare-letter hover shortcuts (k/r/c/t/p) fire whenever the mouse is on a sidebar
+  row — including while the terminal is firstResponder — so a stray letter while
+  the cursor rests on a row will intercept; mitigated by `k` being confirm-gated
+  and the rest being reversible.
   ⌘K/⌘⇧K shadow upstream's `clear_screen` (Config.zig:6927); rebind via
   `keybind = cmd+ctrl+k=clear_screen` if wanted.
+  Hold-⌘ ≥600ms shows `CheatsheetView`; the debounce hides quick chords but
+  ⌘-hold for autorepeat (e.g. ⌘← in a TUI) will pop it after 600ms.
+- CC probe (sparkle toggle) reads `~/.claude/sessions/` — a zshrc-only
+  `CLAUDE_CONFIG_DIR` override is invisible to the Dock-launched app and to
+  `ssh -o BatchMode=yes` (non-login shell). Remote probe assumes POSIX
+  `ps -A -o pid=,ppid=`; BusyBox/Alpine untested. Shared-uid remotes
+  (`deploy@`) ship every user's CC pid-files over the wire — BFS filters the
+  *result* to descendants of our zmx sessions, but the raw transfer doesn't.
+- Sidebar mono font reads `window-title-font-family` (not `font-family` — that's a
+  `RepeatableString` and `c_get.zig` can't return it without an upstream `cval()`).
+  Set `window-title-font-family = <terminal font>` for matched typography.
 - ⌘⇧K scrollback search fetches full `zmx history` per session and matches
   client-side (keeps user input out of `controlArgv`'s shell). Slow over ssh
   for large buffers; per-ref 10s timeout means a stalled remote silently drops.
