@@ -101,7 +101,16 @@ struct TabModel: Codable, Identifiable, Hashable {
     /// the sidebar over `surface.title`, which is per-`SurfaceView`-instance and lost on restart.
     var paneLabels: [String: String]
     var paneTags: [String: PaneTag]
+    /// Last-seen CC session name per pane (CCProbe write-through). Shown dimmed when the
+    /// live probe has nothing — i.e. the agent has exited but the zmx shell remains.
+    var ccNames: [String: String]
     var collapsed: Bool
+    var pinned: Bool
+    /// Set by `dismissFromFocus`; `focusTabs` hides the tab while `dismissedAt > mru`.
+    /// Next `touchPane` on activate moves `lastActive` past it → tab reappears.
+    var dismissedAt: Date?
+
+    var hasTag: Bool { tree.leafRefs.contains { paneTags[$0.key] != nil } }
 
     init(id: UUID = UUID(), hostID: ForkHost.ID, title: String, tree: PersistedTree = .empty) {
         self.id = id
@@ -111,7 +120,10 @@ struct TabModel: Codable, Identifiable, Hashable {
         self.lastActive = [:]
         self.paneLabels = [:]
         self.paneTags = [:]
+        self.ccNames = [:]
         self.collapsed = false
+        self.pinned = false
+        self.dismissedAt = nil
     }
 
     init(from d: Decoder) throws {
@@ -123,7 +135,10 @@ struct TabModel: Codable, Identifiable, Hashable {
         lastActive = try c.decodeIfPresent([String: Date].self, forKey: .lastActive) ?? [:]
         paneLabels = try c.decodeIfPresent([String: String].self, forKey: .paneLabels) ?? [:]
         paneTags = try c.decodeIfPresent([String: PaneTag].self, forKey: .paneTags) ?? [:]
+        ccNames = try c.decodeIfPresent([String: String].self, forKey: .ccNames) ?? [:]
         collapsed = try c.decodeIfPresent(Bool.self, forKey: .collapsed) ?? false
+        pinned = try c.decodeIfPresent(Bool.self, forKey: .pinned) ?? false
+        dismissedAt = try c.decodeIfPresent(Date.self, forKey: .dismissedAt)
     }
 }
 
