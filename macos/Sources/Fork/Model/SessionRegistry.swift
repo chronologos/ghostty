@@ -10,11 +10,20 @@ enum RenameTarget: Hashable {
     }
 }
 
+/// Derived from `SurfaceView.$progressReport` (OSC 9;4). nil = idle. `.waiting` = a
+/// background pane finished and hasn't been viewed; cleared on `activate(tab:)`.
+enum PaneState: Equatable { case working, waiting }
+
 /// Single source of truth for hosts, tabs, and the surface→session map. Sidebar and
 /// controller observe this; all mutations route through it (SPEC §3).
 @MainActor
 final class SessionRegistry: ObservableObject {
     static let shared = SessionRegistry()
+
+    /// UserDefaults keys read by both `SidebarView` (`@AppStorage`) and `gotoTab` —
+    /// renaming the `@AppStorage` literal alone would silently desync ⌘1-9.
+    static let kFilterTagged = "forkSidebarFilterTagged"
+    static let kFocusMode = "forkSidebarFocus"
 
     @Published private(set) var hosts: [ForkHost]
     @Published private(set) var tabs: [TabModel]
@@ -25,16 +34,41 @@ final class SessionRegistry: ObservableObject {
     /// Sidebar inline-rename cursor. Controller writes via `promptTabTitle()` / `promptPaneTitle()`
     /// (⌘⇧I / ⌘I); sidebar writes via double-click / context-menu; not persisted.
     @Published private(set) var renaming: RenameTarget?
+    /// Tag-popover cursor — registry-owned (not SidebarView @State) so the controller's
+    /// hover-key monitor can open it. Ephemeral.
+    @Published var taggingPane: (tab: TabModel.ID, key: String)?
     /// MRU of in-use tags (newest first, ≤8). `paneTags.values` is hash-order so deriving
     /// "recent" from it is arbitrary; this is the source of truth for the context-menu shortlist.
     /// Pruned to live `paneTags` on every mutation that can drop the last user of a tag.
     @Published private(set) var recentTags: [PaneTag]
-    /// Surfaces with a one-shot watch armed (⌘⌥A). Mirrors keys of the controller's
-    /// private `watching` cancellable dict so SidebarView can render the eye; ephemeral.
+    /// Surfaces with a one-shot watch armed (⌘⌥A). The OSC 9;4 edge fires via the
+    /// always-on `paneDidSettle` (so it inherits the 250ms flicker-debounce); membership
+    /// here makes that path post even for the active tab. Ephemeral.
     @Published private(set) var watchedSurfaces: Set<UUID> = []
     func setWatching(_ id: UUID, _ on: Bool) {
         if on { watchedSurfaces.insert(id) } else { watchedSurfaces.remove(id) }
     }
+
+    /// Per-surface OSC 9;4 state. Ephemeral; controller-written via `observeProgress`.
+    @Published private(set) var paneState: [UUID: PaneState] = [:]
+    func setPaneState(_ id: UUID, _ s: PaneState?) {
+        guard paneState[id] != s else { return }
+        if let s { paneState[id] = s } else { paneState.removeValue(forKey: id) }
+    }
+    func clearWaiting(surfaces ids: some Sequence<UUID>) {
+        for id in ids where paneState[id] == .waiting { paneState.removeValue(forKey: id) }
+    }
+
+    /// Live CC-session info per pane (`CCProbe`), keyed `[hostID][ref.key]`. Ephemeral; the
+    /// poll only runs while the sidebar's `showCC` toggle is on.
+    @Published private(set) var ccLive: [ForkHost.ID: [String: CCProbe.Info]] = [:]
+    /// Heartbeat timestamps split out from `ccLive` so steady-state poll ticks can refresh
+    /// them without firing `objectWillChange` (`Info.==` excludes `updatedAt` for that
+    /// reason). The sidebar age column reads this *inside* its 30s TimelineView closure,
+    /// so the displayed value tracks the actual heartbeat — reading `ccLive[].updatedAt`
+    /// instead would freeze at time-of-last-status-change.
+    private(set) var ccUpdatedAt: [ForkHost.ID: [String: Date]] = [:]
+    private var ccPoll: Task<Void, Never>?
 
     /// Not @Published: pure surface→session bookkeeping the sidebar never renders
     /// directly. `isConnected()` reads it, but every flow that mutates `refs` also
@@ -63,6 +97,35 @@ final class SessionRegistry: ObservableObject {
     var activeTab: TabModel? { activeTabID.flatMap { id in tabs.first { $0.id == id } } }
     var activeHost: ForkHost? { activeTab.flatMap { host(id: $0.hostID) } }
 
+    /// Focus-mode row order: pinned first, then by MRU, filtered to recent (or tagged-only).
+    /// Shared by `SidebarView.focusSection` and `gotoTab` so ⌘1-9 addresses what's visible.
+    /// Active tab is forced to `.distantFuture` so a freshly-created tab (whose `lastActive`
+    /// is still empty until async focus settlement runs `touchPane`) passes the cutoff and
+    /// sorts to the top instead of flashing at the bottom.
+    func focusTabs(taggedOnly: Bool) -> [TabModel] {
+        let cutoff = Date().addingTimeInterval(-16 * 3600)
+        let active = activeTabID
+        func mru(_ t: TabModel) -> Date {
+            t.id == active ? .distantFuture : (t.lastActive.values.max() ?? .distantPast)
+        }
+        return tabs
+            .filter {
+                guard $0.id != active else { return true }
+                guard mru($0) >= ($0.dismissedAt ?? .distantPast) else { return false }
+                return $0.pinned || (taggedOnly ? $0.hasTag : mru($0) > cutoff)
+            }
+            .sorted { $0.pinned != $1.pinned ? $0.pinned : mru($0) > mru($1) }
+    }
+
+    /// "Inbox-zero" hide: stamp `dismissedAt` so `focusTabs` filters the tab until next
+    /// activate (when `touchPane` advances `lastActive` past it). Unpins too — pin would
+    /// otherwise override the dismiss.
+    func dismissFromFocus(_ id: TabModel.ID) {
+        guard let i = tabs.firstIndex(where: { $0.id == id }) else { return }
+        tabs[i].dismissedAt = Date()
+        tabs[i].pinned = false
+    }
+
     /// `connected` iff ≥1 surface bound to a session on this host (SPEC §3: status is computed).
     func isConnected(_ hostID: ForkHost.ID) -> Bool {
         refs.values.contains { $0.hostID == hostID }
@@ -90,6 +153,8 @@ final class SessionRegistry: ObservableObject {
         guard id != ForkHost.local.id else { return }
         hosts.removeAll { $0.id == id }
         tabs.removeAll { $0.hostID == id }
+        if ccLive[id] != nil { ccLive[id] = nil }
+        ccUpdatedAt[id] = nil
         if let active = activeTabID, !tabs.contains(where: { $0.id == active }) { activeTabID = nil }
         pruneRecentTags()
     }
@@ -144,6 +209,10 @@ final class SessionRegistry: ObservableObject {
         guard let i = tabs.firstIndex(where: { $0.id == id }), tabs[i].collapsed != v else { return }
         tabs[i].collapsed = v
     }
+    func setPinned(_ id: TabModel.ID, _ v: Bool) {
+        guard let i = tabs.firstIndex(where: { $0.id == id }), tabs[i].pinned != v else { return }
+        tabs[i].pinned = v
+    }
     func setFocusedPane(index: Int?) { if focusedPaneIndex != index { focusedPaneIndex = index } }
     func setRenaming(_ t: RenameTarget?) { if renaming != t { renaming = t } }
 
@@ -180,6 +249,60 @@ final class SessionRegistry: ObservableObject {
     func unbind(surface: UUID) { refs.removeValue(forKey: surface) }
     func saveNow() { persistence.save(snapshot()) }
 
+    // MARK: CC probe (PR30)
+
+    func setCCProbeEnabled(_ on: Bool) {
+        if on, ccPoll == nil {
+            ccPoll = Task { [weak self] in await self?.ccPollLoop() }
+        } else if !on {
+            ccPoll?.cancel(); ccPoll = nil
+            if !ccLive.isEmpty { ccLive = [:] }
+            ccUpdatedAt = [:]
+        }
+    }
+
+    private func ccPollLoop() async {
+        var tick = 0
+        while !Task.isCancelled {
+            let due = hosts.filter { h in
+                tabs.contains { $0.hostID == h.id } && (h.transport.isLocal || tick % 5 == 0)
+            }
+            // Fan-out so one unreachable ssh host (5s timeout) doesn't head-of-line-block
+            // the local 3s cadence; merge each result as it arrives.
+            await withTaskGroup(of: (ForkHost.ID, [String: CCProbe.Info]?).self) { group in
+                for h in due {
+                    group.addTask {
+                        let list = await ZmxAdapter.list(host: h)
+                        return (h.id, await CCProbe.probe(host: h, entries: list.managed + list.external))
+                    }
+                }
+                for await (id, result) in group { mergeCC(hostID: id, result: result) }
+            }
+            tick &+= 1
+            try? await Task.sleep(for: .seconds(3))
+        }
+    }
+
+    /// `nil` = probe failed → keep last-known. Otherwise replace this host's slice and write
+    /// names through to `ccNames` so they outlive CC exit. All writes guarded with `!=` so a
+    /// steady-state tick doesn't fire `objectWillChange` (which would churn fork.json via the
+    /// debounce-save and re-render the whole sidebar every 3s).
+    private func mergeCC(hostID: ForkHost.ID, result: [String: CCProbe.Info]?) {
+        // `ccPoll == nil` ⇒ toggled off mid-tick; `host == nil` ⇒ removed mid-tick. Either
+        // way the in-flight task-group can still drain a result here after the clear.
+        guard ccPoll != nil, host(id: hostID) != nil, let result else { return }
+        if ccLive[hostID] != result { ccLive[hostID] = result }
+        ccUpdatedAt[hostID] = result.compactMapValues(\.updatedAt)
+        for i in tabs.indices where tabs[i].hostID == hostID {
+            let live = Set(tabs[i].tree.leafRefs.map(\.key))
+            for (key, info) in result {
+                guard let name = info.name, live.contains(key),
+                      tabs[i].ccNames[key] != name else { continue }
+                tabs[i].ccNames[key] = name
+            }
+        }
+    }
+
     func setPersistedTree(_ tree: PersistedTree, for tabID: TabModel.ID) {
         guard let i = tabs.firstIndex(where: { $0.id == tabID }) else { return }
         tabs[i].tree = tree
@@ -187,6 +310,7 @@ final class SessionRegistry: ObservableObject {
         tabs[i].lastActive = tabs[i].lastActive.filter { live.contains($0.key) }
         tabs[i].paneLabels = tabs[i].paneLabels.filter { live.contains($0.key) }
         tabs[i].paneTags = tabs[i].paneTags.filter { live.contains($0.key) }
+        tabs[i].ccNames = tabs[i].ccNames.filter { live.contains($0.key) }
         pruneRecentTags()
     }
 
@@ -215,9 +339,11 @@ final class SessionRegistry: ObservableObject {
         let label = tabs[si].paneLabels[key]
         let tag = tabs[si].paneTags[key]
         let last = tabs[si].lastActive[key]
+        let cc = tabs[si].ccNames[key]
         if let label { tabs[di].paneLabels[key] = label }
         if let tag { tabs[di].paneTags[key] = tag }
         if let last { tabs[di].lastActive[key] = last }
+        if let cc { tabs[di].ccNames[key] = cc }
         setPersistedTree(tabs[di].tree.appending(leaf: ref), for: dst)
         setPersistedTree(tabs[si].tree.removing(ref), for: src)
         return true
