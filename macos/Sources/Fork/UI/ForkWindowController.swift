@@ -40,6 +40,7 @@ final class ForkWindowController: TerminalController {
             c = ForkWindowController(ghostty, withBaseConfig: cfg)
             if case let .leaf(view) = c.surfaceTree.root {
                 registry.bind(surface: view.id, to: ref)
+                c.observeProgress(view)
                 let tab = registry.newTab(on: host.id, title: ref.name)
                 c.liveTabs[tab.id] = c.surfaceTree
                 c.activate(tab: tab.id)
@@ -82,12 +83,16 @@ final class ForkWindowController: TerminalController {
               let ref = registry.refs[dead.id],
               let host = registry.host(id: ref.hostID),
               let app = ghostty.app else { return nil }
+        let ccName = registry.tabs.lazy
+            .first { $0.tree.leafRefs.contains(ref) }?.ccNames[ref.key]
         var cfg = Ghostty.SurfaceConfiguration()
-        cfg.command = ZmxAdapter.detachedScript(host: host, ref: ref)
+        cfg.command = ZmxAdapter.detachedScript(host: host, ref: ref, ccName: ccName)
         let placeholder = Ghostty.SurfaceView(app, baseConfig: cfg)
         detachedPlaceholders.insert(placeholder.id)
         registry.bind(surface: placeholder.id, to: ref)
+        observeProgress(placeholder)
         registry.unbind(surface: dead.id)
+        stopObservingProgress(dead.id)
         return placeholder
     }
 
@@ -168,6 +173,7 @@ final class ForkWindowController: TerminalController {
                     guard let self else { return }
                     // Unbind first so the pty-death → placeholder path short-circuits.
                     self.registry.unbind(surface: surface.id)
+                    self.stopObservingProgress(surface.id)
                     Task { try? await ZmxAdapter.kill(host: host, ref: ref) }
                     self.dropPane(tab: tab, ref: ref, surface: surface)
                 }
@@ -211,6 +217,20 @@ final class ForkWindowController: TerminalController {
     // MARK: ⌘[/⌘]/⌘1-9/⌘⌥1-9 — sidebar-tab navigation (SPEC §10).
 
     private var navMonitor: Any?
+    private var cheatMonitor: Any?
+    private weak var cheatsheetHost: NSView?
+    private var cheatsheetCenterX: NSLayoutConstraint?
+    private var cheatsheetTimer: Timer?
+    private func setCheatsheet(_ on: Bool) {
+        cheatsheetTimer?.invalidate(); cheatsheetTimer = nil
+        cheatsheetHost?.isHidden = !on
+    }
+
+    /// Set by SidebarView's per-row `.onHover`; read only by the navMonitor's bare-key
+    /// branch below. Surface is looked up fresh in `handleHoverKey` — capturing it here
+    /// would freeze a `nil` for cold-restored tabs (the row's `.onHover` doesn't re-fire
+    /// when the body re-renders with a non-nil surface). Not @Published.
+    var hoveredPane: (tab: TabModel.ID, ref: SessionRef)?
 
     /// `charactersIgnoringModifiers` does not strip Option (it's a character-producing
     /// modifier), so ⌥-digit must be matched by physical keyCode.
@@ -221,7 +241,19 @@ final class ForkWindowController: TerminalController {
     private func installNavMonitor() {
         navMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] ev in
             guard let self, ev.window === self.window, self.sheetPanel == nil else { return ev }
+            // Any keystroke = chord completed (or non-⌘ typing) → hide/cancel cheatsheet.
+            self.setCheatsheet(false)
             let mods = ev.modifierFlags.intersection([.command, .shift, .option, .control])
+            // Bare-key hover shortcuts (k/r/c/t/p). Only when the mouse is on a sidebar row
+            // and a rename field isn't focused — `firstResponder is NSTextView` covers that.
+            // Hazard: terminal is usually firstResponder, so a stray letter while the mouse
+            // rests on a row will intercept; the actions are confirm-gated or trivially
+            // reversible.
+            if mods.isEmpty, let h = self.hoveredPane,
+               !(self.window?.firstResponder is NSTextView),
+               self.handleHoverKey(ev.charactersIgnoringModifiers, on: h) {
+                return nil
+            }
             if let n = Self.digitKeyCodes[ev.keyCode] {
                 switch mods {
                 case [.command, .option]: self.gotoHost(index: n); return nil
@@ -256,6 +288,24 @@ final class ForkWindowController: TerminalController {
             default: return ev
             }
         }
+        // ⌘-hold cheatsheet: arm 600ms after ⌘-down (so quick chords don't flash it),
+        // hide on ⌘-up. Stuck-state guards: the keyDown
+        // monitor above hides on any chord-completion via `setCheatsheet(false)` calls
+        // baked into the goto/step/toggle handlers, and `windowDidResignKey` covers
+        // app-switch swallowing the flagsChanged release.
+        cheatMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] ev in
+            guard let self, ev.window === self.window else { return ev }
+            let cmd = ev.modifierFlags.contains(.command)
+            cheatsheetTimer?.invalidate(); cheatsheetTimer = nil
+            if cmd, ev.modifierFlags.intersection([.shift, .option, .control]).isEmpty {
+                cheatsheetTimer = .scheduledTimer(withTimeInterval: 0.6, repeats: false) {
+                    [weak self] _ in MainActor.assumeIsolated { self?.setCheatsheet(true) }
+                }
+            } else {
+                setCheatsheet(false)
+            }
+            return ev
+        }
         NotificationCenter.default.addObserver(
             self, selector: #selector(parkedSurfaceDidExit(_:)),
             name: Ghostty.Notification.ghosttyCloseSurface, object: nil)
@@ -264,60 +314,122 @@ final class ForkWindowController: TerminalController {
             name: .ghosttyBellDidRing, object: nil)
     }
 
+    private func handleHoverKey(_ key: String?, on h: (tab: TabModel.ID, ref: SessionRef)) -> Bool {
+        guard let tab = registry.tabs.first(where: { $0.id == h.tab }) else { return false }
+        let surface = liveTabs[h.tab].flatMap { tree in
+            tree.first { registry.refs[$0.id] == h.ref }
+        }
+        switch key {
+        case "k": confirmKillPane(tab: tab, ref: h.ref, surface: surface)
+        case "r": surface.map(forkWigglePane)
+        case "c": registry.setPaneTag(tab: h.tab, name: h.ref.key, to: nil)
+        case "t": registry.taggingPane = (h.tab, h.ref.key)
+        case "p": registry.setPinned(h.tab, !tab.pinned)
+        case "h" where UserDefaults.standard.bool(forKey: SessionRegistry.kFocusMode):
+            registry.dismissFromFocus(h.tab)
+            // Row is gone — same `.onHover(false)`-doesn't-fire hazard as focusMode toggle.
+            hoveredPane = nil
+        default: return false
+        }
+        return true
+    }
+
     // MARK: Watch (⌘⌥A) — one-shot alert on completion (PR24).
     //
-    // Fires on the first of: BEL (`.ghosttyBellDidRing`; also posted by upstream's
-    // OSC 133;D handler when `notify-on-command-finish-action` includes `bell`, and
-    // by ANY raw `\a` in the pty stream — hostile/noisy input can trip it), or OSC
-    // 9;4 progress non-nil→nil (`SurfaceView.$progressReport`, ConEmu-style; what
-    // Claude Code emits on idle). Both reach Swift without seams; `progress-style`
-    // config defaults true (Config.zig:3671). Caveat: upstream's `progressReport`
-    // didSet (SurfaceView_AppKit.swift:31) auto-nils after 15s of no fresh 9;4, so
-    // a process that emits progress then stalls >15s reads as "finished".
-
-    private var watching: [UUID: AnyCancellable] = [:]
-
-    func isWatching(_ surface: Ghostty.SurfaceView) -> Bool { watching[surface.id] != nil }
+    // ⌘⌥A one-shot watch: now only `registry.watchedSurfaces` membership. The OSC 9;4
+    // edge is handled by the always-on `paneDidSettle` (which checks the set and posts
+    // even for the active tab when watched, then clears it). The watch keeps its own
+    // BEL trigger for the non-OSC path (`.ghosttyBellDidRing` — also posted by
+    // upstream's OSC 133;D handler when `notify-on-command-finish-action` includes
+    // `bell`, and by any raw `\a`). The old undebounced `$progressReport` sub here
+    // pre-dated `observeProgress`'s 250ms debounce and would mis-fire on CC's
+    // per-tool-call state:0 flicker.
 
     func toggleWatch(on target: Ghostty.SurfaceView? = nil) {
         guard let surface = target ?? focusedSurface else { return }
-        if watching.removeValue(forKey: surface.id) != nil {
-            registry.setWatching(surface.id, false)
-            return
-        }
-        registry.setWatching(surface.id, true)
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
-        var sawProgress = false
-        watching[surface.id] = surface.$progressReport
-            .sink { [weak self, weak surface] report in
-                if report != nil { sawProgress = true; return }
-                guard sawProgress, let surface else { return }
-                self?.watchDidFire(on: surface)
-            }
+        registry.setWatching(surface.id, !registry.watchedSurfaces.contains(surface.id))
     }
 
     @objc private func bellDidRing(_ n: Notification) {
         guard let surface = n.object as? Ghostty.SurfaceView,
-              watching[surface.id] != nil else { return }
-        watchDidFire(on: surface)
+              registry.watchedSurfaces.contains(surface.id),
+              let tab = owningTab(of: surface) else { return }
+        registry.setWatching(surface.id, false)
+        ForkNotify.shared.post(tab: tab.id,
+                               title: "\(paneDisplayLabel(tab: tab, surface: surface)) finished",
+                               body: "Tab '\(tab.title)'")
     }
 
-    private func watchDidFire(on surface: Ghostty.SurfaceView) {
-        guard watching.removeValue(forKey: surface.id) != nil else { return }
-        registry.setWatching(surface.id, false)
+    // MARK: Pane state (OSC 9;4) — always-on; ⌘⌥A watch piggybacks via `watchedSurfaces`.
+    //
+    // Upstream's `progressReport` didSet (SurfaceView_AppKit.swift:31) auto-nils after
+    // 15s of no fresh OSC 9;4 — that's the stuck-spinner heartbeat. The 250ms debounce
+    // on the nil edge here absorbs CC's per-tool-call clear/set flicker (state:0 fires
+    // between tool calls mid-turn).
+
+    private var progressSubs: [UUID: AnyCancellable] = [:]
+    private var settleTimers: [UUID: Timer] = [:]
+
+    private func observeProgress(_ surface: Ghostty.SurfaceView) {
+        progressSubs[surface.id] = surface.$progressReport
+            .dropFirst()
+            .sink { [weak self, weak surface] report in
+                guard let self, let surface else { return }
+                settleTimers.removeValue(forKey: surface.id)?.invalidate()
+                guard report == nil else { registry.setPaneState(surface.id, .working); return }
+                guard registry.paneState[surface.id] == .working else { return }
+                settleTimers[surface.id] = .scheduledTimer(withTimeInterval: 0.25, repeats: false) {
+                    [weak self, weak surface] _ in
+                    MainActor.assumeIsolated {
+                        guard let self, let surface else { return }
+                        self.settleTimers[surface.id] = nil
+                        self.paneDidSettle(surface)
+                    }
+                }
+            }
+    }
+
+    /// Surfaces that have already posted their settle banner and not yet been viewed.
+    /// `paneState` itself can't gate this — a chatty watcher (cargo watch, npm dev, multi-
+    /// turn CC with >250ms gaps) cycles `.working`↔`.waiting`, and the dot/badge SHOULD
+    /// reflect that, but the banner shouldn't re-fire until the user actually views the tab.
+    private var notifiedSurfaces: Set<UUID> = []
+
+    private func paneDidSettle(_ surface: Ghostty.SurfaceView) {
+        // Orphan check first: a Detach-ed surface (retained by upstream's undo stack) can
+        // still get its 15s `progressReport` auto-nil → settle, but `owningTab` is nil.
+        // Writing `.waiting` before this guard would stick the dock badge +1 forever.
+        guard let tab = owningTab(of: surface) else {
+            registry.setPaneState(surface.id, nil); return
+        }
+        let watched = registry.watchedSurfaces.contains(surface.id)
+        if watched { registry.setWatching(surface.id, false) }
+        guard watched || tab.id != registry.activeTabID else {
+            registry.setPaneState(surface.id, nil); return
+        }
+        registry.setPaneState(surface.id, tab.id == registry.activeTabID ? nil : .waiting)
+        guard notifiedSurfaces.insert(surface.id).inserted else { return }
+        ForkNotify.shared.post(tab: tab.id,
+                               title: "\(paneDisplayLabel(tab: tab, surface: surface)) — done",
+                               body: "Tab '\(tab.title)'")
+    }
+
+    private func stopObservingProgress(_ id: UUID) {
+        progressSubs.removeValue(forKey: id)
+        settleTimers.removeValue(forKey: id)?.invalidate()
+        notifiedSurfaces.remove(id)
+        registry.setPaneState(id, nil)
+        registry.setWatching(id, false)
+    }
+
+    private func owningTab(of surface: Ghostty.SurfaceView) -> TabModel? {
+        registry.tabs.first { surfaces(for: $0.id).contains { $0 === surface } }
+    }
+
+    private func paneDisplayLabel(tab: TabModel?, surface: Ghostty.SurfaceView) -> String {
         let ref = registry.refs[surface.id]
-        let tab = registry.tabs.first { surfaces(for: $0.id).contains { $0 === surface } }
         let osc = (surface.title.isEmpty || surface.title == "👻") ? nil : surface.title
-        let label = ref.flatMap { tab?.paneLabels[$0.key] } ?? osc ?? ref?.name ?? "Pane"
-        // `shouldPresentNotification` (Ghostty.App.swift:449) requires the userInfo
-        // surface to resolve via `findSurface(forUUID:)` AND have `window != nil`. A
-        // watched pane in a parked tab fails both; post against an in-tree surface so
-        // the banner shows while Ghostty is foreground.
-        let poster = surfaceTree.contains { $0 === surface } ? surface
-                   : (Array(surfaceTree).first ?? surface)
-        poster.showUserNotification(title: "\(label) finished",
-                                    body: tab.map { "Tab '\($0.title)'" } ?? "",
-                                    requireFocus: false)
+        return ref.flatMap { tab?.paneLabels[$0.key] } ?? osc ?? ref?.name ?? "Pane"
     }
 
     // MARK: Sidebar visibility
@@ -330,6 +442,9 @@ final class ForkWindowController: TerminalController {
 
     func toggleSidebar() {
         guard let sidebarHost, let sidebarWidthConstraint, let terminalLeadingConstraint else { return }
+        // Row removal via subtree-swap or width→0 doesn't reliably fire `.onHover(false)`;
+        // a stale `hoveredPane` would keep bare k/r/c/t/p armed while typing in the pty.
+        hoveredPane = nil
         let hide = sidebarWidthConstraint.constant > 0
         let w: CGFloat = hide ? 0 : Self.sidebarWidth
         if !hide { sidebarHost.isHidden = false }
@@ -339,6 +454,7 @@ final class ForkWindowController: TerminalController {
             ctx.allowsImplicitAnimation = true
             sidebarWidthConstraint.animator().constant = w
             terminalLeadingConstraint.animator().constant = w
+            cheatsheetCenterX?.animator().constant = w / 2
             sidebarHost.superview?.layoutSubtreeIfNeeded()
         } completionHandler: {
             sidebarHost.isHidden = sidebarWidthConstraint.constant == 0
@@ -355,9 +471,21 @@ final class ForkWindowController: TerminalController {
         activate(tab: siblings[((i + delta) % n + n) % n].id)
     }
 
+    /// ⌘N indexes whatever the sidebar is currently rendering: per-host order in normal
+    /// mode, the cross-host pinned-then-MRU list in focus mode. The two @AppStorage keys
+    /// live in `SidebarView`; reading UserDefaults directly avoids threading view state
+    /// back through the controller for a one-shot key handler.
     func gotoTab(index n: Int) {
-        let host = registry.activeHost?.id ?? ForkHost.local.id
-        let tabs = registry.tabs(on: host)
+        let d = UserDefaults.standard
+        let tagged = d.bool(forKey: SessionRegistry.kFilterTagged)
+        let tabs: [TabModel]
+        if d.bool(forKey: SessionRegistry.kFocusMode) {
+            tabs = registry.focusTabs(taggedOnly: tagged)
+        } else {
+            let host = registry.activeHost?.id ?? ForkHost.local.id
+            let all = registry.tabs(on: host)
+            tabs = tagged ? all.filter(\.hasTag) : all
+        }
         guard tabs.indices.contains(n - 1) else { return }
         activate(tab: tabs[n - 1].id)
     }
@@ -438,7 +566,10 @@ final class ForkWindowController: TerminalController {
     }
 
     func removeHost(_ id: ForkHost.ID) {
-        for tab in registry.tabs(on: id) { liveTabs.removeValue(forKey: tab.id) }
+        // dropLiveTab (not closeForkTab) — closeForkTab's positional-neighbour pick
+        // would `activate` a dormant same-host sibling mid-loop and spawn its ssh/zmx
+        // sessions for one frame each, on the host we're tearing down.
+        for tab in registry.tabs(on: id) { dropLiveTab(tab.id) }
         registry.removeHost(id)
         guard registry.activeTabID == nil else { return }
         if let next = registry.tabs.first?.id {
@@ -461,7 +592,7 @@ final class ForkWindowController: TerminalController {
         alert.beginSheetModal(for: window) { [weak self] resp in
             guard resp == .alertFirstButtonReturn, let self else { return }
             // Unbind first so the pty-death → placeholder path short-circuits.
-            if let surface { registry.unbind(surface: surface.id) }
+            if let surface { registry.unbind(surface: surface.id); stopObservingProgress(surface.id) }
             Task { try? await ZmxAdapter.kill(host: host, ref: ref) }
             dropPane(tab: tab, ref: ref, surface: surface)
         }
@@ -473,6 +604,10 @@ final class ForkWindowController: TerminalController {
         // paneCount==1 and closeForkTab the freshly-split tree (see movePane :568-570).
         let count = tab.id == registry.activeTabID ? Array(surfaceTree).count : tab.tree.paneCount
         guard count > 1 else { closeForkTab(tab.id); return }
+        // Sub deliberately NOT dropped on Detach: ⌘Z restores the surface into the tree
+        // and re-observe has no hook. `paneDidSettle`'s `owningTab==nil` guard makes a
+        // detached fire harmless; the `progressSubs` entry leaks like `refs` does
+        // (in-memory, swept on `windowWillClose`).
         if let live = liveTabs[tab.id], let surface,
            let node = live.root?.node(view: surface) {
             if tab.id == registry.activeTabID {
@@ -679,6 +814,24 @@ final class ForkWindowController: TerminalController {
 
     // MARK: Window setup — wrap upstream's contentView in a sidebar split.
 
+    override func windowDidResignKey(_ notification: Notification) {
+        super.windowDidResignKey(notification)
+        setCheatsheet(false)
+    }
+
+    override func windowWillClose(_ notification: Notification) {
+        // Run-loop / NSEvent retain these independently of `self`; weak-self in the
+        // closures makes the firings no-ops, but the timers/monitors themselves leak.
+        navMonitor.map(NSEvent.removeMonitor); navMonitor = nil
+        cheatMonitor.map(NSEvent.removeMonitor); cheatMonitor = nil
+        cheatsheetTimer?.invalidate(); cheatsheetTimer = nil
+        // `paneState` lives on the singleton and `ForkNotify.badgeSub` outlives this
+        // controller; reopen mints fresh surface UUIDs so the old `.waiting` entries
+        // would be unreachable and the dock badge stuck.
+        for id in Array(progressSubs.keys) { stopObservingProgress(id) }
+        super.windowWillClose(notification)
+    }
+
     override func windowDidLoad() {
         super.windowDidLoad()
         guard let window, let terminalContent = window.contentView else { return }
@@ -729,6 +882,18 @@ final class ForkWindowController: TerminalController {
             terminalLeadingConstraint!.isActive = true
         }
 
+        let cheatsheet = NSHostingView(rootView: CheatsheetView())
+        cheatsheet.translatesAutoresizingMaskIntoConstraints = false
+        cheatsheet.isHidden = true
+        terminalContent.addSubview(cheatsheet)
+        cheatsheetHost = cheatsheet
+        cheatsheetCenterX = cheatsheet.centerXAnchor.constraint(
+            equalTo: terminalContent.centerXAnchor, constant: Self.sidebarWidth / 2)
+        NSLayoutConstraint.activate([
+            cheatsheetCenterX!,
+            cheatsheet.centerYAnchor.constraint(equalTo: terminalContent.centerYAnchor),
+        ])
+
         let reveal = NSButton(image: NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Show sidebar")!,
                               target: self, action: #selector(revealSidebar(_:)))
         reveal.isBordered = false
@@ -765,6 +930,9 @@ final class ForkWindowController: TerminalController {
     // MARK: Tab management
 
     func activate(tab id: TabModel.ID, paneIndex: Int? = nil) {
+        // ForkNotify.didReceive can pass a stale banner's tab ID; setting `activeTabID`
+        // to a dead ID dangles `surfaceTree` (rebuildTree bails) and breaks split/stepTab.
+        guard registry.tabs.contains(where: { $0.id == id }) else { return }
         let current = registry.activeTabID
         if current != id {
             // Snapshot the outgoing tab ONLY if it's been hydrated this session. On
@@ -791,6 +959,8 @@ final class ForkWindowController: TerminalController {
         // Write the highlight index in the same tick as `setActive` above; the async
         // focus roundtrip lands a frame later and would briefly show the prior tab's index.
         let leaves = Array(surfaceTree)
+        registry.clearWaiting(surfaces: leaves.lazy.map(\.id))
+        notifiedSurfaces.subtract(leaves.lazy.map(\.id))
         // Synchronous MRU touch: `focusedSurfaceDidChange` → `touchPane` is async via
         // `@FocusedValue.onChange`, and the `paneIndex == nil` path below never sets
         // `focusedSurface`, so a new tab could be switched away from with `lastActive`
@@ -831,6 +1001,7 @@ final class ForkWindowController: TerminalController {
         let cfg = ZmxAdapter.surfaceConfig(host: host, ref: ref, initialCmd: intent.cmd, cwd: intent.cwd)
         let surface = Ghostty.SurfaceView(app, baseConfig: cfg)
         registry.bind(surface: surface.id, to: ref)
+        observeProgress(surface)
         let tab = registry.newTab(on: host.id, title: ref.name)
         liveTabs[tab.id] = .init(view: surface)
         // Match `gotoHost`/`revealRow`: force-expand so the new row is visible. Without this,
@@ -839,16 +1010,19 @@ final class ForkWindowController: TerminalController {
         activate(tab: tab.id)
     }
 
-    func closeForkTab(_ id: TabModel.ID) {
-        if let tree = liveTabs[id] {
-            for surface in tree {
-                registry.unbind(surface: surface.id)
-                if watching.removeValue(forKey: surface.id) != nil {
-                    registry.setWatching(surface.id, false)
-                }
-            }
+    /// Per-surface unbind + watch teardown for a tab's live tree, then drop the tree.
+    /// Shared by `closeForkTab` and `removeHost` — the latter must NOT go through
+    /// `closeForkTab` (see `removeHost` for the dormant-sibling-spawn hazard).
+    private func dropLiveTab(_ id: TabModel.ID) {
+        guard let tree = liveTabs.removeValue(forKey: id) else { return }
+        for surface in tree {
+            registry.unbind(surface: surface.id)
+            stopObservingProgress(surface.id)
         }
-        liveTabs.removeValue(forKey: id)
+    }
+
+    func closeForkTab(_ id: TabModel.ID) {
+        dropLiveTab(id)
         let wasActive = registry.activeTabID == id
         let host = registry.tabs.first { $0.id == id }?.hostID
         let i = host.flatMap { h in registry.tabs(on: h).firstIndex { $0.id == id } }
@@ -909,6 +1083,7 @@ final class ForkWindowController: TerminalController {
         let cfg = ZmxAdapter.surfaceConfig(host: host, ref: ref)
         guard let view = super.newSplit(at: oldView, direction: direction, baseConfig: cfg) else { return nil }
         registry.bind(surface: view.id, to: ref)
+        observeProgress(view)
         return view
     }
 
@@ -947,9 +1122,11 @@ final class ForkWindowController: TerminalController {
             case .empty: return nil
             case .leaf(let ref):
                 let r = ref ?? SessionRef(hostID: host.id, name: registry.uniqueAutoName())
-                let cfg = ZmxAdapter.surfaceConfig(host: host, ref: r)
+                let cfg = ZmxAdapter.surfaceConfig(host: host, ref: r,
+                                                   initialCmd: tab.ccNames[r.key].map(ZmxAdapter.restoreCmd))
                 let v = Ghostty.SurfaceView(app, baseConfig: cfg)
                 registry.bind(surface: v.id, to: r)
+                observeProgress(v)
                 return .leaf(view: v)
             case .split(let h, let ratio, let a, let b):
                 let na = revive(a), nb = revive(b)

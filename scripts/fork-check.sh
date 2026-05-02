@@ -38,4 +38,14 @@ while IFS=$'\t' read -r pat hint; do
     || fail "upstream symbol gone: /$pat/  (was in $hint)"
 done <<< "$syms"
 
+# ForkNotify.install() defers one tick to wrap UNUserNotificationCenter.delegate; that
+# only works while seam #1 (ForkBootstrap.install) precedes upstream's `center.delegate
+# = self` in applicationDidFinishLaunching. Breakage = silent (notifications still
+# deliver via upstream, click→activate(tab:) just stops working).
+ad=macos/Sources/App/macOS/AppDelegate.swift
+seam_ln=$(rg -n 'ForkBootstrap.install' "$ad" | head -1 | cut -d: -f1 || true)
+deleg_ln=$(rg -n 'let center = UNUserNotificationCenter\.current\(\)' "$ad" | head -1 | cut -d: -f1 || true)
+[[ -n "$seam_ln" && -n "$deleg_ln" && "$seam_ln" -lt "$deleg_ln" ]] \
+  || fail "ForkBootstrap.install must precede UN delegate assignment in $ad (seam:$seam_ln deleg:$deleg_ln)"
+
 echo "fork-check: OK — 2 seams, $(wc -l <<< "$syms" | tr -d ' ') upstream symbols present"

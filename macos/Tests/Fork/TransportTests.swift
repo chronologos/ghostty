@@ -37,7 +37,7 @@ struct TransportTests {
     @Test func wrapSshGolden() {
         let t = ForkHost.SSHTarget(user: "deploy", host: "prod-web-01")
         let cmd = ForkHost.Transport.ssh(t).wrap(["zmx", "attach", "h-n"])
-        #expect(cmd == #"'ssh' '-t' '--' 'deploy@prod-web-01' ''\''zmx'\'' '\''attach'\'' '\''h-n'\'''"#)
+        #expect(cmd == #"'ssh' '-t' '--' 'deploy@prod-web-01' ''\''env'\'' '\''TERM_PROGRAM=ghostty'\'' '\''TERM_PROGRAM_VERSION=1.2.0'\'' '\''zmx'\'' '\''attach'\'' '\''h-n'\'''"#)
     }
 
     @Test func wrapSshInjection() {
@@ -71,10 +71,32 @@ struct TransportTests {
         #expect(e?.name == "dev")
         #expect(e?.clients == 2)
         #expect(e?.created == Date(timeIntervalSince1970: 1700000000))
+        #expect(e?.pid == 123)
+    }
+
+    @Test func parseListLineNoPid() {
+        let e = ZmxAdapter.parse(line: "name=dev\tclients=1\tcreated=1700000000"[...])
+        #expect(e?.pid == nil)
     }
 
     @Test func parseListLineErr() {
         #expect(ZmxAdapter.parse(line: "  name=dead\terr=ConnectionRefused\tstatus=cleaning up") == nil)
+    }
+
+    @Test func detachedScriptCCNameQuoted() {
+        let ref = SessionRef(hostID: "local", name: "s")
+        let cmd = ZmxAdapter.detachedScript(host: .local, ref: ref, ccName: "$(id)")
+        #expect(cmd.contains("was: %s"))
+        // Doubly-quoted: inner shq → '$(id)', outer shq(["sh","-c",inner]) → each ' → '\''.
+        // Without the inner shq the outer level would contain bare `$(id)` and this fails.
+        #expect(cmd.contains(#"'\''$(id)'\''"#))
+    }
+
+    @Test func restoreCmdCCNameQuoted() {
+        let argv = ZmxAdapter.restoreCmd(ccName: "a';id;'b")
+        #expect(argv[0] == "sh" && argv[1] == "-c")
+        #expect(argv[2].contains(#"'a'\'';id;'\''b'"#))
+        #expect(argv[2].hasSuffix("exec ${SHELL:-/bin/sh}"))
     }
 
     @Test func wireName() {
@@ -145,6 +167,49 @@ struct TransportTests {
                                     a: .leaf(a), b: .leaf(a))
         #expect(t.merging(.empty) == t)
         #expect(PersistedTree.empty.merging(.empty) == .empty)
+    }
+
+    // MARK: CCProbe
+
+    @Test func ccProbeParsePS() {
+        let m = CCProbe.parsePS("  100   1\n  200   100\n  201   100\n  300   200\n")
+        #expect(m[100]?.sorted() == [200, 201])
+        #expect(m[200] == [300])
+    }
+
+    private func entry(_ name: String, pid: Int32?, external: Bool = false) -> ZmxAdapter.ListEntry {
+        .init(name: name, clients: 1, created: .distantPast, external: external, pid: pid)
+    }
+
+    @Test func ccProbeMatchShallowestWins() {
+        // 100 → 200 → 300; both 200 and 300 are CC pids → 200 (shallowest) wins.
+        let children: [Int32: [Int32]] = [100: [200], 200: [300]]
+        let cc: [Int32: CCProbe.Info] = [200: .init(name: "outer"), 300: .init(name: "inner")]
+        let r = CCProbe.match(entries: [entry("dev", pid: 100)], hostID: "h",
+                              children: children, cc: cc)
+        #expect(r["dev"]?.name == "outer")
+    }
+
+    @Test func ccProbeMatchSkipsZeroPid() {
+        // pid 0/nil must not seed BFS — launchd's ppid is 0, so a 0-seed would walk
+        // everything and attribute an unrelated CC.
+        let children: [Int32: [Int32]] = [0: [1], 1: [42]]
+        let cc: [Int32: CCProbe.Info] = [42: .init(name: "stray")]
+        let r = CCProbe.match(entries: [entry("a", pid: 0), entry("b", pid: nil)], hostID: "h",
+                              children: children, cc: cc)
+        #expect(r.isEmpty)
+    }
+
+    @Test func ccProbeMatchKeyedByRefKey() {
+        // Managed `acr` and external `acr` share entry.name post-prefix-strip; result must
+        // key on SessionRef.key (`acr` vs `@acr`) so they don't collide.
+        let children: [Int32: [Int32]] = [10: [11], 20: [21]]
+        let cc: [Int32: CCProbe.Info] = [11: .init(name: "mine"), 21: .init(name: "theirs")]
+        let r = CCProbe.match(
+            entries: [entry("acr", pid: 10, external: false), entry("acr", pid: 20, external: true)],
+            hostID: "h", children: children, cc: cc)
+        #expect(r["acr"]?.name == "mine")
+        #expect(r["@acr"]?.name == "theirs")
     }
 }
 #endif

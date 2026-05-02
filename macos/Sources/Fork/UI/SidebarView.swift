@@ -1,6 +1,7 @@
 #if os(macOS)
 import SwiftUI
 import UniformTypeIdentifiers
+import GhosttyKit
 
 /// Left sidebar: hosts as collapsible sections, tabs as rows (SPEC §9).
 struct SidebarView: View {
@@ -9,15 +10,27 @@ struct SidebarView: View {
     @State private var renameText: String = ""
     @State private var draggingTab: TabModel.ID?
     @State private var draggingHost: ForkHost.ID?
-    @State private var tagging: (tab: TabModel.ID, index: Int)?
     @FocusState private var renameFieldFocused: Bool
     @AppStorage("forkSidebarCompact") private var compact = false
-    @AppStorage("forkSidebarFilterTagged") private var filterTagged = false
-    @AppStorage("forkSidebarFocus") private var focusMode = false
+    @AppStorage(SessionRegistry.kFilterTagged) private var filterTagged = false
+    @AppStorage(SessionRegistry.kFocusMode) private var focusMode = false
+    @AppStorage("forkSidebarShowCC") private var showCC = false
     @Environment(\.colorScheme) private var scheme
+    /// ⌥-hold peeks the details view (`isCompact` below); ⌥⌥ toggles `compact` itself.
+    /// Own monitor (not `navMonitor`) so this stays @State and doesn't churn the registry's
+    /// `objectWillChange` → debounce-save on every modifier tap.
+    @State private var optionHeld = false
+    @State private var lastOptionPress: Date?
+    @State private var flagsMonitor: Any?
 
     private let clay = Color(red: 0xD9/255, green: 0x77/255, blue: 0x57/255)
     private var dark: Bool { scheme == .dark }
+    private var fontFamily: String? { controller?.ghostty.config.forkFontFamily }
+    private func mono(_ s: CGFloat, _ w: Font.Weight = .regular) -> Font { forkMono(s, w, fontFamily) }
+    /// Single source for the details view: header button writes `compact`, ⌥-hold transiently
+    /// overrides it, ⌥⌥ toggles it. Everything that differs between compact and details
+    /// (age column, subtitle, ⌘N/host-label cell, host-header ⌘⌥N) gates on this.
+    private var isCompact: Bool { compact && !optionHeld }
 
     private var recentTags: ArraySlice<PaneTag> { registry.recentTags.prefix(5) }
 
@@ -44,6 +57,41 @@ struct SidebarView: View {
             }
         }
         .background(.ultraThinMaterial)
+        .task { registry.setCCProbeEnabled(showCC) }
+        .onChange(of: showCC) { registry.setCCProbeEnabled($0) }
+        // focusMode swaps the entire focusSection ↔ ForEach(hosts) subtree under
+        // withAnimation — rows are diffed out without geometry change, so per-row
+        // `.onHover(false)` doesn't fire and `hoveredPane` would stay armed.
+        .onChange(of: focusMode) { _ in controller?.hoveredPane = nil }
+        .onAppear {
+            flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { ev in
+                // Local monitors are app-wide; QuickTerminal bypasses the fork seam, so
+                // ⌥⌥ in its window would otherwise flip our persisted `compact` flag.
+                guard ev.window === controller?.window else { return ev }
+                let held = ev.modifierFlags.contains(.option)
+                if held, !optionHeld {
+                    let now = Date()
+                    if let last = lastOptionPress, now.timeIntervalSince(last) < 0.4 {
+                        compact.toggle()
+                        lastOptionPress = nil
+                    } else {
+                        lastOptionPress = now
+                    }
+                }
+                if held != optionHeld { optionHeld = held }
+                return ev
+            }
+        }
+        .onDisappear {
+            flagsMonitor.map(NSEvent.removeMonitor); flagsMonitor = nil
+            // Stop the singleton's 3s ccPoll loop — `setCCProbeEnabled` cancels the
+            // detached `Task`, which `.task`'s own auto-cancel can't (one-shot body
+            // returns immediately). Otherwise leaks past last-window close
+            // (`shouldQuitAfterLastWindowClosed` defaults false, AppDelegate.swift:1035).
+            registry.setCCProbeEnabled(false)
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSApplication.didResignActiveNotification)) { _ in optionHeld = false }
     }
 
     // MARK: Header
@@ -67,6 +115,11 @@ struct SidebarView: View {
                        tint: focusMode ? clay : nil) {
                 withAnimation(.snappy(duration: 0.12)) { focusMode.toggle() }
             }
+            iconButton("sparkle",
+                       help: showCC ? "Hide Claude session names" : "Show Claude session names",
+                       tint: showCC ? clay : nil) {
+                withAnimation(.snappy(duration: 0.12)) { showCC.toggle() }
+            }
             Spacer()
         }
         .padding(.horizontal, 10).padding(.vertical, 6)
@@ -88,20 +141,7 @@ struct SidebarView: View {
     // MARK: Focus section — flat MRU-first list across all hosts.
     // `filterTagged` composes: off → last-16h; on → tagged-only, no time cutoff.
 
-    private var focusTabs: [TabModel] {
-        let cutoff = Date().addingTimeInterval(-16 * 3600)
-        let tagged = filterTagged
-        let active = registry.activeTabID
-        // `newTab` synchronously publishes with `lastActive == [:]` before async focus
-        // settlement fires `touchPane`; treat active as `.distantFuture` so it both
-        // passes the cutoff and sorts first instead of flashing at the bottom.
-        func mru(_ t: TabModel) -> Date {
-            t.id == active ? .distantFuture : (t.lastActive.values.max() ?? .distantPast)
-        }
-        return registry.tabs
-            .filter { $0.id == active || (tagged ? !$0.paneTags.isEmpty : mru($0) > cutoff) }
-            .sorted { mru($0) > mru($1) }
-    }
+    private var focusTabs: [TabModel] { registry.focusTabs(taggedOnly: filterTagged) }
 
     private var focusSection: some View {
         let tabs = focusTabs
@@ -110,12 +150,32 @@ struct SidebarView: View {
         return VStack(alignment: .leading, spacing: 4) {
             if tabs.isEmpty {
                 Text(filterTagged ? "No tagged panes" : "Nothing in the last 16h")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .font(mono(11)).foregroundStyle(.secondary)
                     .padding(.horizontal, 16).padding(.top, 12)
             } else {
-                ForEach(tabs) { tab in
+                ForEach(Array(tabs.enumerated()), id: \.element.id) { i, tab in
                     HStack(alignment: .top, spacing: 6) {
-                        hostBadge(tab.hostID)
+                        ZStack(alignment: .topTrailing) {
+                            // Digit hint takes the badge slot — only fixed-width leading
+                            // cell that's never text; a trailing overlay collides with the
+                            // age column on tabs without a heading row.
+                            if !isCompact, let host = registry.host(id: tab.hostID) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    keyHint(i < 9 ? "⌘\(i + 1)" : " ")
+                                    Text(host.label)
+                                        .font(mono(8)).foregroundStyle(host.accent)
+                                        .lineLimit(1)
+                                }
+                                .frame(maxWidth: 56, alignment: .leading)
+                            } else {
+                                hostBadge(tab.hostID)
+                            }
+                            if tab.pinned {
+                                Image(systemName: "pin.fill")
+                                    .font(.system(size: 6)).foregroundStyle(.secondary)
+                                    .offset(x: 2, y: 1)
+                            }
+                        }
                         tabRow(tab)
                     }
                     .padding(.horizontal, 8)
@@ -125,12 +185,19 @@ struct SidebarView: View {
         .animation(.snappy(duration: 0.2), value: tabs.map(\.id))
     }
 
+    private func keyHint(_ chord: String) -> some View {
+        Text(chord)
+            .font(mono(8, .semibold)).foregroundStyle(.secondary)
+            .padding(.horizontal, 4).padding(.vertical, 1)
+            .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 3))
+    }
+
     private func hostBadge(_ id: ForkHost.ID) -> some View {
         let h = registry.host(id: id)
         return Image(systemName: h?.icon ?? "circle.fill")
-            .font(.system(size: 10))
+            .font(.system(size: 8))
             .foregroundStyle(h?.accent ?? .secondary)
-            .frame(width: 14)
+            .frame(width: 12)
             .padding(.top, 5)
             .help(h?.label ?? "")
     }
@@ -140,7 +207,7 @@ struct SidebarView: View {
     @ViewBuilder
     private func hostSection(_ host: ForkHost) -> some View {
         let allTabs = registry.tabs(on: host.id)
-        let tabs = filterTagged ? allTabs.filter(tabHasTag) : allTabs
+        let tabs = filterTagged ? allTabs.filter(\.hasTag) : allTabs
         // Filter-on + no tagged tabs on this host → hide the whole section so the
         // sidebar isn't cluttered with empty host cards.
         if !(filterTagged && tabs.isEmpty) {
@@ -164,18 +231,21 @@ struct SidebarView: View {
                     .frame(width: 10)
                 Group {
                     if let icon = host.icon {
-                        Image(systemName: icon).font(.system(size: 11, weight: .medium))
+                        Image(systemName: icon).font(.system(size: 9, weight: .medium))
                     } else {
-                        Circle().frame(width: 7, height: 7)
+                        Circle().frame(width: 6, height: 6)
                     }
                 }
                 .foregroundStyle(connected ? host.accent : Color.secondary.opacity(0.4))
-                .frame(width: 14)
+                .frame(width: 12)
                 Text(host.label)
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .font(mono(12, .medium))
                     .foregroundStyle(connected ? .primary : .secondary)
                 Spacer()
-                Text("\(tabs.count)").font(.system(size: 10)).foregroundStyle(.secondary)
+                if !isCompact, let i = registry.hosts.firstIndex(where: { $0.id == host.id }), i < 9 {
+                    keyHint("⌘⌥\(i + 1)")
+                }
+                Text("\(tabs.count)").font(mono(10)).foregroundStyle(.secondary)
             }
             .padding(.horizontal, 4).padding(.vertical, 6)
             .contentShape(Rectangle())
@@ -204,6 +274,8 @@ struct SidebarView: View {
     }
 
     private func hostBody(tabs: [TabModel]) -> some View {
+        // Normal mode is positional — the row's visual index *is* the ⌘N index — so per-tab
+        // digit hints are dropped here; ⌘⌥N on the host header is the non-obvious one.
         VStack(alignment: .leading, spacing: 2) {
             ForEach(tabs) { tab in tabRow(tab) }
         }
@@ -215,11 +287,6 @@ struct SidebarView: View {
             .stroke(Color.secondary.opacity(dark ? 0.15 : 0.1), lineWidth: 0.5))
         .padding(.horizontal, 8)
         .transition(.opacity)
-    }
-
-    /// True if any pane in this tab has a tag assigned. Used by the `filterTagged` toggle.
-    private func tabHasTag(_ tab: TabModel) -> Bool {
-        tab.tree.leafRefs.contains { tab.paneTags[$0.key] != nil }
     }
 
     // MARK: Tab → pane rows
@@ -257,6 +324,7 @@ struct SidebarView: View {
 
     private func tabHeading(_ tab: TabModel, renaming: Bool, active: Bool,
                             paneCount: Int) -> some View {
+        let accent = registry.host(id: tab.hostID)?.accent ?? Color.secondary
         let toggle = {
             withAnimation(.snappy(duration: 0.15)) {
                 registry.setCollapsed(tab.id, !tab.collapsed)
@@ -272,15 +340,15 @@ struct SidebarView: View {
             }
             .buttonStyle(.plain)
             if renaming {
-                renameField(seed: tab.title, font: .system(size: 10, weight: .semibold))
+                renameField(seed: tab.title, font: mono(10, .semibold))
             } else {
                 Text(tab.title.uppercased())
-                    .font(.system(size: 9, weight: .semibold)).kerning(0.6).lineLimit(1)
-                    .foregroundStyle(clay.opacity(active ? 1 : 0.6))
+                    .font(mono(9, .semibold)).kerning(0.6).lineLimit(1)
+                    .foregroundStyle(accent.opacity(active ? 1 : 0.6))
             }
             Spacer()
             if tab.collapsed {
-                Text("\(paneCount)").font(.system(size: 9)).foregroundStyle(.tertiary)
+                Text("\(paneCount)").font(mono(9)).foregroundStyle(.tertiary)
             }
         }
         .padding(.top, 4).padding(.trailing, 12).frame(height: 20)
@@ -292,6 +360,10 @@ struct SidebarView: View {
         .simultaneousGesture(TapGesture(count: 2).onEnded { beginRename(tab) })
         .contextMenu {
             Button("Rename Tab…") { beginRename(tab) }
+            Button(tab.pinned ? "Unpin Tab" : "Pin Tab") { registry.setPinned(tab.id, !tab.pinned) }
+            if focusMode {
+                Button("Hide from Focus") { registry.dismissFromFocus(tab.id) }
+            }
             Button(tab.collapsed ? "Expand Panes" : "Minimize Panes") {
                 registry.setCollapsed(tab.id, !tab.collapsed)
             }
@@ -341,10 +413,16 @@ struct SidebarView: View {
                          surface: Ghostty.SurfaceView?,
                          spine: (first: Bool, last: Bool)?, active: Bool) -> some View {
         let focused = active && (registry.focusedPaneIndex.map { $0 == index } ?? (index == 0))
-        let age = focused ? nil : tab.lastActive[ref.key]
         let userLabel = tab.paneLabels[ref.key]
         let tag = tab.paneTags[ref.key]
         let renaming = registry.renaming == .pane(tab.id, name: ref.key)
+        let live = showCC ? registry.ccLive[tab.hostID]?[ref.key] : nil
+        let accent = registry.host(id: tab.hostID)?.accent ?? clay
+        // showCC swaps the age column from "when I last focused this pane" to "when CC last
+        // turned". `ccLive[].updatedAt` is stale by design (`Info.==` excludes it), so the
+        // closure reads the non-@Published `ccUpdatedAt` mirror — fresh on each 30s tick.
+        let age = { (showCC ? registry.ccUpdatedAt[tab.hostID]?[ref.key] : nil)
+                    ?? (focused ? nil : tab.lastActive[ref.key]) }
         return Hovering { hovered in
             HStack(spacing: 0) {
                 Group {
@@ -359,16 +437,36 @@ struct SidebarView: View {
                     }
                 }
                 .frame(width: 14)
-                if renaming {
-                    renameField(seed: userLabel ?? ref.name, font: .system(size: 12))
-                } else if let surface {
-                    PaneLabel(surface: surface, userLabel: userLabel, fallback: ref.name,
-                              active: active, compact: compact)
-                } else {
-                    Text(userLabel ?? ref.name).font(.system(size: 12)).lineLimit(1)
-                        .foregroundStyle(active ? .primary : .secondary)
+                VStack(alignment: .leading, spacing: 0) {
+                    if renaming {
+                        renameField(seed: userLabel ?? ref.name, font: mono(12))
+                    } else if let surface {
+                        PaneLabel(surface: surface, userLabel: userLabel, fallback: ref.name,
+                                  active: active, compact: isCompact || showCC, fontFamily: fontFamily)
+                    } else {
+                        Text(userLabel ?? ref.name).font(mono(12)).lineLimit(1)
+                            .foregroundStyle(active ? .primary : .secondary)
+                    }
+                    if showCC {
+                        // Replaces PaneLabel's zmx-name subtitle (suppressed via the
+                        // `compact || showCC` above) — net zero lines. Fixed-height slot so
+                        // focus-mode reorder doesn't gap rows where `ccLine` is empty.
+                        ccLine(live: live, cached: tab.ccNames[ref.key], fallback: ref.name)
+                            .frame(height: 12, alignment: .topLeading)
+                    }
                 }
                 Spacer()
+                if let surface {
+                    switch registry.paneState[surface.id] {
+                    case .working:
+                        ProgressView().controlSize(.mini).scaleEffect(0.6)
+                            .padding(.trailing, 4)
+                    case .waiting:
+                        Circle().fill(accent).frame(width: 6, height: 6)
+                            .padding(.trailing, 6).help("Finished — unread")
+                    case nil: EmptyView()
+                    }
+                }
                 if let surface, registry.watchedSurfaces.contains(surface.id) {
                     Image(systemName: "eye")
                         .font(.system(size: 10)).foregroundStyle(.secondary)
@@ -382,7 +480,7 @@ struct SidebarView: View {
                             .background(Circle().fill(hovered ? c : .clear))
                             .frame(width: 8, height: 8)
                         if hovered {
-                            Text(tag.text).font(.system(size: 8, weight: .medium))
+                            Text(tag.text).font(mono(8, .medium))
                                 .foregroundStyle(c).fixedSize()
                                 .transition(.opacity.combined(with: .move(edge: .leading)))
                         }
@@ -393,10 +491,11 @@ struct SidebarView: View {
                     .help(tag.text)
                     .padding(.trailing, 6)
                 }
-                if !compact {
+                if !isCompact {
                     TimelineView(.periodic(from: .now, by: 30)) { _ in
-                        Text(age?.shortAge ?? "")
-                            .font(.system(size: 9)).foregroundStyle(ageStyle(age))
+                        let a = age()
+                        Text(a?.shortAge ?? "")
+                            .font(mono(9)).foregroundStyle(ageStyle(a))
                             .frame(width: 24, alignment: .trailing)
                     }
                 }
@@ -406,50 +505,115 @@ struct SidebarView: View {
                 focused ? clay.opacity(dark ? 0.14 : 0.20)
                         : hovered ? Color.primary.opacity(0.06) : .clear,
                 in: RoundedRectangle(cornerRadius: 5))
+            .overlay(alignment: .trailing) {
+                // Anchored to the row (not the content flow) so it reads as a right border,
+                // not a pill competing with the tag circle for the same slot.
+                if showCC {
+                    CCStatusRail(status: live?.status, accent: accent)
+                        .help(live?.waitingFor ?? "")
+                }
+            }
             .contentShape(Rectangle())
         }
         .onTapGesture { controller?.activate(tab: tab.id, paneIndex: index) }
         .simultaneousGesture(TapGesture(count: 2).onEnded {
             registry.setRenaming(.pane(tab.id, name: ref.key))
         })
-        .contextMenu {
-            Button("Rename Pane…") { registry.setRenaming(.pane(tab.id, name: ref.key)) }
-            Button("Rename Tab…") { beginRename(tab) }
-            Divider()
-            ForEach(recentTags, id: \.self) { t in
-                Button { registry.setPaneTag(tab: tab.id, name: ref.key, to: t) } label: {
-                    Label(t.text, systemImage: "circle.fill")
-                        .foregroundStyle(Color(hue: t.hue, saturation: 0.6, brightness: 0.5))
-                }
+        // Adjacent rows in a `VStack(spacing: 0)` can deliver B-enter before A-exit; an
+        // unguarded nil here would clear B and leave hover-keys dead while B is still
+        // visually highlighted (Hovering wrapper's @State is independent).
+        .onHover { entering in
+            if entering { controller?.hoveredPane = (tab.id, ref) }
+            else if let h = controller?.hoveredPane, h.tab == tab.id, h.ref == ref {
+                controller?.hoveredPane = nil
             }
-            Button("Tag…") { tagging = (tab.id, index) }
-            if tag != nil {
-                Button("Clear Tag") { registry.setPaneTag(tab: tab.id, name: ref.key, to: nil) }
-            }
-            Divider()
-            movePaneMenu(tab, ref: ref)
-            if let surface {
-                Button(controller?.isWatching(surface) == true ? "Stop Watching" : "Watch (⌘⌥A)") {
-                    controller?.toggleWatch(on: surface)
-                }
-                Button("Force Repaint") { forkWigglePane(surface) }
-            }
-            Button("Minimize Panes") { registry.setCollapsed(tab.id, true) }
-            Button("Close Tab") { controller?.closeForkTab(tab.id) }
-            Button("Kill This Session…", role: .destructive) {
-                controller?.confirmKillPane(tab: tab, ref: ref, surface: surface)
-            }
-            Button("Kill All & Close Tab…", role: .destructive) { controller?.confirmKill(tab) }
         }
+        .contextMenu { paneContextMenu(tab, ref: ref, tag: tag, surface: surface) }
         .popover(isPresented: Binding(
-            get: { tagging.map { $0 == (tab.id, index) } ?? false },
-            set: { if !$0 { tagging = nil } }
+            get: { registry.taggingPane.map { $0 == (tab.id, ref.key) } ?? false },
+            // Only clear shared state if it still points at *this* row — hover-"t" on row B
+            // flips row A's getter false, and A's NSPopover-dismiss callback would otherwise
+            // race B's open by nilling `taggingPane` from under it.
+            set: { if !$0, registry.taggingPane.map({ $0 == (tab.id, ref.key) }) ?? false {
+                registry.taggingPane = nil
+            } }
         ), arrowEdge: .trailing) {
             TagEditView(seed: tag) {
                 registry.setPaneTag(tab: tab.id, name: ref.key, to: $0)
-                tagging = nil
+                registry.taggingPane = nil
             }
         }
+    }
+
+    @ViewBuilder
+    private func paneContextMenu(_ tab: TabModel, ref: SessionRef, tag: PaneTag?,
+                                 surface: Ghostty.SurfaceView?) -> some View {
+        // ⌥-right-click appends the bare-letter hover key to items that have one. Read at
+        // menu-build time; NSMenu is modal so releasing ⌥ while open won't re-render.
+        let hk: (String, String) -> String = { optionHeld ? "\($0)    \($1)" : $0 }
+        return Group {
+            Section {
+                Button("Rename Pane…") { registry.setRenaming(.pane(tab.id, name: ref.key)) }
+                Menu("Tag") {
+                    ForEach(recentTags, id: \.self) { t in
+                        Button { registry.setPaneTag(tab: tab.id, name: ref.key, to: t) } label: {
+                            Label(t.text, systemImage: "circle.fill")
+                                .foregroundStyle(Color(hue: t.hue, saturation: 0.6, brightness: 0.5))
+                        }
+                    }
+                    if !recentTags.isEmpty { Divider() }
+                    Button(hk("New Tag…", "T")) { registry.taggingPane = (tab.id, ref.key) }
+                    if tag != nil {
+                        Button(hk("Clear Tag", "C")) {
+                            registry.setPaneTag(tab: tab.id, name: ref.key, to: nil)
+                        }
+                    }
+                }
+                if let surface {
+                    Button(registry.watchedSurfaces.contains(surface.id) ? "Stop Watching" : "Watch (⌘⌥A)") {
+                        controller?.toggleWatch(on: surface)
+                    }
+                    Button(hk("Force Repaint", "R")) { forkWigglePane(surface) }
+                }
+            }
+            Section {
+                Button("Rename Tab…") { beginRename(tab) }
+                Button(hk(tab.pinned ? "Unpin Tab" : "Pin Tab", "P")) {
+                    registry.setPinned(tab.id, !tab.pinned)
+                }
+                if focusMode {
+                    Button(hk("Hide from Focus", "H")) { registry.dismissFromFocus(tab.id) }
+                }
+                Button("Minimize Panes") { registry.setCollapsed(tab.id, true) }
+                movePaneMenu(tab, ref: ref)
+            }
+            Section {
+                Button("Close Tab") { controller?.closeForkTab(tab.id) }
+                Button(hk("Kill This Session…", "K"), role: .destructive) {
+                    controller?.confirmKillPane(tab: tab, ref: ref, surface: surface)
+                }
+                Button("Kill All & Close Tab…", role: .destructive) { controller?.confirmKill(tab) }
+            }
+        }
+    }
+
+    /// CC session name only — status and age live in the right-edge rail and the shared age
+    /// column. `live.name` › cached last-seen › cwd basename. Always returns a `Text` (empty
+    /// when no label) so the call-site `.frame(height: 12)` actually reserves the slot;
+    /// `EmptyView().frame(...)` is a layout no-op.
+    private func ccLine(live: CCProbe.Info?, cached: String?, fallback: String) -> some View {
+        // cwd basename is only useful when more specific than the pane's own name — an
+        // unnamed CC at a shared repo root would read identically on every row.
+        let cwdLeaf = live?.cwd
+            .map { ($0 as NSString).lastPathComponent }
+            .flatMap { $0 == fallback ? nil : $0 }
+        // `cached` is for the CC-exited case only; `live?.name` flattens to `String?`, so a
+        // running-but-unnamed session would otherwise fall through to the previous session's
+        // name and render it in `.secondary` (live) styling.
+        return Text(live != nil ? (live?.name ?? cwdLeaf ?? "") : (cached ?? ""))
+            .font(mono(9)).lineLimit(1)
+            .foregroundStyle(live != nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
+            .help(live?.cwd ?? "")
     }
 
     // MARK: -
@@ -481,7 +645,7 @@ struct SidebarView: View {
 
     private func ageStyle(_ date: Date?) -> AnyShapeStyle {
         switch date.map({ Date().timeIntervalSince($0) }) {
-        case .some(..<300):  return AnyShapeStyle(clay)
+        case .some(..<300):  return AnyShapeStyle(.primary)
         case .some(..<3600): return AnyShapeStyle(.secondary)
         default:             return AnyShapeStyle(.tertiary)
         }
@@ -489,9 +653,9 @@ struct SidebarView: View {
 
     private func spineHeat(_ freshest: Date?) -> Color {
         switch freshest.map({ Date().timeIntervalSince($0) }) {
-        case .some(..<300):  return clay
-        case .some(..<3600): return clay.opacity(0.6)
-        default:             return clay.opacity(0.35)
+        case .some(..<300):  return .secondary
+        case .some(..<3600): return .secondary.opacity(0.6)
+        default:             return .secondary.opacity(0.35)
         }
     }
 
@@ -519,6 +683,7 @@ private struct PaneLabel: View {
     let fallback: String
     let active: Bool
     let compact: Bool
+    let fontFamily: String?
     var body: some View {
         // Upstream's `titleFallbackTimer` sets `"👻"` after 500ms if no OSC title arrived
         // (SurfaceView_AppKit.swift:323) — treat it as "no title" so the session name shows.
@@ -528,10 +693,11 @@ private struct PaneLabel: View {
         let isPathish = t.hasPrefix("/") || t.hasPrefix("~") || t.contains(":/") || t.contains(":~")
         let label = userLabel ?? (t.isEmpty || t == "👻" || isPathish ? fallback : t)
         return VStack(alignment: .leading, spacing: 0) {
-            Text(label).font(.system(size: 12)).lineLimit(1)
+            Text(label).font(forkMono(12, .regular, fontFamily)).lineLimit(1)
                 .foregroundStyle(active ? .primary : .secondary)
             if !compact && label != fallback {
-                Text(fallback).font(.system(size: 9)).lineLimit(1).foregroundStyle(.tertiary)
+                Text(fallback).font(forkMono(9, .regular, fontFamily)).lineLimit(1)
+                    .foregroundStyle(.tertiary)
             }
         }
     }
@@ -564,6 +730,37 @@ private struct Hovering<Content: View>: View {
     @ViewBuilder let content: (Bool) -> Content
     var body: some View {
         content(hovered).onHover { hovered = $0 }
+    }
+}
+
+/// Right-edge status pill — reads as a vertical heatmap down the sidebar. Host-accent hue so
+/// busy rows also signal *which* host without re-reading the badge. Fixed 3pt slot keeps the
+/// age/tag column aligned across rows with no live CC.
+private struct CCStatusRail: View {
+    let status: String?
+    let accent: Color
+    var body: some View {
+        Group {
+            switch status {
+            case "busy":    Pulsing { RoundedRectangle(cornerRadius: 1.5).fill(accent) }
+            case "waiting": RoundedRectangle(cornerRadius: 1.5).strokeBorder(accent, lineWidth: 1)
+            default:        Color.clear
+            }
+        }
+        .frame(width: 3, height: 20)
+    }
+}
+
+/// `.symbolEffect(.pulse)` is macOS 14+; this is the 13-safe equivalent. Mounted only while
+/// the pulsing state applies, so `@State on` resets on re-mount.
+private struct Pulsing<Content: View>: View {
+    @State private var on = false
+    @ViewBuilder let content: Content
+    var body: some View {
+        content.opacity(on ? 1 : 0.45)
+            .onAppear {
+                withAnimation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true)) { on = true }
+            }
     }
 }
 
@@ -606,6 +803,25 @@ private struct ReorderDelegate<ID: Equatable>: DropDelegate {
     }
     func dropUpdated(info: DropInfo) -> DropProposal? { .init(operation: .move) }
     func performDrop(info: DropInfo) -> Bool { dragging = nil; return true }
+}
+
+/// User's configured terminal face (so the sidebar reads as part of the grid, not a bolt-on
+/// SwiftUI panel); falls back to system mono. `fixedSize` so Dynamic Type doesn't reflow.
+fileprivate func forkMono(_ size: CGFloat, _ weight: Font.Weight = .regular,
+                          _ family: String?) -> Font {
+    if let family, !family.isEmpty {
+        return .custom(family, fixedSize: size).weight(weight)
+    }
+    return .system(size: size, weight: weight, design: .monospaced)
+}
+
+extension Ghostty.Config {
+    /// `font-family` is a `RepeatableString` whose C-API path (`c_get.zig:79`) returns
+    /// `false` for non-packed structs without `cval()`, so it can't be read here without an
+    /// upstream patch (seam policy). `window-title-font-family` is `?[:0]const u8` and works
+    /// — upstream already exposes it (`windowTitleFontFamily`); we reuse that as the sidebar
+    /// face. Set `window-title-font-family = <your terminal font>` to get matched typography.
+    var forkFontFamily: String? { windowTitleFontFamily }
 }
 
 extension ForkHost {

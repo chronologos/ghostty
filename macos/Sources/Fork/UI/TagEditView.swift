@@ -14,11 +14,13 @@ struct TagEditView: View {
         self.onCommit = onCommit
     }
 
+    private var trimmed: String { text.trimmingCharacters(in: .whitespaces) }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             TextField("tag", text: $text)
                 .textFieldStyle(.roundedBorder)
-                .onSubmit { if !text.isEmpty { onCommit(PaneTag(text: text, hue: hue)) } }
+                .onSubmit { if !trimmed.isEmpty { onCommit(PaneTag(text: trimmed, hue: hue)) } }
             HStack(spacing: 6) {
                 ForEach(Self.hues, id: \.self) { h in
                     Circle()
@@ -31,9 +33,9 @@ struct TagEditView: View {
             HStack {
                 Button("Clear") { onCommit(nil) }
                 Spacer()
-                Button("Set") { onCommit(PaneTag(text: text, hue: hue)) }
+                Button("Set") { onCommit(PaneTag(text: trimmed, hue: hue)) }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(text.isEmpty)
+                    .disabled(trimmed.isEmpty)
             }
         }
         .padding(12)
