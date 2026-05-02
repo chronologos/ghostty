@@ -31,6 +31,7 @@ enum ForkBootstrap {
         // detached "warm-up" can't beat main to the once-barrier, so we take the hit
         // here (before any window draws) rather than mid-`newWindow`.
         logger.info("fork enabled — zmx: \(ZmxAdapter.localZmx, privacy: .public)")
+        ForkNotify.shared.install()
         let violet = NSColor(red: 0x7C/255, green: 0x5C/255, blue: 0xD3/255, alpha: 1)
         let icon = ColorizedGhosttyIcon(
             screenColors: [.systemPurple, violet],
