@@ -307,6 +307,9 @@ struct SidebarView: View {
             }
             if !tab.collapsed {
                 ForEach(Array(allRefs.enumerated()), id: \.0) { i, ref in
+                    // Index-match: `surfaces` may be one ahead of `allRefs` for ≤80ms after a
+                    // split (debounced persistActive) — accepted; matching by ref instead
+                    // would mis-pair duplicate-ref tabs (PR26) permanently.
                     paneRow(tab, index: i, ref: ref,
                             surface: i < surfaces.count ? surfaces[i] : nil,
                             spine: allRefs.count > 1 ? (i == 0, i == allRefs.count - 1) : nil,
@@ -523,8 +526,8 @@ struct SidebarView: View {
         // unguarded nil here would clear B and leave hover-keys dead while B is still
         // visually highlighted (Hovering wrapper's @State is independent).
         .onHover { entering in
-            if entering { controller?.hoveredPane = (tab.id, ref) }
-            else if let h = controller?.hoveredPane, h.tab == tab.id, h.ref == ref {
+            if entering { controller?.hoveredPane = (tab.id, index, ref) }
+            else if let h = controller?.hoveredPane, h.tab == tab.id, h.index == index {
                 controller?.hoveredPane = nil
             }
         }

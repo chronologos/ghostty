@@ -41,6 +41,10 @@ final class SessionRegistry: ObservableObject {
     /// "recent" from it is arbitrary; this is the source of truth for the context-menu shortlist.
     /// Pruned to live `paneTags` on every mutation that can drop the last user of a tag.
     @Published private(set) var recentTags: [PaneTag]
+    /// User-defined hover-key actions, hand-edited in `fork.json`. Checked before the
+    /// built-in k/r/c/t/p/h cases so a user binding can shadow them. Loaded once; not
+    /// `@Published` so observers (CheatsheetView) don't re-render on unrelated changes.
+    let hoverCommands: [String: HoverCommand]
     /// Surfaces with a one-shot watch armed (⌘⌥A). The OSC 9;4 edge fires via the
     /// always-on `paneDidSettle` (so it inherits the 250ms flicker-debounce); membership
     /// here makes that path post even for the active tab. Ephemeral.
@@ -84,6 +88,7 @@ final class SessionRegistry: ObservableObject {
         self.tabs = state.tabs
         self.activeTabID = state.activeTabID
         self.recentTags = state.recentTags
+        self.hoverCommands = state.hoverCommands
         pruneRecentTags()
         saveDebounce = objectWillChange
             .debounce(for: .milliseconds(500), scheduler: DispatchQueue.main)
@@ -212,6 +217,9 @@ final class SessionRegistry: ObservableObject {
     func setPinned(_ id: TabModel.ID, _ v: Bool) {
         guard let i = tabs.firstIndex(where: { $0.id == id }), tabs[i].pinned != v else { return }
         tabs[i].pinned = v
+        // Pin trumps dismiss — `focusTabs` checks `dismissedAt` before `pinned`, so a
+        // re-pin without this clear would leave the tab hidden until next `touchPane`.
+        if v { tabs[i].dismissedAt = nil }
     }
     func setFocusedPane(index: Int?) { if focusedPaneIndex != index { focusedPaneIndex = index } }
     func setRenaming(_ t: RenameTarget?) { if renaming != t { renaming = t } }
@@ -357,7 +365,8 @@ final class SessionRegistry: ObservableObject {
     // MARK: Persistence
 
     func snapshot() -> ForkPersistence.State {
-        .init(hosts: hosts, tabs: tabs, activeTabID: activeTabID, recentTags: recentTags)
+        .init(hosts: hosts, tabs: tabs, activeTabID: activeTabID, recentTags: recentTags,
+              hoverCommands: hoverCommands)
     }
 
     static func autoName(base: String = "shell", suffixLen: Int = 3) -> String {

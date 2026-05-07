@@ -25,21 +25,25 @@ final class ForkNotify: NSObject, UNUserNotificationCenterDelegate {
                 wrapped = center.delegate
                 center.delegate = self
                 center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
-                let waiting = { SessionRegistry.shared.paneState.values.lazy
-                                  .filter { $0 == .waiting }.count }
+                // `$paneState` emits during `willSet`, so the closure must consume the
+                // delivered value — re-reading the property here would yield the OLD dict.
+                let waiting = { (s: [UUID: PaneState]) in
+                    s.values.lazy.filter { $0 == .waiting }.count
+                }
                 badgeSub = SessionRegistry.shared.$paneState
-                    .map { _ in waiting() }
+                    .map(waiting)
                     .removeDuplicates()
                     .sink { NSApp.dockTile.badgeLabel = $0 > 0 ? "\($0)" : nil }
                 // Upstream's `setDockBadge` (AppDelegate.swift:745) writes the same label on
                 // bell-change. We're registered later (post-seam-#1-tick), so re-asserting here
-                // wins; when waiting==0 we leave upstream's bell label alone.
+                // wins; when waiting==0 we leave upstream's bell label alone. Reading the
+                // property here is fine — the bell observer fires async on `.main`.
                 NotificationCenter.default.addObserver(
                     forName: .init("com.mitchellh.ghostty.terminalWindowBellDidChange"),
                     object: nil, queue: .main
                 ) { _ in
                     MainActor.assumeIsolated {
-                        let n = waiting()
+                        let n = waiting(SessionRegistry.shared.paneState)
                         if n > 0 { NSApp.dockTile.badgeLabel = "\(n)" }
                     }
                 }
