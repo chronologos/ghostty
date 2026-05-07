@@ -30,7 +30,7 @@ struct NewHostView: View {
                 Spacer()
                 Button("Add") { add() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(target == nil)
+                    .disabled(target.map { registry.host(id: ForkHost.id(for: $0)) != nil } ?? true)
             }
         }
         .padding().frame(width: 360)

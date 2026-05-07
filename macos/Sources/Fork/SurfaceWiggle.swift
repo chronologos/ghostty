@@ -2,26 +2,30 @@
 import Foundation
 import GhosttyKit
 
-/// Force an alt-screen TUI (htop, less, vim, etc.) to repaint by synthesising
-/// a SIGWINCH: bump height by one cell, then restore.
+/// Force a TUI (CC, htop, vim, etc.) to repaint by synthesising SIGWINCH:
+/// bump height by one cell, restore, then repeat once.
 ///
-/// The 60ms gap is load-bearing for two stacked reasons:
+/// Why two 200ms cycles instead of one 60ms:
 ///   1. `ghostty_surface_set_size` posts to the IO-thread mailbox, where
-///      `termio/Thread.zig` coalesces resizes in a 25ms timer window
-///      (`Coalesce.min_ms`). A restore enqueued inside that window overwrites
-///      the pending bump and the pty never sees it.
+///      `termio/Thread.zig` coalesces resizes in a 25ms window
+///      (`Coalesce.min_ms`) — a restore inside that window overwrites the
+///      pending bump and the pty never sees it.
 ///   2. SIGWINCH is non-queuing — the child must wake and `TIOCGWINSZ` the
-///      bumped size before the restore lands, including the zmx client→server
-///      hop (and ssh RTT for remote hosts).
-/// 60ms clears (1) with margin and gives (2) ~35ms; high-RTT ssh may still
-/// lose the race, in which case run it twice.
+///      bumped size *before* the restore's `TIOCSWINSZ` lands, including the
+///      zmx client→server hop and ssh RTT. If it loses that race it reads the
+///      already-restored origin, sees no change, and skips the redraw.
+/// 200ms per leg gives ~175ms for (2); the second cycle is the automated
+/// "press it twice" so a single lost race doesn't drop the repaint. The
+/// half-second of +1-row flicker doubles as visual feedback.
 func forkWigglePane(_ view: Ghostty.SurfaceView) {
     guard let s = view.surface else { return }
-    let origin = ghostty_surface_size(s)
-    ghostty_surface_set_size(s, origin.width_px, origin.height_px + origin.cell_height_px)
-    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(60)) {
-        guard let s2 = view.surface else { return }
-        ghostty_surface_set_size(s2, origin.width_px, origin.height_px)
+    let o = ghostty_surface_size(s)
+    let w = o.width_px, h = o.height_px, bump = h + o.cell_height_px
+    for (ms, height) in [(0, bump), (200, h), (250, bump), (450, h)] {
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms)) {
+            guard let s = view.surface else { return }
+            ghostty_surface_set_size(s, w, height)
+        }
     }
 }
 #endif
