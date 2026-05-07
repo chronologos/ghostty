@@ -9,11 +9,14 @@ struct ForkPersistence {
         var tabs: [TabModel] = []
         var activeTabID: TabModel.ID?
         var recentTags: [PaneTag] = []
+        var hoverCommands: [String: HoverCommand] = [:]
 
         init(version: Int = 1, hosts: [ForkHost] = [], tabs: [TabModel] = [],
-             activeTabID: TabModel.ID? = nil, recentTags: [PaneTag] = []) {
+             activeTabID: TabModel.ID? = nil, recentTags: [PaneTag] = [],
+             hoverCommands: [String: HoverCommand] = [:]) {
             self.version = version; self.hosts = hosts; self.tabs = tabs
             self.activeTabID = activeTabID; self.recentTags = recentTags
+            self.hoverCommands = hoverCommands
         }
 
         /// Lenient: drops individually-undecodable hosts/tabs instead of failing the whole
@@ -25,6 +28,8 @@ struct ForkPersistence {
             tabs = (try? c.decode([Lossy<TabModel>].self, forKey: .tabs))?.compactMap(\.value) ?? []
             activeTabID = try c.decodeIfPresent(TabModel.ID.self, forKey: .activeTabID)
             recentTags = try c.decodeIfPresent([PaneTag].self, forKey: .recentTags) ?? []
+            hoverCommands = (try? c.decode([String: Lossy<HoverCommand>].self, forKey: .hoverCommands))?
+                .compactMapValues(\.value) ?? [:]
         }
     }
 
