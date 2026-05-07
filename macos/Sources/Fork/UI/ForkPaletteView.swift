@@ -21,7 +21,7 @@ struct ForkPanePalette: View {
 
     var body: some View {
         CommandPaletteView(isPresented: $isPresented, options: options)
-            .frame(width: 560, height: 400)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .onChange(of: isPresented) { if !$0 { onDone() } }
     }
 
@@ -114,7 +114,8 @@ struct ScrollbackSearchView: View {
         }
         .frame(width: 600, height: 420)
         .onAppear { fieldFocused = true }
-        .onExitCommand { debounce?.cancel(); searchTask?.cancel(); onDone() }
+        .onExitCommand { onDone() }
+        .onDisappear { debounce?.cancel(); searchTask?.cancel() }
     }
 
     private func search() {

@@ -143,6 +143,47 @@ and `SessionRef.name` are validated against `^[A-Za-z0-9._-]+$`; `shq` single-qu
 For ssh, the remote command is double-quoted (`shq(shq(argv))`). Don't build shell strings
 anywhere else.
 
+## Hover commands
+
+User-defined hover-key actions, hand-edited in `fork.json` (`~/Library/Application
+Support/com.mitchellh.ghostty/fork.json`). Loaded once at launch.
+
+```json
+"hoverCommands": {
+  "g": { "cmd": ["lazygit", "-p", "{cwd}"], "mode": "pane" },
+  "j": { "cmd": ["jj", "-R", "{cwd}", "log"], "mode": "pane" },
+  "o": { "cmd": ["open", "{cwd}"],            "mode": "local" }
+}
+```
+
+Edit while the app is **quit** — `fork.json` autosaves on every state change and will
+overwrite a live edit. `cmd` is an **argv array** — each element stays one word through
+`Transport.wrap`/`shq` or `Process.arguments`, so an untrusted `{cwd}` stays inert.
+`{cwd}`/`{ref}`/`{host}` substitute **whole tokens only** (`ZmxAdapter.expand`);
+`"-C={cwd}"` passes through verbatim. `{host}` is the ssh `user@host` (or label for
+local), not the internal hash id. `mode` (unknown values drop that one binding):
+
+- `pane` — sibling split next to the hovered pane, running `zmx attach <fresh-ref> <cmd…>`
+  on that pane's host (local or ssh, via `Transport.wrap`). The new session does **not**
+  inherit the sibling's directory — pass `{cwd}` via the tool's own flag (`-C`/`-R`/`-p`).
+  No-ops on a tab whose `liveTabs` entry hasn't been built yet (cold-restored, never
+  activated).
+- `local` — fire-and-forget `Process` on the mac via `/usr/bin/env`; PATH is launchd's,
+  so non-system tools need an absolute path. `{cwd}` still expands to the *pane's* cwd,
+  which for ssh panes is a remote path that likely doesn't exist locally — only useful
+  with tools that take a remote path on purpose (e.g. `code --remote ssh-{host} {cwd}`).
+- `overlay` — ephemeral surface in a fork-owned `QuickTerminalController` subclass
+  (`ForkOverlayController`, `position: .center`); no zmx wrapper, so the command runs
+  directly and the surface closes on exit. Does *not* touch `AppDelegate.quickController`
+  — the gated `animateIn` override avoids the default-surface-swap race that
+  `_exit(1)`ed optimized builds. Local hosts get `workingDirectory = {cwd}`; ssh still
+  needs the per-tool `-R {cwd}` flag.
+
+`{cwd}` resolves `surface.pwd` (OSC 7, needs shell integration in the remote zshrc) ›
+`ccLive[host][ref.key].cwd` (CCProbe poll) › `"."`. Config is checked **before** the
+built-in k/r/c/t/p/h cases, so a user binding shadows them. Bindings appear in the
+⌘-hold cheatsheet.
+
 ## Branches & release
 
 Remotes: `upstream` = `ghostty-org/ghostty`, `origin` = `chronologos/ghostty`.
