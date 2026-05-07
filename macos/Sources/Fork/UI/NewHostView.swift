@@ -39,7 +39,8 @@ struct NewHostView: View {
     private func add() {
         guard let t = target else { return }
         let id = ForkHost.id(for: t)
-        registry.addHost(.init(id: id, label: label.isEmpty ? t.host : label,
+        let name = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        registry.addHost(.init(id: id, label: name.isEmpty ? t.host : name,
                                transport: .ssh(t), accentHue: hue))
         onDone()
     }
