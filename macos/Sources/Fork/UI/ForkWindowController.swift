@@ -227,11 +227,12 @@ final class ForkWindowController: TerminalController {
     }
 
     /// Set by SidebarView's per-row `.onHover`; read only by the navMonitor's bare-key
-    /// branch below. Surface is looked up fresh in `handleHoverKey` — capturing it here
-    /// would freeze a `nil` for cold-restored tabs (the row's `.onHover` doesn't re-fire
-    /// when the body re-renders with a non-nil surface). `index` disambiguates duplicate
-    /// refs (split-picker can attach the same session twice — PR26). Not @Published.
-    var hoveredPane: (tab: TabModel.ID, index: Int, ref: SessionRef)?
+    /// branch below. `sid` resolves the surface in `handleHoverKey` — `index` drifts when
+    /// a lower-index sibling is removed, and `ref` is ambiguous when split-picker attached
+    /// the same session twice (PR26). `index` is kept for the row's `.onHover`/`.onDisappear`
+    /// identity guards only. `sid` is nil for cold-restored rows; surface-dependent actions
+    /// no-op there until the user re-hovers post-activate. Not @Published.
+    var hoveredPane: (tab: TabModel.ID, index: Int, ref: SessionRef, sid: UUID?)?
 
     /// Fork-owned panel for `.overlay` hover-commands. Lazy so a user with no overlay
     /// bindings never instantiates it.
@@ -256,7 +257,7 @@ final class ForkWindowController: TerminalController {
             // reversible.
             if mods.isEmpty, let h = self.hoveredPane,
                !(self.window?.firstResponder is NSTextView),
-               self.handleHoverKey(ev.charactersIgnoringModifiers, on: h) {
+               self.handleHoverKey(ev.charactersIgnoringModifiers?.lowercased(), on: h) {
                 return nil
             }
             if let n = Self.digitKeyCodes[ev.keyCode] {
@@ -320,11 +321,10 @@ final class ForkWindowController: TerminalController {
     }
 
     private func handleHoverKey(_ key: String?,
-                                on h: (tab: TabModel.ID, index: Int, ref: SessionRef)) -> Bool {
-        guard let key, let tab = registry.tabs.first(where: { $0.id == h.tab }) else { return false }
-        let surface = liveTabs[h.tab].map(Array.init).flatMap {
-            h.index < $0.count ? $0[h.index] : nil
-        }
+                                on h: (tab: TabModel.ID, index: Int, ref: SessionRef, sid: UUID?)) -> Bool {
+        guard let key, let tab = registry.tabs.first(where: { $0.id == h.tab }),
+              tab.tree.leafRefs.contains(where: { $0.key == h.ref.key }) else { return false }
+        let surface = liveTabs[h.tab].flatMap { Array($0).first { $0.id == h.sid } }
         // User config first → can shadow built-ins (rebind `k` away from kill, etc.).
         if let cmd = registry.hoverCommands[key] {
             runHoverCommand(cmd, on: h, surface: surface)
@@ -336,17 +336,30 @@ final class ForkWindowController: TerminalController {
         case "c": registry.setPaneTag(tab: h.tab, name: h.ref.key, to: nil)
         case "t": registry.taggingPane = (h.tab, h.ref.key)
         case "p": registry.setPinned(h.tab, !tab.pinned)
+        case "n" where registry.ccLive[h.ref.hostID]?[h.ref.key]?.sock != nil:
+            syncCCName(tab: tab, ref: h.ref)
         case "h" where UserDefaults.standard.bool(forKey: SessionRegistry.kFocusMode):
             registry.dismissFromFocus(h.tab)
-            // Row is gone — same `.onHover(false)`-doesn't-fire hazard as focusMode toggle.
-            hoveredPane = nil
+            // Row diffs out unless it's the active tab (which `focusTabs` always keeps).
+            if h.tab != registry.activeTabID { hoveredPane = nil }
         default: return false
         }
         return true
     }
 
+    /// Set the CC session name to the pane's display title (`paneLabel ?? ref.name`, same
+    /// chain the sidebar shows) via its control UDS. No-op when CCProbe has no live `sock`
+    /// for this pane (probe toggle off, no CC running, or remote registry didn't write
+    /// `messagingSocketPath`).
+    func syncCCName(tab: TabModel, ref: SessionRef) {
+        guard let host = registry.host(id: ref.hostID),
+              let sock = registry.ccLive[ref.hostID]?[ref.key]?.sock else { return }
+        let name = tab.paneLabels[ref.key] ?? ref.name
+        Task { await CCProbe.rename(host: host, sock: sock, to: name) }
+    }
+
     private func runHoverCommand(_ cmd: HoverCommand,
-                                 on h: (tab: TabModel.ID, index: Int, ref: SessionRef),
+                                 on h: (tab: TabModel.ID, index: Int, ref: SessionRef, sid: UUID?),
                                  surface: Ghostty.SurfaceView?) {
         guard let host = registry.host(id: h.ref.hostID) else { return }
         // OSC 7 (real-time, needs shell integration) › CCProbe poll (3s lag, no integration needed).
@@ -458,8 +471,11 @@ final class ForkWindowController: TerminalController {
         guard watched || tab.id != registry.activeTabID else {
             registry.setPaneState(surface.id, nil); return
         }
-        registry.setPaneState(surface.id, tab.id == registry.activeTabID ? nil : .waiting)
-        guard notifiedSurfaces.insert(surface.id).inserted else { return }
+        let active = tab.id == registry.activeTabID
+        registry.setPaneState(surface.id, active ? nil : .waiting)
+        // Watched-on-active: post but don't arm the one-per-view gate — there's no
+        // future `activate(tab:)` of this tab to clear it (user is already here).
+        guard active || notifiedSurfaces.insert(surface.id).inserted else { return }
         ForkNotify.shared.post(tab: tab.id,
                                title: "\(paneDisplayLabel(tab: tab, surface: surface)) — done",
                                body: "Tab '\(tab.title)'")
@@ -797,6 +813,7 @@ final class ForkWindowController: TerminalController {
     }
 
     private var sheetPanel: NSWindow?
+    private var sheetResignSub: Any?
 
     func showNewSessionSheet() {
         presentSheet(size: .init(width: 640, height: 320)) { [weak self] in
@@ -841,9 +858,10 @@ final class ForkWindowController: TerminalController {
 
     func showPanePalette() {
         // `CommandPaletteView` is a self-chromed card (material bg + rounded stroke +
-        // .shadow(32) + .padding()) meant to float over `TerminalView`; an opaque sheet
-        // double-boxes it. 620×460 leaves ~60pt margin so the shadow doesn't clip at
-        // the (now-invisible) panel edge.
+        // .shadow(32) + .padding()) meant to float over `TerminalView`. macOS sheets
+        // wrap content in a system `NSVisualEffectView` that `backgroundColor = .clear`
+        // can't suppress, so present as a borderless child window instead. 620×460
+        // leaves ~60pt clear margin so the card's shadow doesn't clip at the panel edge.
         presentSheet(size: .init(width: 620, height: 460), bare: true) { [weak self] in
             ForkPanePalette(controller: self, onDone: { self?.endSheet() })
         }
@@ -862,17 +880,34 @@ final class ForkWindowController: TerminalController {
         host.sizingOptions = []  // honor `size`, not SwiftUI's ideal — else padding/shadow inflate the panel
         host.view.frame = .init(origin: .zero, size: size)
         let panel = ForkSheetPanel(contentViewController: host)
-        if bare {
-            panel.isOpaque = false
-            panel.backgroundColor = .clear
-        }
         sheetPanel = panel
-        window.beginSheet(panel)
+        guard bare else { window.beginSheet(panel); return }
+        panel.styleMask = .borderless
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false  // CommandPaletteView draws its own
+        let parent = window.frame
+        panel.setFrameOrigin(.init(x: parent.midX - size.width / 2,
+                                   y: parent.midY - size.height / 2))
+        window.addChildWindow(panel, ordered: .above)
+        panel.makeKeyAndOrderFront(nil)
+        sheetResignSub = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification, object: panel, queue: .main
+        ) { [weak self] _ in self?.endSheet() }
     }
 
     private func endSheet() {
         guard let panel = sheetPanel else { return }
-        window?.endSheet(panel)
+        if let sub = sheetResignSub {
+            NotificationCenter.default.removeObserver(sub)
+            sheetResignSub = nil
+        }
+        if panel.isSheet {
+            window?.endSheet(panel)
+        } else {
+            window?.removeChildWindow(panel)
+            panel.orderOut(nil)
+        }
         sheetPanel = nil
     }
 
@@ -893,6 +928,7 @@ final class ForkWindowController: TerminalController {
         // controller; reopen mints fresh surface UUIDs so the old `.waiting` entries
         // would be unreachable and the dock badge stuck.
         for id in Array(progressSubs.keys) { stopObservingProgress(id) }
+        endSheet()  // drops sheetResignSub; child-window auto-close doesn't guarantee resign-key fires first
         super.windowWillClose(notification)
     }
 

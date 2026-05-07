@@ -123,8 +123,7 @@ final class SessionRegistry: ObservableObject {
     }
 
     /// "Inbox-zero" hide: stamp `dismissedAt` so `focusTabs` filters the tab until next
-    /// activate (when `touchPane` advances `lastActive` past it). Unpins too — pin would
-    /// otherwise override the dismiss.
+    /// activate (`touchPane` clears it). Unpins too — pin would otherwise override the dismiss.
     func dismissFromFocus(_ id: TabModel.ID) {
         guard let i = tabs.firstIndex(where: { $0.id == id }) else { return }
         tabs[i].dismissedAt = Date()
@@ -227,6 +226,9 @@ final class SessionRegistry: ObservableObject {
     func touchPane(tab id: TabModel.ID, name: String) {
         guard let i = tabs.firstIndex(where: { $0.id == id }) else { return }
         tabs[i].lastActive[name] = Date()
+        // Watermark check (`mru >= dismissedAt`) regresses if `setPersistedTree` later
+        // prunes `lastActive` to empty, so clear explicitly — same as `setPinned(true)`.
+        tabs[i].dismissedAt = nil
     }
 
     func setPaneLabel(tab id: TabModel.ID, name: String, to label: String?) {

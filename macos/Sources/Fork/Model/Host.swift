@@ -3,7 +3,8 @@ import Foundation
 import CryptoKit
 
 /// Shell-safety identifier check. CLAUDE.md §Security: only validated names reach `Transport.wrap`.
-private let identPattern = try! NSRegularExpression(pattern: #"^[A-Za-z0-9._-]+$"#)
+/// `\A…\z` not `^…$` — ICU `$` matches before a trailing line terminator, so `"foo\n"` would pass.
+private let identPattern = try! NSRegularExpression(pattern: #"\A[A-Za-z0-9._-]+\z"#)
 func isValidIdent(_ s: String) -> Bool {
     identPattern.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil
 }
@@ -115,8 +116,8 @@ struct TabModel: Codable, Identifiable, Hashable {
     var ccNames: [String: String]
     var collapsed: Bool
     var pinned: Bool
-    /// Set by `dismissFromFocus`; `focusTabs` hides the tab while `dismissedAt > mru`.
-    /// Next `touchPane` on activate moves `lastActive` past it → tab reappears.
+    /// Set by `dismissFromFocus`; `focusTabs` hides the tab while non-nil and `> mru`.
+    /// Cleared by `touchPane` on activate (and by `setPinned(true)`).
     var dismissedAt: Date?
 
     var hasTag: Bool { tree.leafRefs.contains { paneTags[$0.key] != nil } }
