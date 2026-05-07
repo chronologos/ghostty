@@ -96,17 +96,8 @@ enum CCProbe {
         var waitingFor: String?
     }
 
-    /// Strip C0/C1/DEL + truncate. These fields originate on the *remote* host and reach
-    /// the local pty via `printf %s` in `detachedScript`/`restoreCmd` — `shq` blocks
-    /// shell injection but not terminal-escape injection (OSC 52, hyperlinks, …).
     private static func clean(_ s: String?, _ max: Int) -> String? {
-        guard let s else { return nil }
-        var out = ""
-        for u in s.unicodeScalars.prefix(max) where
-            u.value >= 0x20 && u.value != 0x7F && !(0x80...0x9F).contains(u.value) {
-            out.unicodeScalars.append(u)
-        }
-        return out
+        s.map { stripControl($0, max: max) }
     }
 
     private static func decode(_ blob: some StringProtocol) -> (pid: Int32, info: Info)? {
