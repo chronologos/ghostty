@@ -5,6 +5,8 @@ import SwiftUI
 /// flagsChanged monitor + debounce). Static content; controller toggles the
 /// hosting `NSView.isHidden`.
 struct CheatsheetView: View {
+    let hoverCommands: [String: HoverCommand]
+
     private static let rows: [(String, String)] = [
         ("⌘T", "New session"),
         ("⌘D", "Split pane"),
@@ -23,18 +25,23 @@ struct CheatsheetView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            ForEach(Self.rows, id: \.0) { key, label in
-                HStack(spacing: 12) {
-                    Text(key).font(.system(size: 11, weight: .semibold, design: .monospaced))
-                        .frame(width: 110, alignment: .leading)
-                    Text(label).font(.system(size: 11))
-                }
+            ForEach(Self.rows, id: \.0) { k, l in row(k, l) }
+            ForEach(hoverCommands.sorted { $0.key < $1.key }, id: \.key) { key, hc in
+                row("hover + \(key)", hc.cmd.joined(separator: " "))
             }
         }
         .padding(16)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.separator))
         .shadow(radius: 12)
+    }
+
+    private func row(_ key: String, _ label: String) -> some View {
+        HStack(spacing: 12) {
+            Text(key).font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .frame(width: 110, alignment: .leading)
+            Text(label).font(.system(size: 11)).lineLimit(1)
+        }
     }
 }
 #endif

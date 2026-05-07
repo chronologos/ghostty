@@ -90,6 +90,15 @@ struct PaneTag: Codable, Hashable {
     var hue: Double
 }
 
+/// User-defined hover-key action (`fork.json` `hoverCommands`). `cmd` is an argv array;
+/// `{cwd}`/`{ref}`/`{host}` placeholders are whole-token-substituted by `ZmxAdapter.expand`
+/// — never string-interpolated into a shell line (CLAUDE.md §Security).
+struct HoverCommand: Codable, Hashable {
+    enum Mode: String, Codable { case pane, local, overlay }
+    var cmd: [String]
+    var mode: Mode
+}
+
 struct TabModel: Codable, Identifiable, Hashable {
     let id: UUID
     var hostID: ForkHost.ID

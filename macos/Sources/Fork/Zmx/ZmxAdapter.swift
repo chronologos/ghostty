@@ -31,7 +31,7 @@ enum ZmxAdapter {
             if done.wait(timeout: .now() + 2) == .timedOut {
                 // Interactive zsh ignores SIGTERM; with the pipe still open the read
                 // below would block past the 2s bound and wedge this swift_once init.
-                Darwin.kill(p.processIdentifier, SIGKILL)
+                Darwin.kill(-p.processIdentifier, SIGKILL)
             } else {
                 // `-i` sources .zshrc, which may chatter to stdout (nvm/pyenv init, fortune) —
                 // `command -v` is the last line.
@@ -53,6 +53,35 @@ enum ZmxAdapter {
     /// On-the-wire name. Managed refs get `{hostID}-` prefix; external refs use raw name.
     static func wireName(_ ref: SessionRef) -> String {
         ref.external ? ref.name : "\(ref.hostID)-\(ref.name)"
+    }
+
+    /// Whole-token placeholder substitution for `HoverCommand.cmd`. Output is an argv array
+    /// fed to `surfaceConfig(initialCmd:)` (→ `Transport.wrap` → `shq`) or `Process.arguments`
+    /// — both treat each element as one word, so an untrusted `cwd` stays inert. Substring
+    /// substitution is intentionally not supported (would invite `"-C={cwd}"`-style configs
+    /// that are still safe here but train the wrong habit).
+    static func expand(_ argv: [String], host: ForkHost, ref: SessionRef, cwd: String?) -> [String] {
+        let hostStr = switch host.transport {
+        case .local: host.label
+        case .ssh(let t): t.connectionString
+        }
+        return argv.map {
+            switch $0 {
+            case "{cwd}": cwd ?? "."
+            case "{ref}": ref.name
+            case "{host}": hostStr
+            default: $0
+            }
+        }
+    }
+
+    /// `SurfaceConfiguration` for an ephemeral (no-zmx) command on `host` — keeps
+    /// `Transport.wrap` calls inside this file per the §Security-boundary invariant.
+    static func ephemeralConfig(host: ForkHost, argv: [String], cwd: String?) -> Ghostty.SurfaceConfiguration {
+        var c = Ghostty.SurfaceConfiguration()
+        c.command = host.transport.wrap(argv)
+        if host.transport.isLocal { c.workingDirectory = cwd }
+        return c
     }
 
     /// SurfaceConfiguration whose pty child is `zmx attach <wireName> [cmd...]`, wrapped by transport.
@@ -130,7 +159,9 @@ enum ZmxAdapter {
         // so it's interpolated *unquoted* after `exec` — wrapping it again would make
         // it one word. shq is total (POSIX `'` → `'\''`); see TransportTests.wrapSshInjection.
         let attach = host.transport.wrap([zmx(on: host), "attach", wireName(ref)])
-        let msg = "session \(ref.name) — press ⏎ to reattach, ⌘⇧W to close"
+        // External `ref.name` is raw remote `zmx list` output (validation is bypassed for
+        // externals — Persistence.swift:102) and reaches the local pty via `printf %s`.
+        let msg = "session \(stripControl(ref.name, max: 128)) — press ⏎ to reattach, ⌘⇧W to close"
         let was = ccName.map { "; printf '\\033[2m  was: %s\\033[0m\\n' \(shq($0))" } ?? ""
         return shq(["sh", "-c", "printf '%s\\n' \(shq(msg))\(was); read _; exec \(attach)"])
     }
