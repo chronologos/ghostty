@@ -104,6 +104,34 @@ struct TransportTests {
         #expect(ZmxAdapter.wireName(ref) == "abcd1234-shell-x")
     }
 
+    @Test func expandHoverCommand() {
+        let ref = SessionRef(hostID: "h1", name: "shell-abc")
+        let ssh = ForkHost(id: "h1", label: "box", transport: .ssh(.init(user: "me", host: "box")))
+        let out = ZmxAdapter.expand(["lazygit", "-p", "{cwd}", "{ref}", "{host}"],
+                                    host: ssh, ref: ref, cwd: "/tmp/$(rm -rf ~)")
+        // Whole-token only; hostile cwd stays one argv element (shq/Process.arguments
+        // boundary handles inertness — this just verifies no string-splitting happened).
+        // {host} → ssh connectionString, not the SHA-prefix `hostID`.
+        #expect(out == ["lazygit", "-p", "/tmp/$(rm -rf ~)", "shell-abc", "me@box"])
+        #expect(ZmxAdapter.expand(["{cwd}"], host: .local, ref: ref, cwd: nil) == ["."])
+        #expect(ZmxAdapter.expand(["{host}"], host: .local, ref: ref, cwd: nil) == ["localhost"])
+        // Substring NOT substituted — "-C={cwd}" passes through verbatim.
+        #expect(ZmxAdapter.expand(["-C={cwd}"], host: .local, ref: ref, cwd: "/x") == ["-C={cwd}"])
+    }
+
+    @Test func lenientHoverCommandsDecode() throws {
+        let json = #"{"hoverCommands":{"j":{"cmd":["jj","log"],"mode":"overlay"},"x":{"cmd":["a"],"mode":"nope"}}}"#
+        let s = try JSONDecoder().decode(ForkPersistence.State.self, from: Data(json.utf8))
+        #expect(s.hoverCommands["j"]?.mode == .overlay)
+        #expect(s.hoverCommands["x"] == nil)
+    }
+
+    @Test func stripControlFilters() {
+        #expect(stripControl("a\u{1B}]52;c;evil\u{07}b", max: 64) == "a]52;c;evilb")
+        #expect(stripControl("x\u{7F}\u{9B}y", max: 64) == "xy")
+        #expect(stripControl("abcdef", max: 3) == "abc")
+    }
+
     @Test func persistedTreePaneCount() {
         let leaf = PersistedTree.leaf(.init(hostID: "h", name: "n"))
         #expect(PersistedTree.empty.paneCount == 0)
