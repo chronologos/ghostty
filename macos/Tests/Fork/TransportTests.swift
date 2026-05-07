@@ -119,6 +119,13 @@ struct TransportTests {
         #expect(ZmxAdapter.expand(["-C={cwd}"], host: .local, ref: ref, cwd: "/x") == ["-C={cwd}"])
     }
 
+    @Test func renameScriptShape() {
+        let s = CCProbe.renameScript(sock: "/tmp/$(x).sock", to: #"a"b"#)!
+        // JSON-encoded name (quote escaped) shq'd as one printf arg; sock shq'd after `--`.
+        #expect(s.contains(#"'{"type":"control","action":"rename","name":"a\"b"}'"#))
+        #expect(s.hasSuffix(#"| nc -NU -- '/tmp/$(x).sock'"#))
+    }
+
     @Test func lenientHoverCommandsDecode() throws {
         let json = #"{"hoverCommands":{"j":{"cmd":["jj","log"],"mode":"overlay"},"x":{"cmd":["a"],"mode":"nope"}}}"#
         let s = try JSONDecoder().decode(ForkPersistence.State.self, from: Data(json.utf8))

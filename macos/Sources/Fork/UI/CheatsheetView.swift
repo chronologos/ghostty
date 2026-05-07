@@ -20,7 +20,7 @@ struct CheatsheetView: View {
         ("⌘[ / ⌘]", "Prev / next split"),
         ("⌘⌥A", "Watch pane (notify on idle)"),
         ("⌘⇧B", "Toggle sidebar"),
-        ("hover + k/r/c/t/p/h", "kill / repaint / clear-tag / tag / pin / hide"),
+        ("hover + k/r/c/t/p/n/h", "kill / repaint / clear-tag / tag / pin / sync-cc-name / hide"),
     ]
 
     var body: some View {

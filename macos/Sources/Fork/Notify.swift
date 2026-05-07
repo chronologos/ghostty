@@ -30,14 +30,19 @@ final class ForkNotify: NSObject, UNUserNotificationCenterDelegate {
                 let waiting = { (s: [UUID: PaneState]) in
                     s.values.lazy.filter { $0 == .waiting }.count
                 }
+                // Upstream's `setDockBadge` (AppDelegate.swift:745) is the second writer; it's
+                // `private`, so on the 1→0 edge we re-derive its bell label locally instead
+                // of writing nil and clobbering a pending bell.
+                let bellLabel = { () -> String? in
+                    let c = NSApp.windows
+                        .compactMap { $0.windowController as? BaseTerminalController }
+                        .reduce(0) { $0 + ($1.bell ? 1 : 0) }
+                    return c > 0 ? "\(c)" : nil
+                }
                 badgeSub = SessionRegistry.shared.$paneState
                     .map(waiting)
                     .removeDuplicates()
-                    .sink { NSApp.dockTile.badgeLabel = $0 > 0 ? "\($0)" : nil }
-                // Upstream's `setDockBadge` (AppDelegate.swift:745) writes the same label on
-                // bell-change. We're registered later (post-seam-#1-tick), so re-asserting here
-                // wins; when waiting==0 we leave upstream's bell label alone. Reading the
-                // property here is fine — the bell observer fires async on `.main`.
+                    .sink { NSApp.dockTile.badgeLabel = $0 > 0 ? "\($0)" : bellLabel() }
                 NotificationCenter.default.addObserver(
                     forName: .init("com.mitchellh.ghostty.terminalWindowBellDidChange"),
                     object: nil, queue: .main
