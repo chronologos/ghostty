@@ -30,6 +30,7 @@ var titleOverride: String\?	macos/Sources/Features/Terminal/BaseTerminalControll
 func closeTabImmediately\(	macos/Sources/Features/Terminal/TerminalController.swift
 var processExited: Bool	macos/Sources/Ghostty/Surface View/SurfaceView_AppKit.swift
 var childExitedMessage	macos/Sources/Ghostty/Surface View/OSSurfaceView.swift
+var bell: Bool	macos/Sources/Features/Terminal/BaseTerminalController.swift
 class QuickTerminalController	macos/Sources/Features/QuickTerminal/QuickTerminalController.swift
 func animateIn\(	macos/Sources/Features/QuickTerminal/QuickTerminalController.swift
 EOF
