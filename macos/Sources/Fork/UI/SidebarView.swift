@@ -526,8 +526,17 @@ struct SidebarView: View {
         // unguarded nil here would clear B and leave hover-keys dead while B is still
         // visually highlighted (Hovering wrapper's @State is independent).
         .onHover { entering in
-            if entering { controller?.hoveredPane = (tab.id, index, ref) }
+            if entering { controller?.hoveredPane = (tab.id, index, ref, surface?.id) }
             else if let h = controller?.hoveredPane, h.tab == tab.id, h.index == index {
+                controller?.hoveredPane = nil
+            }
+        }
+        // `.onHover(false)` doesn't fire when the row is diffed out — `.onDisappear` does.
+        // Covers whole-tab removal (collapse/dismiss/close) where every row fires; for
+        // single-pane removal the offset-keyed ForEach fires this on the *last* row only,
+        // so `handleHoverKey` also guards `ref ∈ tab.tree`.
+        .onDisappear {
+            if let h = controller?.hoveredPane, h.tab == tab.id, h.index == index {
                 controller?.hoveredPane = nil
             }
         }
@@ -577,6 +586,11 @@ struct SidebarView: View {
                         controller?.toggleWatch(on: surface)
                     }
                     Button(hk("Force Repaint", "R")) { forkWigglePane(surface) }
+                }
+                if registry.ccLive[ref.hostID]?[ref.key]?.sock != nil {
+                    Button(hk("Set CC Name to '\(tab.paneLabels[ref.key] ?? ref.name)'", "N")) {
+                        controller?.syncCCName(tab: tab, ref: ref)
+                    }
                 }
             }
             Section {
