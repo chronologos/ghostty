@@ -43,9 +43,14 @@ struct ForkPersistence {
     private var bakURL: URL { url.appendingPathExtension("bak") }
 
     init() {
-        let base = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("com.mitchellh.ghostty", isDirectory: true)
+        // Unsandboxed test host resolves `.applicationSupportDirectory` to the real
+        // home — `xcodebuild test` would clobber the developer's fork.json via the
+        // singleton's debounced save sink. Redirect under XCTest.
+        let base = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+            ? FileManager.default.temporaryDirectory.appendingPathComponent("ghostty-fork-tests", isDirectory: true)
+            : FileManager.default
+                .urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+                .appendingPathComponent("com.mitchellh.ghostty", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         self.url = base.appendingPathComponent("fork.json")
     }

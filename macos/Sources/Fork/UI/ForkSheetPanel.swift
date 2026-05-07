@@ -7,6 +7,10 @@ import AppKit
 /// `paste:` (`SurfaceView_AppKit.swift:1550`) and swallows it. Intercepting here at
 /// `performKeyEquivalent` reaches the field editor before the menu does.
 final class ForkSheetPanel: NSWindow {
+    // Borderless windows refuse key by default; ⌘K presents this with `.borderless`
+    // and needs keyboard focus for the query field. Harmless for the sheet path.
+    override var canBecomeKey: Bool { true }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard let tv = firstResponder as? NSTextView else {
             return super.performKeyEquivalent(with: event)
