@@ -11,6 +11,8 @@ enum CCProbe {
         var cwd: String?
         var updatedAt: Date?
         var waitingFor: String?
+        /// Per-session control UDS path on the pane's host. Used by `rename`.
+        var sock: String?
 
         // `updatedAt` excluded so `mergeCC`'s `!=` guard isn't defeated by heartbeat-only
         // ticks (which would publish every 3s). The age column reads
@@ -18,8 +20,11 @@ enum CCProbe {
         // TimelineView closure instead — `ccLive[].updatedAt` is stale by design.
         static func == (l: Self, r: Self) -> Bool {
             l.name == r.name && l.status == r.status && l.cwd == r.cwd && l.waitingFor == r.waitingFor
+                && l.sock == r.sock
         }
-        func hash(into h: inout Hasher) { h.combine(name); h.combine(status); h.combine(cwd); h.combine(waitingFor) }
+        func hash(into h: inout Hasher) {
+            h.combine(name); h.combine(status); h.combine(cwd); h.combine(waitingFor); h.combine(sock)
+        }
     }
 
     /// Result keyed by `SessionRef.key` (the @-prefixed form), so a managed `acr` and an
@@ -94,6 +99,7 @@ enum CCProbe {
         var cwd: String?
         var updatedAt: Double?
         var waitingFor: String?
+        var messagingSocketPath: String?
     }
 
     private static func clean(_ s: String?, _ max: Int) -> String? {
@@ -109,7 +115,27 @@ enum CCProbe {
         return (r.pid, .init(name: clean(r.name, 128),
                              status: clean(r.status, 256), cwd: clean(r.cwd, 1024),
                              updatedAt: r.updatedAt.map { Date(timeIntervalSince1970: $0 / 1000) },
-                             waitingFor: clean(r.waitingFor, 256)))
+                             waitingFor: clean(r.waitingFor, 256),
+                             sock: clean(r.messagingSocketPath, 1024)))
+    }
+
+    private struct RenameMsg: Encodable { let type = "control", action = "rename", name: String }
+
+    /// `printf <json> | nc -NU -- <sock>` script. Both dynamic parts are `shq`'d (sock is
+    /// remote-decoded, untrusted); `--` blocks getopt option injection from a leading-`-`
+    /// sock. `-N` shuts down after stdin EOF on BSD nc (macOS); variants without it fall
+    /// back to `run()`'s 5s SIGKILL — write still lands, the async Task just burns the
+    /// timeout. Needs `nc -U` on the target host (BusyBox/GNU-traditional lack it).
+    static func renameScript(sock: String, to name: String) -> String? {
+        guard let data = try? JSONEncoder().encode(RenameMsg(name: name)),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        return "printf '%s\\n' \(shq(json)) | nc -NU -- \(shq(sock))"
+    }
+
+    static func rename(host: ForkHost, sock: String, to name: String) async {
+        guard let script = renameScript(sock: sock, to: name) else { return }
+        let argv = host.transport.controlArgv(["sh", "-c", script])
+        _ = try? await ZmxAdapter.run(argv: argv, timeout: 5)
     }
 
     /// Constant — no interpolation. `controlArgv` handles ssh quoting (CLAUDE.md §Security).

@@ -108,7 +108,8 @@ struct HostDetailView: View {
     }
 
     private func save() {
-        if label != host.label && !label.isEmpty { registry.renameHost(host.id, to: label) }
+        let name = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        if name != host.label && !name.isEmpty { registry.renameHost(host.id, to: name) }
         if hue != host.accentHue { registry.setAccentHue(host.id, hue) }
         if icon != host.icon { registry.setIcon(host.id, icon) }
     }
