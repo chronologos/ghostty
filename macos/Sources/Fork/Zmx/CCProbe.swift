@@ -11,8 +11,14 @@ enum CCProbe {
         var cwd: String?
         var updatedAt: Date?
         var waitingFor: String?
+        /// `'active'|'idle'|'blocked'` — classifier output, watch-gated (see `probeScript`).
+        var tempo: String?
+        /// Human-readable "what it wants from you" when `tempo == "blocked"`.
+        var needs: String?
         /// Per-session control UDS path on the pane's host. Used by `rename`.
         var sock: String?
+
+        var isBlocked: Bool { tempo == "blocked" }
 
         // `updatedAt` excluded so `mergeCC`'s `!=` guard isn't defeated by heartbeat-only
         // ticks (which would publish every 3s). The age column reads
@@ -20,10 +26,11 @@ enum CCProbe {
         // TimelineView closure instead — `ccLive[].updatedAt` is stale by design.
         static func == (l: Self, r: Self) -> Bool {
             l.name == r.name && l.status == r.status && l.cwd == r.cwd && l.waitingFor == r.waitingFor
-                && l.sock == r.sock
+                && l.tempo == r.tempo && l.needs == r.needs && l.sock == r.sock
         }
         func hash(into h: inout Hasher) {
-            h.combine(name); h.combine(status); h.combine(cwd); h.combine(waitingFor); h.combine(sock)
+            h.combine(name); h.combine(status); h.combine(cwd); h.combine(waitingFor)
+            h.combine(tempo); h.combine(needs); h.combine(sock)
         }
     }
 
@@ -99,6 +106,8 @@ enum CCProbe {
         var cwd: String?
         var updatedAt: Double?
         var waitingFor: String?
+        var tempo: String?
+        var needs: String?
         var messagingSocketPath: String?
     }
 
@@ -116,6 +125,7 @@ enum CCProbe {
                              status: clean(r.status, 256), cwd: clean(r.cwd, 1024),
                              updatedAt: r.updatedAt.map { Date(timeIntervalSince1970: $0 / 1000) },
                              waitingFor: clean(r.waitingFor, 256),
+                             tempo: clean(r.tempo, 32), needs: clean(r.needs, 256),
                              sock: clean(r.messagingSocketPath, 1024)))
     }
 
@@ -127,7 +137,8 @@ enum CCProbe {
     /// back to `run()`'s 5s SIGKILL — write still lands, the async Task just burns the
     /// timeout. Needs `nc -U` on the target host (BusyBox/GNU-traditional lack it).
     static func renameScript(sock: String, to name: String) -> String? {
-        guard let data = try? JSONEncoder().encode(RenameMsg(name: name)),
+        let enc = JSONEncoder(); enc.outputFormatting = .sortedKeys
+        guard let data = try? enc.encode(RenameMsg(name: name)),
               let json = String(data: data, encoding: .utf8) else { return nil }
         return "printf '%s\\n' \(shq(json)) | nc -NU -- \(shq(sock))"
     }
@@ -142,10 +153,14 @@ enum CCProbe {
     /// `\036` (RS) delimits ps-output from JSON blobs; `;` not `&&` so a torn read on one
     /// file doesn't swallow the next separator. `$HOME` survives Dock launch (launchd sets it);
     /// a zshrc-only `CLAUDE_CONFIG_DIR` is still invisible — see CLAUDE.md §Known limitations.
+    /// The `: >` heartbeat touch flips the agent's "being watched" gate so it writes the
+    /// `tempo`/`needs` classifier fields; without it those keys are absent (everything else
+    /// lands regardless).
     private static let probeScript = """
         ps -A -o pid=,ppid= 2>/dev/null
         printf '\\036'
         d=${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions
+        : > "$d/.fleetview-heartbeat" 2>/dev/null
         for f in "$d"/[0-9]*.json; do
           [ -f "$f" ] || continue
           cat "$f"; printf '\\036'
