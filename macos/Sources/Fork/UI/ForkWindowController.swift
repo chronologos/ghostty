@@ -625,6 +625,18 @@ final class ForkWindowController: TerminalController {
         Array(tabID == registry.activeTabID ? surfaceTree : (liveTabs[tabID] ?? .init()))
     }
 
+    /// Worst-child state for a collapsed header. `.blocked` is ref-keyed (`ccLive`) so it
+    /// shows for cold tabs too; `.working`/`.waiting` are surface-keyed so cold tabs miss
+    /// those — intentional, both are ephemeral OSC state that doesn't exist pre-attach.
+    func rollup(tab: TabModel) -> PaneState? {
+        if registry.tabBlocked(tab) { return .blocked }
+        return surfaces(for: tab.id).lazy.compactMap { self.registry.paneState[$0.id] }.max()
+    }
+
+    func rollup(hostID: ForkHost.ID) -> PaneState? {
+        registry.tabs(on: hostID).lazy.compactMap { self.rollup(tab: $0) }.max()
+    }
+
     func gotoHost(index n: Int) {
         guard registry.hosts.indices.contains(n - 1) else { return }
         let host = registry.hosts[n - 1]
