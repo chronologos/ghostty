@@ -185,6 +185,18 @@ struct SidebarView: View {
         .animation(.snappy(duration: 0.2), value: tabs.map(\.id))
     }
 
+    /// Worst-child rollup indicator for collapsed headers (host/tab). Mirrors `paneRow`'s
+    /// per-pane switch but without per-pane help text — the parent doesn't know which child.
+    @ViewBuilder
+    private func stateDot(_ s: PaneState?, accent: Color) -> some View {
+        switch s {
+        case .blocked: Circle().fill(.red).frame(width: 6, height: 6).help("Blocked — needs input")
+        case .waiting: Circle().fill(accent).frame(width: 6, height: 6).help("Finished — unread")
+        case .working: ProgressView().controlSize(.mini).scaleEffect(0.6)
+        case nil: EmptyView()
+        }
+    }
+
     private func keyHint(_ chord: String) -> some View {
         Text(chord)
             .font(mono(8, .semibold)).foregroundStyle(.secondary)
@@ -242,6 +254,10 @@ struct SidebarView: View {
                     .font(mono(12, .medium))
                     .foregroundStyle(connected ? .primary : .secondary)
                 Spacer()
+                if !host.expanded {
+                    stateDot(controller?.rollup(hostID: host.id), accent: host.accent)
+                        .padding(.trailing, 6)
+                }
                 if !isCompact, let i = registry.hosts.firstIndex(where: { $0.id == host.id }), i < 9 {
                     keyHint("⌘⌥\(i + 1)")
                 }
@@ -351,6 +367,8 @@ struct SidebarView: View {
             }
             Spacer()
             if tab.collapsed {
+                stateDot(controller?.rollup(tab: tab), accent: accent)
+                    .padding(.trailing, 6)
                 Text("\(paneCount)").font(mono(9)).foregroundStyle(.tertiary)
             }
         }
@@ -459,16 +477,18 @@ struct SidebarView: View {
                     }
                 }
                 Spacer()
-                if let surface {
-                    switch registry.paneState[surface.id] {
-                    case .working:
-                        ProgressView().controlSize(.mini).scaleEffect(0.6)
-                            .padding(.trailing, 4)
-                    case .waiting:
-                        Circle().fill(accent).frame(width: 6, height: 6)
-                            .padding(.trailing, 6).help("Finished — unread")
-                    case nil: EmptyView()
-                    }
+                switch registry.paneStatus(ref: ref, surfaceID: surface?.id) {
+                case .blocked:
+                    Circle().fill(.red).frame(width: 6, height: 6)
+                        .padding(.trailing, 6)
+                        .help(live?.needs ?? live?.waitingFor ?? "Needs your input")
+                case .working:
+                    ProgressView().controlSize(.mini).scaleEffect(0.6)
+                        .padding(.trailing, 4)
+                case .waiting:
+                    Circle().fill(accent).frame(width: 6, height: 6)
+                        .padding(.trailing, 6).help("Finished — unread")
+                case nil: EmptyView()
                 }
                 if let surface, registry.watchedSurfaces.contains(surface.id) {
                     Image(systemName: "eye")

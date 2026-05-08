@@ -126,28 +126,34 @@ struct ScrollbackSearchView: View {
         let q = query
         guard !q.isEmpty else { searching = false; return }
         debounce?.cancel()
+        // Local first so cheap matches surface while ssh is still in flight; the width cap
+        // is for ssh — `run()` does `Process().run()` before its first suspension, so the
+        // cooperative pool bounds waiting tasks, not subprocess count, and N panes on one
+        // host = N fresh ssh connections (no ControlMaster) → sshd MaxStartups drops.
         let targets = registry.allPanes
+            .sorted { $0.host.transport.isLocal && !$1.host.transport.isLocal }
         searching = true
         searchTask = Task {
+            func probe(_ p: (tab: TabModel, host: ForkHost, index: Int, ref: SessionRef)) async -> Hit? {
+                guard let buf = try? await ZmxAdapter.history(host: p.host, ref: p.ref),
+                      let line = buf.split(separator: "\n")
+                          .last(where: { $0.localizedCaseInsensitiveContains(q) })
+                else { return nil }
+                return Hit(
+                    tabID: p.tab.id, paneIndex: p.index,
+                    label: p.tab.paneLabels[p.ref.key] ?? p.ref.name,
+                    crumb: "· \(p.tab.title) · \(p.host.label)",
+                    accent: p.host.accent,
+                    snippet: String(line).trimmingCharacters(in: .whitespaces)
+                )
+            }
+            var i = 0
             await withTaskGroup(of: Hit?.self) { group in
-                for p in targets {
-                    group.addTask {
-                        guard let buf = try? await ZmxAdapter.history(host: p.host, ref: p.ref),
-                              let line = buf.split(separator: "\n")
-                                  .last(where: { $0.localizedCaseInsensitiveContains(q) })
-                        else { return nil }
-                        return Hit(
-                            tabID: p.tab.id, paneIndex: p.index,
-                            label: p.tab.paneLabels[p.ref.key] ?? p.ref.name,
-                            crumb: "· \(p.tab.title) · \(p.host.label)",
-                            accent: p.host.accent,
-                            snippet: String(line).trimmingCharacters(in: .whitespaces)
-                        )
-                    }
-                }
+                while i < min(4, targets.count) { let p = targets[i]; i += 1; group.addTask { await probe(p) } }
                 for await hit in group {
                     if Task.isCancelled { break }
                     if let hit { await MainActor.run { if gen == generation { hits.append(hit) } } }
+                    if i < targets.count { let p = targets[i]; i += 1; group.addTask { await probe(p) } }
                 }
             }
             await MainActor.run { if gen == generation { searching = false } }

@@ -10,9 +10,12 @@ enum RenameTarget: Hashable {
     }
 }
 
-/// Derived from `SurfaceView.$progressReport` (OSC 9;4). nil = idle. `.waiting` = a
-/// background pane finished and hasn't been viewed; cleared on `activate(tab:)`.
-enum PaneState: Equatable { case working, waiting }
+/// `.working`/`.waiting` are stored in `paneState[surface.id]` and driven by OSC 9;4 via
+/// `observeProgress`. `.blocked` is never stored — it's derived from `ccLive[][].tempo` so
+/// `observeProgress` can't clobber the probe's value with `.working`, and so it works for
+/// cold-restored tabs with no live surface. Read via `paneStatus(ref:surfaceID:)`.
+/// `Comparable` order is "needs me most first" for `rollup` max-reduce.
+enum PaneState: Comparable { case working, waiting, blocked }
 
 /// Single source of truth for hosts, tabs, and the surface→session map. Sidebar and
 /// controller observe this; all mutations route through it (SPEC §3).
@@ -61,6 +64,19 @@ final class SessionRegistry: ObservableObject {
     }
     func clearWaiting(surfaces ids: some Sequence<UUID>) {
         for id in ids where paneState[id] == .waiting { paneState.removeValue(forKey: id) }
+    }
+
+    /// Precedence-merged display state: probe `.blocked` › OSC `.working`/`.waiting` › nil.
+    func paneStatus(ref: SessionRef, surfaceID: UUID?) -> PaneState? {
+        if ccLive[ref.hostID]?[ref.key]?.isBlocked == true { return .blocked }
+        return surfaceID.flatMap { paneState[$0] }
+    }
+
+    /// Registry-side `.blocked` check for `focusTabs` sort. Full rollup (incl. surface-keyed
+    /// `.working`/`.waiting`) lives on the controller, which owns the tab→surfaces map.
+    func tabBlocked(_ tab: TabModel) -> Bool {
+        guard let cc = ccLive[tab.hostID] else { return false }
+        return tab.tree.leafRefs.contains { cc[$0.key]?.isBlocked == true }
     }
 
     /// Live CC-session info per pane (`CCProbe`), keyed `[hostID][ref.key]`. Ephemeral; the
@@ -113,13 +129,21 @@ final class SessionRegistry: ObservableObject {
         func mru(_ t: TabModel) -> Date {
             t.id == active ? .distantFuture : (t.lastActive.values.max() ?? .distantPast)
         }
+        // `blocked` is in the filter (not just the sort) so a stale-mru tab that becomes
+        // blocked surfaces; `dismissedAt` still wins so an explicit hide isn't overridden.
+        let blocked = Set(tabs.lazy.filter(tabBlocked).map(\.id))
         return tabs
             .filter {
                 guard $0.id != active else { return true }
                 guard mru($0) >= ($0.dismissedAt ?? .distantPast) else { return false }
-                return $0.pinned || (taggedOnly ? $0.hasTag : mru($0) > cutoff)
+                return $0.pinned || blocked.contains($0.id)
+                    || (taggedOnly ? $0.hasTag : mru($0) > cutoff)
             }
-            .sorted { $0.pinned != $1.pinned ? $0.pinned : mru($0) > mru($1) }
+            .sorted {
+                if $0.pinned != $1.pinned { return $0.pinned }
+                let (b0, b1) = (blocked.contains($0.id), blocked.contains($1.id))
+                return b0 != b1 ? b0 : mru($0) > mru($1)
+            }
     }
 
     /// "Inbox-zero" hide: stamp `dismissedAt` so `focusTabs` filters the tab until next
