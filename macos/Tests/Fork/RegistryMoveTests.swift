@@ -150,6 +150,18 @@ struct RegistryMoveTests {
         #expect(r.recentTags.isEmpty)
     }
 
+    @Test func dismissThenTouch_resurfaces() {
+        let r = reset()
+        let t = makeTab(r, names: ["a"])
+        r.dismissFromFocus(t)
+        #expect(r.tabs.first { $0.id == t }?.dismissedAt != nil)
+        r.touchPane(tab: t, name: "a")
+        #expect(r.tabs.first { $0.id == t }?.dismissedAt == nil)
+        r.dismissFromFocus(t)
+        r.setPinned(t, true)
+        #expect(r.tabs.first { $0.id == t }?.dismissedAt == nil)
+    }
+
     @Test func moveHost_reorders() {
         let r = reset()
         r.addHost(ForkHost(id: "a", label: "a", transport: .ssh(.init(host: "a"))))
