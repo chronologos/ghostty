@@ -29,6 +29,21 @@ struct TransportTests {
         #expect(shq(["zmx", "attach", "x"]) == "'zmx' 'attach' 'x'")
     }
 
+    @Test func paneStateOrder() {
+        // rollup max-reduce: blocked > waiting > working
+        #expect([PaneState.working, .blocked, .waiting].max() == .blocked)
+        #expect([PaneState.working, .waiting].max() == .waiting)
+    }
+
+    @Test func identRejectsTrailingNewline() {
+        #expect(isValidIdent("foo.bar-1_baz"))
+        // ICU `$` would match before this trailing \n; `\z` must not.
+        #expect(!isValidIdent("foo\n"))
+        #expect(!isValidIdent(""))
+        #expect(!isValidIdent("a b"))
+        #expect(!isValidIdent("a;id"))
+    }
+
     @Test func wrapLocal() {
         let cmd = ForkHost.Transport.local.wrap(["zmx", "attach", "h-n"])
         #expect(cmd == "'zmx' 'attach' 'h-n'")
@@ -122,7 +137,8 @@ struct TransportTests {
     @Test func renameScriptShape() {
         let s = CCProbe.renameScript(sock: "/tmp/$(x).sock", to: #"a"b"#)!
         // JSON-encoded name (quote escaped) shq'd as one printf arg; sock shq'd after `--`.
-        #expect(s.contains(#"'{"type":"control","action":"rename","name":"a\"b"}'"#))
+        // `.sortedKeys` → alphabetical, deterministic.
+        #expect(s.contains(#"'{"action":"rename","name":"a\"b","type":"control"}'"#))
         #expect(s.hasSuffix(#"| nc -NU -- '/tmp/$(x).sock'"#))
     }
 
