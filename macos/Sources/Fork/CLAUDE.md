@@ -269,9 +269,15 @@ A terminal that runs arbitrary shells will trip every macOS privacy surface. Thr
   `ps -A -o pid=,ppid=`; BusyBox/Alpine untested. Shared-uid remotes
   (`deploy@`) ship every user's CC pid-files over the wire — BFS filters the
   *result* to descendants of our zmx sessions, but the raw transfer doesn't.
+  The red `.blocked` indicator depends on classifier fields (`tempo`/`needs`)
+  that the agent only writes while it believes it's being watched —
+  `probeScript` touches the heartbeat file every poll to keep that true, but
+  the agent-side feature gate must also be on (silently absent otherwise).
 - Sidebar mono font reads `window-title-font-family` (not `font-family` — that's a
   `RepeatableString` and `c_get.zig` can't return it without an upstream `cval()`).
   Set `window-title-font-family = <terminal font>` for matched typography.
 - ⌘⇧K scrollback search fetches full `zmx history` per session and matches
   client-side (keeps user input out of `controlArgv`'s shell). Slow over ssh
   for large buffers; per-ref 10s timeout means a stalled remote silently drops.
+  Width-capped at 4 concurrent (local-first) so a many-pane query doesn't burst
+  N fresh ssh connections past sshd `MaxStartups`.
