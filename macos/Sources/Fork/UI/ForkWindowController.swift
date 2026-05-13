@@ -485,7 +485,7 @@ final class ForkWindowController: TerminalController {
         progressSubs.removeValue(forKey: id)
         settleTimers.removeValue(forKey: id)?.invalidate()
         notifiedSurfaces.remove(id)
-        registry.setPaneState(id, nil)
+        registry.dropPaneState(id)
         registry.setWatching(id, false)
     }
 
@@ -625,12 +625,17 @@ final class ForkWindowController: TerminalController {
         Array(tabID == registry.activeTabID ? surfaceTree : (liveTabs[tabID] ?? .init()))
     }
 
-    /// Worst-child state for a collapsed header. `.blocked` is ref-keyed (`ccLive`) so it
-    /// shows for cold tabs too; `.working`/`.waiting` are surface-keyed so cold tabs miss
-    /// those — intentional, both are ephemeral OSC state that doesn't exist pre-attach.
+    /// Worst-child state for a collapsed header, via `registry.paneStatus` per live pane so
+    /// a pane that's actively working masks a stale probe `.blocked` (see `paneStatus`).
+    /// Cold tabs have no live surfaces — fall back to the ref-keyed `.blocked` check so they
+    /// still show red; `.working`/`.waiting` are surface-keyed and don't exist pre-attach.
     func rollup(tab: TabModel) -> PaneState? {
-        if registry.tabBlocked(tab) { return .blocked }
-        return surfaces(for: tab.id).lazy.compactMap { self.registry.paneState[$0.id] }.max()
+        let live = surfaces(for: tab.id)
+        guard !live.isEmpty else { return registry.tabBlocked(tab) ? .blocked : nil }
+        return live.lazy.compactMap { s -> PaneState? in
+            guard let ref = self.registry.refs[s.id] else { return self.registry.paneState[s.id] }
+            return self.registry.paneStatus(ref: ref, surfaceID: s.id)
+        }.max()
     }
 
     func rollup(hostID: ForkHost.ID) -> PaneState? {
@@ -839,7 +844,7 @@ final class ForkWindowController: TerminalController {
     /// no cwd/cmd fields. Use `showNewSessionSheet` for the full form.
     func showSessionPicker(on host: ForkHost) {
         let placeholder = registry.uniqueAutoName()
-        presentSheet(size: .init(width: 280, height: 260)) { [weak self] in
+        presentSheet(size: .init(width: 280, height: 280)) { [weak self] in
             SplitPickerView(
                 title: "New session on \(host.label)",
                 host: host, placeholder: placeholder,
@@ -863,7 +868,7 @@ final class ForkWindowController: TerminalController {
     /// sheet opens showing the pre-edit hue/icon. The id is immutable; look up fresh here.
     func showHostDetail(_ id: ForkHost.ID) {
         guard let host = registry.host(id: id) else { return }
-        presentSheet(size: .init(width: 420, height: 360)) { [weak self] in
+        presentSheet(size: .init(width: 420, height: 420)) { [weak self] in
             HostDetailView(host: host, onDone: { self?.endSheet() })
         }
     }
@@ -1072,6 +1077,7 @@ final class ForkWindowController: TerminalController {
         // focus roundtrip lands a frame later and would briefly show the prior tab's index.
         let leaves = Array(surfaceTree)
         registry.clearWaiting(surfaces: leaves.lazy.map(\.id))
+        registry.ackBlocked(refs: leaves.lazy.compactMap { self.registry.refs[$0.id] })
         notifiedSurfaces.subtract(leaves.lazy.map(\.id))
         // Synchronous MRU touch: `focusedSurfaceDidChange` → `touchPane` is async via
         // `@FocusedValue.onChange`, and the `paneIndex == nil` path below never sets
@@ -1171,7 +1177,7 @@ final class ForkWindowController: TerminalController {
                                  ref: .init(hostID: host.id, name: placeholder))
         }
         pendingSplit = (oldView, direction)
-        presentSheet(size: .init(width: 280, height: 260)) { [weak self] in
+        presentSheet(size: .init(width: 280, height: 280)) { [weak self] in
             SplitPickerView(
                 title: "Split on \(host.label)",
                 host: host, placeholder: placeholder,
