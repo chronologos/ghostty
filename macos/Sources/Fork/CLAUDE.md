@@ -273,6 +273,17 @@ A terminal that runs arbitrary shells will trip every macOS privacy surface. Thr
   that the agent only writes while it believes it's being watched —
   `probeScript` touches the heartbeat file every poll to keep that true, but
   the agent-side feature gate must also be on (silently absent otherwise).
+  CC doesn't reliably rewrite `tempo` once you reply, so `tempo == "blocked"`
+  can outlive the block on disk — `paneStatus` therefore lets live OSC 9;4
+  `.working` mask `.blocked`, and `isBlocked` discounts a stale `tempo` via a
+  watermark: `mergeCC` stamps `ccBlockedSince[ref]` (local clock) on first
+  sight or when that ref's `tempo`/`needs` change, and `isBlocked` requires
+  that stamp to postdate the *freshest* `lastWorkingAt` across any surface
+  bound to the ref. Per-ref + local-clock so sibling churn / leaked surfaces /
+  ssh clock skew can't false-positive it. `activate(tab:)` calls `ackBlocked`
+  (writes `.distantPast`) so clicking a red tab clears it until the next real
+  classifier edge; `ccBlockedSince` survives the showCC toggle so off→on
+  doesn't re-red discounted panes.
 - Sidebar mono font reads `window-title-font-family` (not `font-family` — that's a
   `RepeatableString` and `c_get.zig` can't return it without an upstream `cval()`).
   Set `window-title-font-family = <terminal font>` for matched typography.
