@@ -26,7 +26,30 @@ struct ForkPanePalette: View {
     }
 
     private var options: [CommandOption] {
-        registry.allPanes.map { p in
+        var out: [CommandOption] = []
+        // Action entries (replaced the built-in bare-letter hover keys). Only when the
+        // referent exists — `controller` is weak and `focusedSurface` is nil for cold tabs.
+        if let s = controller?.focusedSurface {
+            out.append(.init(title: "Force Repaint Pane", symbols: ["⌘", "⇧", "R"],
+                             leadingIcon: "arrow.clockwise") { forkWigglePane(s) })
+        }
+        if let id = registry.activeTabID, let t = registry.tabs.first(where: { $0.id == id }) {
+            out.append(.init(title: t.pinned ? "Unpin Tab" : "Pin Tab",
+                             symbols: ["⌘", "⌥", "P"], leadingIcon: "pin") {
+                SessionRegistry.shared.setPinned(id, !t.pinned)
+            })
+        }
+        // User-defined pane commands (`fork.json` hoverCommands) — run on the focused pane.
+        // Replaces bare-letter hover dispatch entirely.
+        for (key, hc) in registry.hoverCommands.sorted(by: { $0.key < $1.key })
+            where controller?.focusedSurface != nil {
+            out.append(.init(title: hc.cmd.first ?? key,
+                             subtitle: hc.cmd.dropFirst().joined(separator: " "),
+                             leadingIcon: "terminal", badge: hc.mode.rawValue) {
+                [weak controller] in controller?.runPaneCommand(hc)
+            })
+        }
+        out += registry.allPanes.map { p in
             CommandOption(
                 title: p.tab.paneLabels[p.ref.key] ?? p.ref.name,
                 subtitle: "\(p.tab.title) · \(p.host.label)",
@@ -36,6 +59,7 @@ struct ForkPanePalette: View {
                 controller?.activate(tab: id, paneIndex: i)
             }
         }
+        return out
     }
 }
 

@@ -25,10 +25,8 @@ final class ForkNotify: NSObject, UNUserNotificationCenterDelegate {
                 wrapped = center.delegate
                 center.delegate = self
                 center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
-                // `$paneState` emits during `willSet`, so the closure must consume the
-                // delivered value — re-reading the property here would yield the OLD dict.
-                let waiting = { (s: [UUID: PaneState]) in
-                    s.values.lazy.filter { $0 == .waiting }.count
+                let waiting = { (p: [SessionRef: PaneMachine]) in
+                    p.values.lazy.filter { $0.phase == .waiting }.count
                 }
                 // Upstream's `setDockBadge` (AppDelegate.swift:745) is the second writer; it's
                 // `private`, so on the 1→0 edge we re-derive its bell label locally instead
@@ -39,7 +37,7 @@ final class ForkNotify: NSObject, UNUserNotificationCenterDelegate {
                         .reduce(0) { $0 + ($1.bell ? 1 : 0) }
                     return c > 0 ? "\(c)" : nil
                 }
-                badgeSub = SessionRegistry.shared.$paneState
+                badgeSub = SessionRegistry.shared.$panes
                     .map(waiting)
                     .removeDuplicates()
                     .sink { NSApp.dockTile.badgeLabel = $0 > 0 ? "\($0)" : bellLabel() }
@@ -48,7 +46,7 @@ final class ForkNotify: NSObject, UNUserNotificationCenterDelegate {
                     object: nil, queue: .main
                 ) { _ in
                     MainActor.assumeIsolated {
-                        let n = waiting(SessionRegistry.shared.paneState)
+                        let n = waiting(SessionRegistry.shared.panes)
                         if n > 0 { NSApp.dockTile.badgeLabel = "\(n)" }
                     }
                 }
