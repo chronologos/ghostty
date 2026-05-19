@@ -131,16 +131,17 @@ enum CCProbe {
 
     private struct RenameMsg: Encodable { let type = "control", action = "rename", name: String }
 
-    /// `printf <json> | nc -NU -- <sock>` script. Both dynamic parts are `shq`'d (sock is
-    /// remote-decoded, untrusted); `--` blocks getopt option injection from a leading-`-`
-    /// sock. `-N` shuts down after stdin EOF on BSD nc (macOS); variants without it fall
-    /// back to `run()`'s 5s SIGKILL — write still lands, the async Task just burns the
-    /// timeout. Needs `nc -U` on the target host (BusyBox/GNU-traditional lack it).
+    /// `printf <json> | nc -w 1 -U -- <sock>` script. Both dynamic parts are `shq`'d (sock
+    /// is remote-decoded, untrusted); `--` blocks getopt option injection from a leading-`-`
+    /// sock. `-w 1` (1s idle timeout) for portable EOF-exit — macOS /usr/bin/nc has no `-N`
+    /// (parses it as `--apple-tcp-adp-wtimo`, eats `U` as its arg, exits 1); Linux nc may
+    /// otherwise hold the connection. Needs `nc -U` on the target host (BusyBox/GNU-
+    /// traditional lack it).
     static func renameScript(sock: String, to name: String) -> String? {
         let enc = JSONEncoder(); enc.outputFormatting = .sortedKeys
         guard let data = try? enc.encode(RenameMsg(name: name)),
               let json = String(data: data, encoding: .utf8) else { return nil }
-        return "printf '%s\\n' \(shq(json)) | nc -NU -- \(shq(sock))"
+        return "printf '%s\\n' \(shq(json)) | nc -w 1 -U -- \(shq(sock))"
     }
 
     static func rename(host: ForkHost, sock: String, to name: String) async {

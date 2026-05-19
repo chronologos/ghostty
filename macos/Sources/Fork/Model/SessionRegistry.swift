@@ -10,15 +10,8 @@ enum RenameTarget: Hashable {
     }
 }
 
-/// `.working`/`.waiting` are stored in `paneState[surface.id]` and driven by OSC 9;4 via
-/// `observeProgress`. `.blocked` is never stored — it's derived from `ccLive[][].tempo`
-/// (CC's classifier), so it survives across cold-restored tabs with no live surface.
-/// `paneStatus(ref:surfaceID:)` merges them freshest-first: live OSC `.working` beats a
-/// probe `.blocked`, because OSC 9;4 is real-time while `tempo` lags the 3s poll and CC
-/// doesn't always rewrite `tempo` once you've replied — a finished session can keep
-/// `tempo == "blocked"` on disk indefinitely. A per-surface `lastWorkingAt` watermark
-/// discounts such a stale `.blocked`. `Comparable` order is "needs me most first" for
-/// `rollup` max-reduce.
+/// Projection of `PaneMachine.dot` — what the sidebar/rollup/badge render.
+/// `Comparable` order is "needs me most" for `rollup` max-reduce.
 enum PaneState: Comparable { case working, waiting, blocked }
 
 /// Single source of truth for hosts, tabs, and the surface→session map. Sidebar and
@@ -48,76 +41,25 @@ final class SessionRegistry: ObservableObject {
     /// "recent" from it is arbitrary; this is the source of truth for the context-menu shortlist.
     /// Pruned to live `paneTags` on every mutation that can drop the last user of a tag.
     @Published private(set) var recentTags: [PaneTag]
-    /// User-defined hover-key actions, hand-edited in `fork.json`. Checked before the
-    /// built-in k/r/c/t/p/h cases so a user binding can shadow them. Loaded once; not
-    /// `@Published` so observers (CheatsheetView) don't re-render on unrelated changes.
+    /// User-defined pane commands, hand-edited in `fork.json`; surface in the ⌘K palette
+    /// targeting the focused pane. Loaded once; not `@Published`.
     let hoverCommands: [String: HoverCommand]
-    /// Surfaces with a one-shot watch armed (⌘⌥A). The OSC 9;4 edge fires via the
-    /// always-on `paneDidSettle` (so it inherits the 250ms flicker-debounce); membership
-    /// here makes that path post even for the active tab. Ephemeral.
-    @Published private(set) var watchedSurfaces: Set<UUID> = []
-    func setWatching(_ id: UUID, _ on: Bool) {
-        if on { watchedSurfaces.insert(id) } else { watchedSurfaces.remove(id) }
-    }
 
-    /// Per-surface OSC 9;4 state. Ephemeral; controller-written via `observeProgress`.
-    @Published private(set) var paneState: [UUID: PaneState] = [:]
-    func setPaneState(_ id: UUID, _ s: PaneState?) {
-        if s == .working { lastWorkingAt[id] = Date() }
-        guard paneState[id] != s else { return }
-        if let s { paneState[id] = s } else { paneState.removeValue(forKey: id) }
+    /// Per-session status reducer — see `PaneMachine`. Single owner of working/waiting/
+    /// blocked/watched/notified; everything else is a projection. Ephemeral.
+    @Published private(set) var panes: [SessionRef: PaneMachine] = [:]
+    /// Only writer. `!=` guard ⇒ steady-state probe ticks don't publish.
+    @discardableResult
+    func apply(_ ref: SessionRef, _ e: PaneEvent) -> Bool {
+        var m = panes[ref, default: .init()]; let post = m.apply(e)
+        if panes[ref] != m { panes[ref] = m }; return post
     }
-    func clearWaiting(surfaces ids: some Sequence<UUID>) {
-        for id in ids where paneState[id] == .waiting { paneState.removeValue(forKey: id) }
-    }
-    /// User looked at these panes — suppress `.blocked` until `mergeCC` sees a *new*
-    /// classifier edge (`tempo`/`needs` change). `.distantPast` (not removal) so the next
-    /// poll's first-sight branch (`acc[key]==nil → stamp`) doesn't immediately re-red.
-    /// Manual `objectWillChange`: `ccBlockedSince` is non-@Published, and re-clicking the
-    /// already-active tab skips `setActive`, so the dot wouldn't redraw till next probe.
-    func ackBlocked(refs: some Sequence<SessionRef>) {
-        var changed = false
-        for r in refs where (ccBlockedSince[r.hostID]?[r.key] ?? .distantPast) > .distantPast {
-            ccBlockedSince[r.hostID]?[r.key] = .distantPast; changed = true
-        }
-        if changed { objectWillChange.send() }
-    }
-    /// Wall-clock of the last OSC 9;4 progress event per surface. Not `@Published` — only
-    /// ever updated alongside `setPaneState(.working)` (which is), and read in
-    /// `paneStatus`/`tabBlocked` to discount a stale probe `.blocked`. Dropped with the
-    /// surface in `dropPaneState`.
-    private var lastWorkingAt: [UUID: Date] = [:]
-    func dropPaneState(_ id: UUID) { setPaneState(id, nil); lastWorkingAt.removeValue(forKey: id) }
-
-    /// Display state, freshest signal wins: live OSC `.working` › probe `.blocked` › OSC
-    /// `.waiting` › nil. `.working` outranks `.blocked` because OSC 9;4 is real-time while
-    /// the probe's `tempo` lags the 3s poll and CC's classifier doesn't reliably rewrite
-    /// `tempo` once you've replied (see `PaneState`).
-    func paneStatus(ref: SessionRef, surfaceID: UUID?) -> PaneState? {
-        if let surfaceID, paneState[surfaceID] == .working { return .working }
-        if isBlocked(ref: ref) { return .blocked }
-        return surfaceID.flatMap { paneState[$0] }
-    }
-
-    /// Ref-level: blocked iff the probe says so AND `ccBlockedSince[ref]` (local-clock edge
-    /// stamp from `mergeCC`, or `.distantPast` if `ackBlocked`) postdates the *freshest*
-    /// OSC `.working` we've seen on ANY surface bound to this ref — leaked/dup-attached
-    /// surfaces with stale `lastWorkingAt` then can't outvote a live one. No surface ever
-    /// seen working ⇒ `seen == .distantPast` ⇒ a real stamp wins (cold-tab trust-probe);
-    /// an ack-sentinel `.distantPast` ties → false.
-    private func isBlocked(ref: SessionRef) -> Bool {
-        guard ccLive[ref.hostID]?[ref.key]?.isBlocked == true,
-              let since = ccBlockedSince[ref.hostID]?[ref.key] else { return false }
-        let seen = refs.lazy.filter { $0.value == ref }.compactMap { self.lastWorkingAt[$0.key] }.max()
-        return since > (seen ?? .distantPast)
-    }
-
-    /// `.blocked` rollup for `focusTabs` filter+sort. Ref-level `isBlocked` already takes
-    /// the freshest `lastWorkingAt` across surfaces, so no per-surface fan-out needed —
-    /// matches `controller.rollup(tab:)` semantics now.
-    func tabBlocked(_ tab: TabModel) -> Bool {
-        guard ccLive[tab.hostID] != nil else { return false }
-        return tab.tree.leafRefs.contains(where: isBlocked(ref:))
+    func dot(ref: SessionRef) -> PaneState? { panes[ref]?.dot }
+    /// Called when a ref leaves all trees (`removeTab`/`removeHost` — NOT
+    /// `setPersistedTree`, which must preserve `blockSig`/`watched` across ⌘W→⌘Z).
+    func dropPane(_ ref: SessionRef) { panes.removeValue(forKey: ref) }
+    private func refInAnyTree(_ r: SessionRef) -> Bool {
+        tabs.contains { $0.tree.leafRefs.contains(r) }
     }
 
     /// Live CC-session info per pane (`CCProbe`), keyed `[hostID][ref.key]`. Ephemeral; the
@@ -129,13 +71,6 @@ final class SessionRegistry: ObservableObject {
     /// so the displayed value tracks the actual heartbeat — reading `ccLive[].updatedAt`
     /// instead would freeze at time-of-last-status-change.
     private(set) var ccUpdatedAt: [ForkHost.ID: [String: Date]] = [:]
-    /// Local-clock stamp of when each ref's classifier (`tempo`/`needs`) last changed while
-    /// `isBlocked` — the watermark `isBlocked()` compares against `lastWorkingAt`. Not
-    /// `info.updatedAt`: `mergeCC` reassigns `ccLive[host]` whole-dict so sibling churn would
-    /// refresh every ref's `updatedAt`, and on ssh it's the *remote* clock. `ackBlocked`
-    /// writes `.distantPast` (suppressed-until-next-edge); survives showCC toggle-off so a
-    /// re-enable doesn't re-stamp stale `tempo`. Non-@Published — `ackBlocked` sends manually.
-    private var ccBlockedSince: [ForkHost.ID: [String: Date]] = [:]
     private var ccPoll: Task<Void, Never>?
 
     /// Not @Published: pure surface→session bookkeeping the sidebar never renders
@@ -171,27 +106,22 @@ final class SessionRegistry: ObservableObject {
     /// Active tab is forced to `.distantFuture` so a freshly-created tab (whose `lastActive`
     /// is still empty until async focus settlement runs `touchPane`) passes the cutoff and
     /// sorts to the top instead of flashing at the bottom.
+    /// `.blocked` is *intentionally* not in filter/sort here (PR35) — the red dot is
+    /// visual-only; PR33's "blocked surfaces past the 16h cutoff and sorts above MRU"
+    /// was removed at the user's request. Don't re-add.
     func focusTabs(taggedOnly: Bool) -> [TabModel] {
         let cutoff = Date().addingTimeInterval(-16 * 3600)
         let active = activeTabID
         func mru(_ t: TabModel) -> Date {
             t.id == active ? .distantFuture : (t.lastActive.values.max() ?? .distantPast)
         }
-        // `blocked` is in the filter (not just the sort) so a stale-mru tab that becomes
-        // blocked surfaces; `dismissedAt` still wins so an explicit hide isn't overridden.
-        let blocked = Set(tabs.lazy.filter(tabBlocked).map(\.id))
         return tabs
             .filter {
                 guard $0.id != active else { return true }
                 guard mru($0) >= ($0.dismissedAt ?? .distantPast) else { return false }
-                return $0.pinned || blocked.contains($0.id)
-                    || (taggedOnly ? $0.hasTag : mru($0) > cutoff)
+                return $0.pinned || (taggedOnly ? $0.hasTag : mru($0) > cutoff)
             }
-            .sorted {
-                if $0.pinned != $1.pinned { return $0.pinned }
-                let (b0, b1) = (blocked.contains($0.id), blocked.contains($1.id))
-                return b0 != b1 ? b0 : mru($0) > mru($1)
-            }
+            .sorted { $0.pinned != $1.pinned ? $0.pinned : mru($0) > mru($1) }
     }
 
     /// "Inbox-zero" hide: stamp `dismissedAt` so `focusTabs` filters the tab until next
@@ -230,7 +160,8 @@ final class SessionRegistry: ObservableObject {
         hosts.removeAll { $0.id == id }
         tabs.removeAll { $0.hostID == id }
         if ccLive[id] != nil { ccLive[id] = nil }
-        ccUpdatedAt[id] = nil; ccBlockedSince[id] = nil
+        ccUpdatedAt[id] = nil
+        panes = panes.filter { $0.key.hostID != id }
         if let active = activeTabID, !tabs.contains(where: { $0.id == active }) { activeTabID = nil }
         pruneRecentTags()
     }
@@ -265,9 +196,11 @@ final class SessionRegistry: ObservableObject {
     }
 
     func removeTab(_ id: TabModel.ID) {
+        let dropped = tabs.first { $0.id == id }?.tree.leafRefs ?? []
         tabs.removeAll { $0.id == id }
         if activeTabID == id { activeTabID = nil }
         if renaming?.tabID == id { renaming = nil }
+        for r in dropped where !refInAnyTree(r) { dropPane(r) }
         pruneRecentTags()
     }
 
@@ -340,9 +273,8 @@ final class SessionRegistry: ObservableObject {
             ccPoll?.cancel(); ccPoll = nil
             if !ccLive.isEmpty { ccLive = [:] }
             ccUpdatedAt = [:]
-            // `ccBlockedSince` survives — `mergeCC` derives `prev` from `ccLive` (just
-            // cleared), so wiping it too would make the first re-enable poll re-stamp every
-            // stale `tempo` fresh and re-red panes the watermark had already discounted.
+            // `panes[ref].blockSig` survives toggle — clearing `ccLive` is harmless because
+            // the machine itself holds the edge-detect latch.
         }
     }
 
@@ -376,21 +308,17 @@ final class SessionRegistry: ObservableObject {
         // `ccPoll == nil` ⇒ toggled off mid-tick; `host == nil` ⇒ removed mid-tick. Either
         // way the in-flight task-group can still drain a result here after the clear.
         guard ccPoll != nil, host(id: hostID) != nil, let result else { return }
-        // Per-ref edge detect *before* the whole-dict assign below clobbers `prev`. Stamp on
-        // first sight (`acc[key]==nil`); re-stamp only when we HAVE a prev and its classifier
-        // fields changed — `prev` is empty after a showCC toggle (ccLive was cleared but
-        // `ccBlockedSince` survives), and treating that as an edge would re-red every stale
-        // `tempo`. `status`/`cwd`/etc can churn while `tempo` is stale-stuck so don't count.
-        let prev = ccLive[hostID] ?? [:]
-        ccBlockedSince[hostID] = result.reduce(into: ccBlockedSince[hostID] ?? [:]) { acc, kv in
-            guard kv.value.isBlocked else { acc.removeValue(forKey: kv.key); return }
-            if acc[kv.key] == nil { acc[kv.key] = Date(); return }
-            guard let p = prev[kv.key] else { return }
-            if p.tempo != kv.value.tempo || p.needs != kv.value.needs { acc[kv.key] = Date() }
-        }.filter { result[$0.key] != nil || prev[$0.key] != nil }
-        // GC only on 2-tick absence — a torn pid-file / CC restarting between pids drops a
-        // key from one `result` while the zmx session is still alive; single-tick filter
-        // would strip the ack/.distantPast and re-stamp fresh on the next tick.
+        // Emit `.probe` per *in-tree* ref on this host — `result` may include never-attached
+        // sessions (would leak `panes`), and iterating `prev∪result` can't deliver a second
+        // `.probeAbsent` because `prev = ccLive` already dropped the key after the first miss.
+        // In-tree-but-absent → `.probeAbsent` (machine's 2-strike tells gap from CC-exit).
+        // `Set` — dup-attached refs (PR26) would otherwise double-emit and burn both strikes.
+        for ref in Set(tabs.lazy.filter({ $0.hostID == hostID }).flatMap(\.tree.leafRefs)) {
+            if let info = result[ref.key] {
+                apply(ref, .probe(blocked: info.isBlocked,
+                                  sig: .init(tempo: info.tempo, needs: info.needs)))
+            } else { apply(ref, .probeAbsent) }
+        }
         if ccLive[hostID] != result { ccLive[hostID] = result }
         ccUpdatedAt[hostID] = result.compactMapValues(\.updatedAt)
         for i in tabs.indices where tabs[i].hostID == hostID {
@@ -405,6 +333,8 @@ final class SessionRegistry: ObservableObject {
 
     func setPersistedTree(_ tree: PersistedTree, for tabID: TabModel.ID) {
         guard let i = tabs.firstIndex(where: { $0.id == tabID }) else { return }
+        // No `panes` GC here — ⌘W→⌘Z must preserve `blockSig`/`watched` (same leak-until-
+        // tab-close policy as `refs`/`progressSubs`); `removeTab` is the drop point.
         tabs[i].tree = tree
         let live = Set(tree.leafRefs.map(\.key))
         tabs[i].lastActive = tabs[i].lastActive.filter { live.contains($0.key) }

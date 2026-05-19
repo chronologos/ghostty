@@ -71,6 +71,9 @@ Fork/
                                .waiting count
   Model/
     Host.swift                 ForkHost, Transport, SSHTarget, SessionRef, TabModel, PersistedTree
+    PaneMachine.swift          Per-SessionRef status reducer — event-ordered `.progress`/
+                               `.settled`/`.probe`/`.viewed`/`.watch`/`.bell`/`.detached`
+                               → `.dot` projection + post-banner bool
     SessionRegistry.swift      @MainActor singleton; @Published hosts/tabs/activeTabID/focusedPaneIndex (refs is plain var)
     Persistence.swift          fork.json (atomic write + .bak + revalidate-on-load)
   Zmx/
@@ -180,9 +183,11 @@ local), not the internal hash id. `mode` (unknown values drop that one binding):
   needs the per-tool `-R {cwd}` flag.
 
 `{cwd}` resolves `surface.pwd` (OSC 7, needs shell integration in the remote zshrc) ›
-`ccLive[host][ref.key].cwd` (CCProbe poll) › `"."`. Config is checked **before** the
-built-in k/r/c/t/p/h cases, so a user binding shadows them. Bindings appear in the
-⌘-hold cheatsheet.
+`ccLive[host][ref.key].cwd` (CCProbe poll) › `"."`. Bindings appear in the ⌘K palette
+(targeting the *focused* pane, via `runPaneCommand`) and in the ⌘-hold cheatsheet —
+there is no bare-letter hover dispatch (`hoveredPane` was removed; the terminal is
+usually firstResponder so stray letters intercepted). The `key` in `hoverCommands` is
+now just a stable config id; it's no longer the dispatch character.
 
 ## Branches & release
 
@@ -220,7 +225,6 @@ jj git push --bookmark fork --remote origin   # never push to upstream
 - ssh attach to a re-keyed host behind a ProxyCommand dies opaque (`UNKNOWN port 65535`)
   at the host-key prompt — consider `-o StrictHostKeyChecking=accept-new` or a clearer
   error surface in `ZmxAdapter.swift:175`.
-- "Kill Session…" missing from the heading context menu.
 - `ReorderDelegate` accepts external `.text` drops: cancelled internal drag leaves
   `dragging` stale (no SwiftUI cancel hook), then dragging text from another app
   onto a row fires a spurious `moveTab`/`moveHost`. Fix needs a private UTType so
@@ -254,11 +258,8 @@ A terminal that runs arbitrary shells will trip every macOS privacy surface. Thr
 - ⌘⇧[/⌘⇧] tab nav matches `{`/`}` (US-layout); other layouts won't fire.
   Digit shortcuts (⌘1-9, ⌘⌥1-9) are layout-independent via `keyCode`.
   ⌘[/⌘] left to upstream's `goto_split` (Config.zig:7016).
-  ⌘⌥A watch matches physical `kVK_ANSI_A` (keyCode 0); AZERTY gets it on ⌘⌥Q.
-  Bare-letter hover shortcuts (k/r/c/t/p) fire whenever the mouse is on a sidebar
-  row — including while the terminal is firstResponder — so a stray letter while
-  the cursor rests on a row will intercept; mitigated by `k` being confirm-gated
-  and the rest being reversible.
+  ⌘⌥A/⌘⌥P (watch / pin) match physical `kVK_ANSI_A`/`_P` (keyCode 0/35);
+  AZERTY gets ⌘⌥A on ⌘⌥Q. ⌘⇧R (repaint) is keyCode 15.
   ⌘K/⌘⇧K shadow upstream's `clear_screen` (Config.zig:6927); rebind via
   `keybind = cmd+ctrl+k=clear_screen` if wanted.
   Hold-⌘ ≥600ms shows `CheatsheetView`; the debounce hides quick chords but
@@ -273,17 +274,10 @@ A terminal that runs arbitrary shells will trip every macOS privacy surface. Thr
   that the agent only writes while it believes it's being watched —
   `probeScript` touches the heartbeat file every poll to keep that true, but
   the agent-side feature gate must also be on (silently absent otherwise).
-  CC doesn't reliably rewrite `tempo` once you reply, so `tempo == "blocked"`
-  can outlive the block on disk — `paneStatus` therefore lets live OSC 9;4
-  `.working` mask `.blocked`, and `isBlocked` discounts a stale `tempo` via a
-  watermark: `mergeCC` stamps `ccBlockedSince[ref]` (local clock) on first
-  sight or when that ref's `tempo`/`needs` change, and `isBlocked` requires
-  that stamp to postdate the *freshest* `lastWorkingAt` across any surface
-  bound to the ref. Per-ref + local-clock so sibling churn / leaked surfaces /
-  ssh clock skew can't false-positive it. `activate(tab:)` calls `ackBlocked`
-  (writes `.distantPast`) so clicking a red tab clears it until the next real
-  classifier edge; `ccBlockedSince` survives the showCC toggle so off→on
-  doesn't re-red discounted panes.
+  CC doesn't reliably rewrite `tempo` once you reply; `PaneMachine.apply`
+  handles that by event ordering (`.progress` clears `blocked`, only a
+  *changed* classifier `Sig` re-sets it, `.viewed` clears) — see
+  `PaneMachineTests` for the cases that used to need a Date-watermark.
 - Sidebar mono font reads `window-title-font-family` (not `font-family` — that's a
   `RepeatableString` and `c_get.zig` can't return it without an upstream `cval()`).
   Set `window-title-font-family = <terminal font>` for matched typography.
