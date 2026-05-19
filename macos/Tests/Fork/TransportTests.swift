@@ -139,7 +139,7 @@ struct TransportTests {
         // JSON-encoded name (quote escaped) shq'd as one printf arg; sock shq'd after `--`.
         // `.sortedKeys` → alphabetical, deterministic.
         #expect(s.contains(#"'{"action":"rename","name":"a\"b","type":"control"}'"#))
-        #expect(s.hasSuffix(#"| nc -NU -- '/tmp/$(x).sock'"#))
+        #expect(s.hasSuffix(#"| nc -w 1 -U -- '/tmp/$(x).sock'"#))
     }
 
     @Test func lenientHoverCommandsDecode() throws {
