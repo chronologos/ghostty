@@ -59,10 +59,6 @@ struct SidebarView: View {
         .background(.ultraThinMaterial)
         .task { registry.setCCProbeEnabled(showCC) }
         .onChange(of: showCC) { registry.setCCProbeEnabled($0) }
-        // focusMode swaps the entire focusSection ↔ ForEach(hosts) subtree under
-        // withAnimation — rows are diffed out without geometry change, so per-row
-        // `.onHover(false)` doesn't fire and `hoveredPane` would stay armed.
-        .onChange(of: focusMode) { _ in controller?.hoveredPane = nil }
         .onAppear {
             flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { ev in
                 // Local monitors are app-wide; QuickTerminal bypasses the fork seam, so
@@ -381,15 +377,16 @@ struct SidebarView: View {
         .simultaneousGesture(TapGesture(count: 2).onEnded { beginRename(tab) })
         .contextMenu {
             Button("Rename Tab…") { beginRename(tab) }
-            Button(tab.pinned ? "Unpin Tab" : "Pin Tab") { registry.setPinned(tab.id, !tab.pinned) }
+            Button((tab.pinned ? "Unpin Tab" : "Pin Tab") + " (⌘⌥P)") {
+                registry.setPinned(tab.id, !tab.pinned)
+            }
             if focusMode {
                 Button("Hide from Focus") { registry.dismissFromFocus(tab.id) }
             }
-            Button(tab.collapsed ? "Expand Panes" : "Minimize Panes") {
-                registry.setCollapsed(tab.id, !tab.collapsed)
-            }
             mergeIntoMenu(tab)
+            Divider()
             Button("Close Tab") { controller?.closeForkTab(tab.id) }
+            Button("Kill All & Close Tab…", role: .destructive) { controller?.confirmKill(tab) }
         }
     }
 
@@ -472,12 +469,16 @@ struct SidebarView: View {
                         // Replaces PaneLabel's zmx-name subtitle (suppressed via the
                         // `compact || showCC` above) — net zero lines. Fixed-height slot so
                         // focus-mode reorder doesn't gap rows where `ccLine` is empty.
-                        ccLine(live: live, cached: tab.ccNames[ref.key], fallback: ref.name)
+                        // `cached` only for placeholder rows (no surface yet) — on a hydrated
+                        // pane where CC has exited it'd show the dead session's name as stale.
+                        ccLine(live: live,
+                               cached: surface == nil ? tab.ccNames[ref.key] : nil,
+                               fallback: ref.name)
                             .frame(height: 12, alignment: .topLeading)
                     }
                 }
                 Spacer()
-                switch registry.paneStatus(ref: ref, surfaceID: surface?.id) {
+                switch registry.dot(ref: ref) {
                 case .blocked:
                     Circle().fill(.red).frame(width: 6, height: 6)
                         .padding(.trailing, 6)
@@ -490,7 +491,7 @@ struct SidebarView: View {
                         .padding(.trailing, 6).help("Finished — unread")
                 case nil: EmptyView()
                 }
-                if let surface, registry.watchedSurfaces.contains(surface.id) {
+                if registry.panes[ref]?.watched == true {
                     Image(systemName: "eye")
                         .font(.system(size: 10)).foregroundStyle(.secondary)
                         .padding(.trailing, 4)
@@ -542,30 +543,12 @@ struct SidebarView: View {
         .simultaneousGesture(TapGesture(count: 2).onEnded {
             registry.setRenaming(.pane(tab.id, name: ref.key))
         })
-        // Adjacent rows in a `VStack(spacing: 0)` can deliver B-enter before A-exit; an
-        // unguarded nil here would clear B and leave hover-keys dead while B is still
-        // visually highlighted (Hovering wrapper's @State is independent).
-        .onHover { entering in
-            if entering { controller?.hoveredPane = (tab.id, index, ref, surface?.id) }
-            else if let h = controller?.hoveredPane, h.tab == tab.id, h.index == index {
-                controller?.hoveredPane = nil
-            }
-        }
-        // `.onHover(false)` doesn't fire when the row is diffed out — `.onDisappear` does.
-        // Covers whole-tab removal (collapse/dismiss/close) where every row fires; for
-        // single-pane removal the offset-keyed ForEach fires this on the *last* row only,
-        // so `handleHoverKey` also guards `ref ∈ tab.tree`.
-        .onDisappear {
-            if let h = controller?.hoveredPane, h.tab == tab.id, h.index == index {
-                controller?.hoveredPane = nil
-            }
-        }
-        .contextMenu { paneContextMenu(tab, ref: ref, tag: tag, surface: surface) }
+        .contextMenu { paneContextMenu(tab, ref: ref, tag: tag) }
         .popover(isPresented: Binding(
             get: { registry.taggingPane.map { $0 == (tab.id, ref.key) } ?? false },
-            // Only clear shared state if it still points at *this* row — hover-"t" on row B
-            // flips row A's getter false, and A's NSPopover-dismiss callback would otherwise
-            // race B's open by nilling `taggingPane` from under it.
+            // Only clear shared state if it still points at *this* row — opening B's popover
+            // (context-menu "New Tag…") flips A's getter false, and A's NSPopover-dismiss
+            // callback would otherwise race B's open by nilling `taggingPane` from under it.
             set: { if !$0, registry.taggingPane.map({ $0 == (tab.id, ref.key) }) ?? false {
                 registry.taggingPane = nil
             } }
@@ -578,59 +561,29 @@ struct SidebarView: View {
     }
 
     @ViewBuilder
-    private func paneContextMenu(_ tab: TabModel, ref: SessionRef, tag: PaneTag?,
-                                 surface: Ghostty.SurfaceView?) -> some View {
-        // ⌥-right-click appends the bare-letter hover key to items that have one. Read at
-        // menu-build time; NSMenu is modal so releasing ⌥ while open won't re-render.
-        let hk: (String, String) -> String = { optionHeld ? "\($0)    \($1)" : $0 }
-        return Group {
-            Section {
-                Button("Rename Pane…") { registry.setRenaming(.pane(tab.id, name: ref.key)) }
-                Menu("Tag") {
-                    ForEach(recentTags, id: \.self) { t in
-                        Button { registry.setPaneTag(tab: tab.id, name: ref.key, to: t) } label: {
-                            Label(t.text, systemImage: "circle.fill")
-                                .foregroundStyle(Color(hue: t.hue, saturation: 0.6, brightness: 0.5))
-                        }
-                    }
-                    if !recentTags.isEmpty { Divider() }
-                    Button(hk("New Tag…", "T")) { registry.taggingPane = (tab.id, ref.key) }
-                    if tag != nil {
-                        Button(hk("Clear Tag", "C")) {
-                            registry.setPaneTag(tab: tab.id, name: ref.key, to: nil)
-                        }
+    /// Pane-scoped actions only — tab-scoped actions live on the tab heading menu.
+    private func paneContextMenu(_ tab: TabModel, ref: SessionRef, tag: PaneTag?) -> some View {
+        Group {
+            Button("Rename Pane…") { registry.setRenaming(.pane(tab.id, name: ref.key)) }
+            Menu("Tag") {
+                ForEach(recentTags, id: \.self) { t in
+                    Button { registry.setPaneTag(tab: tab.id, name: ref.key, to: t) } label: {
+                        Label(t.text, systemImage: "circle.fill")
+                            .foregroundStyle(Color(hue: t.hue, saturation: 0.6, brightness: 0.5))
                     }
                 }
-                if let surface {
-                    Button(registry.watchedSurfaces.contains(surface.id) ? "Stop Watching" : "Watch (⌘⌥A)") {
-                        controller?.toggleWatch(on: surface)
-                    }
-                    Button(hk("Force Repaint", "R")) { forkWigglePane(surface) }
-                }
-                if registry.ccLive[ref.hostID]?[ref.key]?.sock != nil {
-                    Button(hk("Set CC Name to '\(tab.paneLabels[ref.key] ?? ref.name)'", "N")) {
-                        controller?.syncCCName(tab: tab, ref: ref)
-                    }
+                if !recentTags.isEmpty { Divider() }
+                Button("New Tag…") { registry.taggingPane = (tab.id, ref.key) }
+                if tag != nil {
+                    Button("Clear Tag") { registry.setPaneTag(tab: tab.id, name: ref.key, to: nil) }
                 }
             }
-            Section {
-                Button("Rename Tab…") { beginRename(tab) }
-                Button(hk(tab.pinned ? "Unpin Tab" : "Pin Tab", "P")) {
-                    registry.setPinned(tab.id, !tab.pinned)
+            if registry.ccLive[ref.hostID]?[ref.key]?.sock != nil {
+                Button("Set CC Name to '\(tab.paneLabels[ref.key] ?? ref.name)'") {
+                    controller?.syncCCName(tab: tab, ref: ref)
                 }
-                if focusMode {
-                    Button(hk("Hide from Focus", "H")) { registry.dismissFromFocus(tab.id) }
-                }
-                Button("Minimize Panes") { registry.setCollapsed(tab.id, true) }
-                movePaneMenu(tab, ref: ref)
             }
-            Section {
-                Button("Close Tab") { controller?.closeForkTab(tab.id) }
-                Button(hk("Kill This Session…", "K"), role: .destructive) {
-                    controller?.confirmKillPane(tab: tab, ref: ref, surface: surface)
-                }
-                Button("Kill All & Close Tab…", role: .destructive) { controller?.confirmKill(tab) }
-            }
+            movePaneMenu(tab, ref: ref)
         }
     }
 
