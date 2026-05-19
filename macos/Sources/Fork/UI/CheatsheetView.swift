@@ -19,15 +19,16 @@ struct CheatsheetView: View {
         ("⌘⌥1–9", "Jump to host"),
         ("⌘[ / ⌘]", "Prev / next split"),
         ("⌘⌥A", "Watch pane (notify on idle)"),
+        ("⌘⇧R", "Repaint pane"),
+        ("⌘⌥P", "Pin / unpin tab"),
         ("⌘⇧B", "Toggle sidebar"),
-        ("hover + k/r/c/t/p/n/h", "kill / repaint / clear-tag / tag / pin / sync-cc-name / hide"),
     ]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(Self.rows, id: \.0) { k, l in row(k, l) }
             ForEach(hoverCommands.sorted { $0.key < $1.key }, id: \.key) { key, hc in
-                row("hover + \(key)", hc.cmd.joined(separator: " "))
+                row("⌘K → \(hc.cmd.first ?? key)", hc.cmd.joined(separator: " "))
             }
         }
         .padding(16)
