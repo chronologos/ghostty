@@ -86,8 +86,8 @@ Fork/
     SidebarView.swift          host sections (drag-reorder); per-pane rows show paneLabel ›
                                surface.title › ref.name; optional tab-title heading + collapse
                                chevron; ⌘I/⌘⇧I → inline rename; tag pills; compact toggle
-                               (@AppStorage) hides age + subtitle; focus mode prefixes each tab
-                               with its host's SF-Symbol badge
+                               (@AppStorage) hides age + subtitle; focus mode wraps each tab
+                               in a ForkCard with a ⌘N + HostDot + host-label caption row
     TagEditView.swift          right-click "Tag…" popover (text + 8 hue swatches)
     NewSessionView.swift       ⌘T sheet
     SplitPickerView.swift      ⌘D picker (new vs attach-existing)

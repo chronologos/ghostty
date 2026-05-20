@@ -86,7 +86,7 @@ struct SplitPickerView: View {
                 SessionMetaLabel(entry: e)
             }
             .padding(.horizontal, 6).padding(.vertical, 3)
-            .background(sel == i ? Color.accentColor.opacity(0.25) : .clear,
+            .background(sel == i ? Theme.selectedRow : .clear,
                         in: RoundedRectangle(cornerRadius: 4))
             .contentShape(Rectangle())
         }
