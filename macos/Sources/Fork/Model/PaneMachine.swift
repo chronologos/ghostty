@@ -15,14 +15,19 @@ struct PaneMachine: Equatable {
     var phase: Phase = .idle
     var watched  = false   // ⌘⌥A one-shot
     var notified = false   // banner-until-viewed gate
-    var blocked  = false   // probe says so AND no `.progress` since AND not `.viewed`
+    var blocked  = false   // probe `tempo` says so AND no `.progress`/`busy` since AND not `.viewed`
+    var ccBusy   = false   // probe `status == "busy"` — fresher than `tempo`, masks `blocked`
+                           // the same way OSC `.progress` does (so a stale `tempo` can't
+                           // contradict a live `status` — the dot-vs-rail conflict)
     var blockSig: Sig?     // last classifier — survives `.viewed` so an unchanged
                            // probe doesn't re-edge after the user's looked
     var probeMissed = false // 2-strike for `.probeAbsent` (torn pid-file vs CC-exit)
 
-    /// What the sidebar / `rollup` / dock-badge read.
+    /// What the sidebar rail / `rollup` read. (The dock badge reads `phase`/`ccBusy`
+    /// directly — `dot` demotes `.waiting` to `.blocked`, which would drop a
+    /// needs-input pane from the count.)
     var dot: PaneState? {
-        phase == .working ? .working
+        phase == .working || ccBusy ? .working
             : blocked ? .blocked
             : phase == .waiting ? .waiting : nil
     }
@@ -52,17 +57,21 @@ struct PaneMachine: Equatable {
             blocked = false; notified = false
         case .watch(let on):
             watched = on
-        case .probe(let isBlocked, let sig):
-            probeMissed = false
-            if !isBlocked { blocked = false }
+        case .probe(let isBlocked, let busy, let sig):
+            probeMissed = false; ccBusy = busy
+            if !isBlocked || busy { blocked = false }
             else if sig != blockSig { blocked = true }   // edge: new classifier output
             blockSig = isBlocked ? sig : nil
+        case .probeStopped:
+            // Poll torn down (showCC off / host removed). `blocked` survives — it has other
+            // clear paths (`.viewed`/`.progress`) — but `ccBusy`'s only writer is the poll.
+            ccBusy = false
         case .probeAbsent:
             // Key not in this tick's `result`. First miss = gap (torn pid-file / CC
             // restart) — keep the latch. Second consecutive miss = CC exited — clear so
             // a dead session's red dot doesn't persist.
             if probeMissed { blocked = false; blockSig = nil }
-            probeMissed = true
+            probeMissed = true; ccBusy = false
         case .detached:
             // Last surface gone. Only `phase` is OSC-derived (stale without a surface);
             // `watched`/`notified` are user-intent and `blocked`/`blockSig` are
@@ -79,8 +88,9 @@ enum PaneEvent {
     case bell                         // BEL / OSC 133;D
     case viewed                       // `activate(tab:)`
     case watch(Bool)                  // ⌘⌥A
-    case probe(blocked: Bool, sig: PaneMachine.Sig)
+    case probe(blocked: Bool, busy: Bool, sig: PaneMachine.Sig)
     case probeAbsent                  // ref in-tree but not in this tick's `result`
+    case probeStopped                 // poll cancelled — clear probe-derived transients
     case detached                     // last surface for this ref unobserved
 }
 #endif

@@ -14,8 +14,9 @@ struct SidebarView: View {
     @AppStorage("forkSidebarCompact") private var compact = false
     @AppStorage(SessionRegistry.kFilterTagged) private var filterTagged = false
     @AppStorage(SessionRegistry.kFocusMode) private var focusMode = false
+    @AppStorage(SessionRegistry.kFocusCutoffHours) private var cutoffHours = 16.0
+    @State private var showCutoffPopover = false
     @AppStorage("forkSidebarShowCC") private var showCC = false
-    @Environment(\.colorScheme) private var scheme
     /// ⌥-hold peeks the details view (`isCompact` below); ⌥⌥ toggles `compact` itself.
     /// Own monitor (not `navMonitor`) so this stays @State and doesn't churn the registry's
     /// `objectWillChange` → debounce-save on every modifier tap.
@@ -23,8 +24,6 @@ struct SidebarView: View {
     @State private var lastOptionPress: Date?
     @State private var flagsMonitor: Any?
 
-    private let clay = Color(red: 0xD9/255, green: 0x77/255, blue: 0x57/255)
-    private var dark: Bool { scheme == .dark }
     private var fontFamily: String? { controller?.ghostty.config.forkFontFamily }
     private func mono(_ s: CGFloat, _ w: Font.Weight = .regular) -> Font { forkMono(s, w, fontFamily) }
     /// Single source for the details view: header button writes `compact`, ⌥-hold transiently
@@ -103,17 +102,30 @@ struct SidebarView: View {
             }
             iconButton(filterTagged ? "tag.fill" : "tag",
                        help: filterTagged ? "Show all" : "Tagged only",
-                       tint: filterTagged ? clay : nil) {
+                       tint: filterTagged ? Theme.clay : nil) {
                 withAnimation(.snappy(duration: 0.12)) { filterTagged.toggle() }
             }
-            iconButton("scope",
-                       help: focusMode ? "All hosts" : "Focus (recent only)",
-                       tint: focusMode ? clay : nil) {
-                withAnimation(.snappy(duration: 0.12)) { focusMode.toggle() }
-            }
+            // Not `iconButton` — macOS `Button` swallows mouseDown so `.onLongPressGesture`
+            // on it never fires. Plain Image + tap/long-press composes exclusively.
+            Image(systemName: "scope").font(.system(size: 12))
+                .foregroundStyle(focusMode ? Theme.clay : .secondary)
+                .frame(width: 24, height: 24).contentShape(Rectangle())
+                .onTapGesture {
+                    withAnimation(.snappy(duration: 0.12)) { focusMode.toggle() }
+                }
+                .onLongPressGesture(minimumDuration: 0.4) { showCutoffPopover = true }
+                .popover(isPresented: $showCutoffPopover, arrowEdge: .top) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Show tabs from last \(Int(cutoffHours))h").font(.caption)
+                        Slider(value: $cutoffHours, in: 1...64, step: 1).frame(width: 180)
+                    }.padding(12)
+                }
+                .help(focusMode ? "All hosts"
+                                : "Focus (last \(Int(cutoffHours))h) — long-press to adjust")
+                .modifier(HoverHighlight())
             iconButton("sparkle",
                        help: showCC ? "Hide Claude session names" : "Show Claude session names",
-                       tint: showCC ? clay : nil) {
+                       tint: showCC ? Theme.clay : nil) {
                 withAnimation(.snappy(duration: 0.12)) { showCC.toggle() }
             }
             Spacer()
@@ -145,48 +157,70 @@ struct SidebarView: View {
         // attaching to the outer body VStack would also animate host-mode reflow.
         return VStack(alignment: .leading, spacing: 4) {
             if tabs.isEmpty {
-                Text(filterTagged ? "No tagged panes" : "Nothing in the last 16h")
+                Text(filterTagged ? "No tagged panes" : "Nothing in the last \(Int(cutoffHours))h")
                     .font(mono(11)).foregroundStyle(.secondary)
                     .padding(.horizontal, 16).padding(.top, 12)
             } else {
                 ForEach(Array(tabs.enumerated()), id: \.element.id) { i, tab in
-                    HStack(alignment: .top, spacing: 6) {
-                        ZStack(alignment: .topTrailing) {
-                            // Digit hint takes the badge slot — only fixed-width leading
-                            // cell that's never text; a trailing overlay collides with the
-                            // age column on tabs without a heading row.
-                            if !isCompact, let host = registry.host(id: tab.hostID) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    keyHint(i < 9 ? "⌘\(i + 1)" : " ")
-                                    Text(host.label)
-                                        .font(mono(8)).foregroundStyle(host.accent)
-                                        .lineLimit(1)
+                    VStack(alignment: .leading, spacing: 3) {
+                        // ⌘N + host on its own row above the tab — frees the ~56pt leading
+                        // column that was truncating pane titles. Compact mode keeps the
+                        // tiny dot inline (single row).
+                        if !isCompact, let host = registry.host(id: tab.hostID) {
+                            // ⌘N left, dot+host right — caption recedes behind the heading.
+                            HStack(spacing: 6) {
+                                // No empty pill on rows 10+ — the Spacer handles alignment.
+                                if i < 9 { keyHint("⌘\(i + 1)") }
+                                if tab.pinned {
+                                    Image(systemName: "pin.fill")
+                                        .font(.system(size: 7)).foregroundStyle(.secondary)
                                 }
-                                .frame(maxWidth: 56, alignment: .leading)
-                            } else {
+                                Spacer()
+                                HostDot(host: host, size: 7)
+                                Text(host.label)
+                                    .font(mono(9)).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                            .contentShape(Rectangle())
+                            .contextMenu { tabContextMenu(tab) }
+                            tabRow(tab)
+                        } else {
+                            HStack(alignment: .top, spacing: 6) {
                                 hostBadge(tab.hostID)
+                                    .overlay(alignment: .topTrailing) {
+                                        if tab.pinned {
+                                            Image(systemName: "pin.fill")
+                                                .font(.system(size: 6)).foregroundStyle(.secondary)
+                                                .offset(x: 2, y: 1)
+                                        }
+                                    }
+                                tabRow(tab)
                             }
-                            if tab.pinned {
-                                Image(systemName: "pin.fill")
-                                    .font(.system(size: 6)).foregroundStyle(.secondary)
-                                    .offset(x: 2, y: 1)
-                            }
+                            // Compact rows have no caption line — without this, a
+                            // default-titled single-pane tab (no `tabHeading` either) has
+                            // no tab-level right-click target at all.
+                            .contextMenu { tabContextMenu(tab) }
                         }
-                        tabRow(tab)
                     }
-                    .padding(.horizontal, 8)
+                    .modifier(ForkCard())
                 }
             }
         }
         .animation(.snappy(duration: 0.2), value: tabs.map(\.id))
     }
 
-    /// Worst-child rollup indicator for collapsed headers (host/tab). Mirrors `paneRow`'s
-    /// per-pane switch but without per-pane help text — the parent doesn't know which child.
+    private func tagButton(_ t: PaneTag, tab: TabModel.ID, ref: String,
+                           prefix: String = "") -> some View {
+        Button { registry.setPaneTag(tab: tab, name: ref, to: t) } label: {
+            Label(prefix + t.text, systemImage: "circle.fill").foregroundStyle(Theme.tag(t.hue))
+        }
+    }
+
+    /// Worst-child rollup for collapsed headers — compact dot/spinner; the per-row indicator
+    /// is `StatusRail` (right-edge anchored, doesn't fit inline here).
     @ViewBuilder
     private func stateDot(_ s: PaneState?, accent: Color) -> some View {
         switch s {
-        case .blocked: Circle().fill(.red).frame(width: 6, height: 6).help("Blocked — needs input")
+        case .blocked: Circle().fill(Theme.blocked).frame(width: 6, height: 6).help("Blocked — needs input")
         case .waiting: Circle().fill(accent).frame(width: 6, height: 6).help("Finished — unread")
         case .working: ProgressView().controlSize(.mini).scaleEffect(0.6)
         case nil: EmptyView()
@@ -197,7 +231,7 @@ struct SidebarView: View {
         Text(chord)
             .font(mono(8, .semibold)).foregroundStyle(.secondary)
             .padding(.horizontal, 4).padding(.vertical, 1)
-            .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 3))
+            .background(Theme.chipBg, in: RoundedRectangle(cornerRadius: 3))
     }
 
     private func hostBadge(_ id: ForkHost.ID) -> some View {
@@ -281,13 +315,7 @@ struct SidebarView: View {
         VStack(alignment: .leading, spacing: 2) {
             ForEach(tabs) { tab in tabRow(tab) }
         }
-        .padding(6)
-        .background(dark ? Color.black.opacity(0.18)
-                         : Color(nsColor: .controlBackgroundColor).opacity(0.6),
-                    in: RoundedRectangle(cornerRadius: 6))
-        .overlay(RoundedRectangle(cornerRadius: 6)
-            .stroke(Color.secondary.opacity(dark ? 0.15 : 0.1), lineWidth: 0.5))
-        .padding(.horizontal, 8)
+        .modifier(ForkCard(fill: Theme.hostCardBg, hPad: 8))
         .transition(.opacity)
     }
 
@@ -329,7 +357,7 @@ struct SidebarView: View {
 
     private func tabHeading(_ tab: TabModel, renaming: Bool, active: Bool,
                             paneCount: Int) -> some View {
-        let accent = registry.host(id: tab.hostID)?.accent ?? Color.secondary
+        let accent = Theme.hostAccent(registry.host(id: tab.hostID))
         let toggle = {
             withAnimation(.snappy(duration: 0.15)) {
                 registry.setCollapsed(tab.id, !tab.collapsed)
@@ -365,19 +393,25 @@ struct SidebarView: View {
             controller?.activate(tab: tab.id)
         }
         .simultaneousGesture(TapGesture(count: 2).onEnded { beginRename(tab) })
-        .contextMenu {
-            Button("Rename Tab…") { beginRename(tab) }
-            Button((tab.pinned ? "Unpin Tab" : "Pin Tab") + " (⌘⌥P)") {
-                registry.setPinned(tab.id, !tab.pinned)
-            }
-            if focusMode {
-                Button("Hide from Focus") { registry.dismissFromFocus(tab.id) }
-            }
-            mergeIntoMenu(tab)
-            Divider()
-            Button("Close Tab") { controller?.closeForkTab(tab.id) }
-            Button("Kill All & Close Tab…", role: .destructive) { controller?.confirmKill(tab) }
+        .contextMenu { tabContextMenu(tab) }
+    }
+
+    /// Tab-scoped actions. Attached to `tabHeading` AND the focus-mode caption row — most
+    /// single-pane tabs have no heading (`title == first ref name`), so without the caption
+    /// attachment they'd have no tab-level right-click target at all.
+    @ViewBuilder
+    private func tabContextMenu(_ tab: TabModel) -> some View {
+        Button("Rename Tab…") { beginRename(tab) }
+        Button((tab.pinned ? "Unpin Tab" : "Pin Tab") + " (⌘⌥P)") {
+            registry.setPinned(tab.id, !tab.pinned)
         }
+        if focusMode {
+            Button("Hide from Focus") { registry.dismissFromFocus(tab.id) }
+        }
+        mergeIntoMenu(tab)
+        Divider()
+        Button("Close Tab") { controller?.closeForkTab(tab.id) }
+        Button("Kill All & Close Tab…", role: .destructive) { controller?.confirmKill(tab) }
     }
 
     /// "Move Pane to ▸" — move a single pane to a new tab or another same-host tab.
@@ -425,7 +459,7 @@ struct SidebarView: View {
         let tag = tab.paneTags[ref.key]
         let renaming = registry.renaming == .pane(tab.id, name: ref.key)
         let live = showCC ? registry.ccLive[tab.hostID]?[ref.key] : nil
-        let accent = registry.host(id: tab.hostID)?.accent ?? clay
+        let accent = Theme.hostAccent(registry.host(id: tab.hostID))
         // showCC swaps the age column from "when I last focused this pane" to "when CC last
         // turned". `ccLive[].updatedAt` is stale by design (`Info.==` excludes it), so the
         // closure reads the non-@Published `ccUpdatedAt` mirror — fresh on each 30s tick.
@@ -437,8 +471,8 @@ struct SidebarView: View {
                     if let spine {
                         TimelineView(.periodic(from: .now, by: 30)) { _ in
                             Spine(first: spine.first, last: spine.last)
-                                .stroke(active ? spineHeat(tab.lastActive.values.max())
-                                               : Color.secondary.opacity(0.3), lineWidth: 1)
+                                .stroke(active ? Theme.spineHeat(tab.lastActive.values.max())
+                                               : Theme.spineHeat(nil), lineWidth: 1)
                         }
                     } else {
                         Color.clear
@@ -468,19 +502,6 @@ struct SidebarView: View {
                     }
                 }
                 Spacer()
-                switch registry.dot(ref: ref) {
-                case .blocked:
-                    Circle().fill(.red).frame(width: 6, height: 6)
-                        .padding(.trailing, 6)
-                        .help(live?.needs ?? live?.waitingFor ?? "Needs your input")
-                case .working:
-                    ProgressView().controlSize(.mini).scaleEffect(0.6)
-                        .padding(.trailing, 4)
-                case .waiting:
-                    Circle().fill(accent).frame(width: 6, height: 6)
-                        .padding(.trailing, 6).help("Finished — unread")
-                case nil: EmptyView()
-                }
                 if registry.panes[ref]?.watched == true {
                     Image(systemName: "eye")
                         .font(.system(size: 10)).foregroundStyle(.secondary)
@@ -488,7 +509,7 @@ struct SidebarView: View {
                         .help("Watching — ⌘⌥A to disarm")
                 }
                 if let tag {
-                    let c = Color(hue: tag.hue, saturation: 0.6, brightness: dark ? 0.55 : 0.45)
+                    let c = Theme.tag(tag.hue)
                     HStack(spacing: 4) {
                         Circle().strokeBorder(c, lineWidth: 1.5)
                             .background(Circle().fill(hovered ? c : .clear))
@@ -509,23 +530,20 @@ struct SidebarView: View {
                     TimelineView(.periodic(from: .now, by: 30)) { _ in
                         let a = age()
                         Text(a?.shortAge ?? "")
-                            .font(mono(9)).foregroundStyle(ageStyle(a))
+                            .font(mono(9)).foregroundStyle(Theme.ageStyle(a))
                             .frame(width: 24, alignment: .trailing)
                     }
                 }
             }
             .padding(.trailing, 12).frame(minHeight: 28)
             .background(
-                focused ? clay.opacity(dark ? 0.14 : 0.20)
-                        : hovered ? Color.primary.opacity(0.06) : .clear,
+                focused ? Theme.selectedRow : hovered ? Theme.hover : .clear,
                 in: RoundedRectangle(cornerRadius: 5))
             .overlay(alignment: .trailing) {
                 // Anchored to the row (not the content flow) so it reads as a right border,
                 // not a pill competing with the tag circle for the same slot.
-                if showCC {
-                    CCStatusRail(status: live?.status, accent: accent)
-                        .help(live?.waitingFor ?? "")
-                }
+                StatusRail(state: registry.dot(ref: ref), accent: accent,
+                           blockedDetail: live?.needs ?? live?.waitingFor)
             }
             .contentShape(Rectangle())
         }
@@ -555,14 +573,11 @@ struct SidebarView: View {
     private func paneContextMenu(_ tab: TabModel, ref: SessionRef, tag: PaneTag?) -> some View {
         Group {
             Button("Rename Pane…") { registry.setRenaming(.pane(tab.id, name: ref.key)) }
+            // Top-3 recent tags inline (one click); the rest stay under the submenu.
+            ForEach(recentTags.prefix(3), id: \.self) { tagButton($0, tab: tab.id, ref: ref.key, prefix: "Tag: ") }
             Menu("Tag") {
-                ForEach(recentTags, id: \.self) { t in
-                    Button { registry.setPaneTag(tab: tab.id, name: ref.key, to: t) } label: {
-                        Label(t.text, systemImage: "circle.fill")
-                            .foregroundStyle(Color(hue: t.hue, saturation: 0.6, brightness: 0.5))
-                    }
-                }
-                if !recentTags.isEmpty { Divider() }
+                ForEach(recentTags.dropFirst(3), id: \.self) { tagButton($0, tab: tab.id, ref: ref.key) }
+                if recentTags.count > 3 { Divider() }
                 Button("New Tag…") { registry.taggingPane = (tab.id, ref.key) }
                 if tag != nil {
                     Button("Clear Tag") { registry.setPaneTag(tab: tab.id, name: ref.key, to: nil) }
@@ -623,21 +638,6 @@ struct SidebarView: View {
             }
     }
 
-    private func ageStyle(_ date: Date?) -> AnyShapeStyle {
-        switch date.map({ Date().timeIntervalSince($0) }) {
-        case .some(..<300):  return AnyShapeStyle(.primary)
-        case .some(..<3600): return AnyShapeStyle(.secondary)
-        default:             return AnyShapeStyle(.tertiary)
-        }
-    }
-
-    private func spineHeat(_ freshest: Date?) -> Color {
-        switch freshest.map({ Date().timeIntervalSince($0) }) {
-        case .some(..<300):  return .secondary
-        case .some(..<3600): return .secondary.opacity(0.6)
-        default:             return .secondary.opacity(0.35)
-        }
-    }
 
     private func commitRename() {
         switch registry.renaming {
@@ -713,18 +713,27 @@ private struct Hovering<Content: View>: View {
     }
 }
 
-/// Right-edge status pill — reads as a vertical heatmap down the sidebar. Host-accent hue so
-/// busy rows also signal *which* host without re-reading the badge. Fixed 3pt slot keeps the
-/// age/tag column aligned across rows with no live CC.
-private struct CCStatusRail: View {
-    let status: String?
+/// Right-edge status pill — reads as a vertical heatmap down the sidebar; host-accent hue so
+/// busy rows also signal *which* host. `PaneMachine.dot` is the single source of truth
+/// (probe `status` feeds it via `.probe(busy:)`), so `tempo`-vs-`status` can't render
+/// contradictory indicators on one row.
+private struct StatusRail: View {
+    let state: PaneState?
     let accent: Color
+    /// CC's `needs`/`waitingFor` when known — nil with showCC off (rail renders regardless).
+    var blockedDetail: String? = nil
     var body: some View {
+        // Help is per-state so a working/waiting/empty rail doesn't claim "needs input".
         Group {
-            switch status {
-            case "busy":    Pulsing { RoundedRectangle(cornerRadius: 1.5).fill(accent) }
-            case "waiting": RoundedRectangle(cornerRadius: 1.5).strokeBorder(accent, lineWidth: 1)
-            default:        Color.clear
+            switch state {
+            case .working: Pulsing { RoundedRectangle(cornerRadius: 1.5).fill(accent) }
+            case .waiting:
+                RoundedRectangle(cornerRadius: 1.5).strokeBorder(accent, lineWidth: 1)
+                    .help("Finished — unread")
+            case .blocked:
+                RoundedRectangle(cornerRadius: 1.5).fill(Theme.blocked)
+                    .help(blockedDetail ?? "Needs your input")
+            case nil:      Color.clear
             }
         }
         .frame(width: 3, height: 20)
@@ -748,7 +757,7 @@ private struct HoverHighlight: ViewModifier {
     @State private var hovered = false
     func body(content: Content) -> some View {
         content
-            .background(hovered ? Color.primary.opacity(0.06) : .clear,
+            .background(hovered ? Theme.hover : .clear,
                         in: RoundedRectangle(cornerRadius: 5))
             .onHover { hovered = $0 }
     }

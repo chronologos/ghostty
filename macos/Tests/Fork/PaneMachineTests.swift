@@ -52,11 +52,11 @@ struct PaneMachineTests {
     /// reply because watermark Dates were cross-referenced.)
     @Test func progressClearsBlocked_sameSigDoesNotReblock() {
         var m = PaneMachine()
-        m.apply(.probe(blocked: true, sig: s1))
+        m.apply(.probe(blocked: true, busy: false, sig: s1))
         #expect(m.dot == .blocked)
         m.apply(.progress)
         #expect(m.dot == .working)
-        m.apply(.probe(blocked: true, sig: s1))   // unchanged classifier
+        m.apply(.probe(blocked: true, busy: false, sig: s1))   // unchanged classifier
         #expect(m.blocked == false)
         _ = m.apply(.settled(isActive: false))
         #expect(m.dot == .waiting)                // not .blocked
@@ -67,22 +67,22 @@ struct PaneMachineTests {
     /// `mergeCC` only emits `.probe` for keys present in `result`.
     @Test func genuineUnblockThenSameSigReblocks() {
         var m = PaneMachine()
-        m.apply(.probe(blocked: true, sig: s1)); m.apply(.viewed)
-        m.apply(.probe(blocked: false, sig: .init(tempo: "active", needs: nil)))
+        m.apply(.probe(blocked: true, busy: false, sig: s1)); m.apply(.viewed)
+        m.apply(.probe(blocked: false, busy: false, sig: .init(tempo: "active", needs: nil)))
         #expect(m.blockSig == nil)
-        m.apply(.probe(blocked: true, sig: s1))
+        m.apply(.probe(blocked: true, busy: false, sig: s1))
         #expect(m.dot == .blocked)
     }
 
     /// Ack: viewed clears blocked; same sig doesn't re-edge; new sig does.
     @Test func viewedAcksBlocked_newSigReblocks() {
         var m = PaneMachine()
-        m.apply(.probe(blocked: true, sig: s1))
+        m.apply(.probe(blocked: true, busy: false, sig: s1))
         m.apply(.viewed)
         #expect(m.blocked == false)
-        m.apply(.probe(blocked: true, sig: s1))
+        m.apply(.probe(blocked: true, busy: false, sig: s1))
         #expect(m.blocked == false)               // blockSig survived .viewed
-        m.apply(.probe(blocked: true, sig: s2))
+        m.apply(.probe(blocked: true, busy: false, sig: s2))
         #expect(m.dot == .blocked)
     }
 
@@ -90,7 +90,7 @@ struct PaneMachineTests {
         var m = PaneMachine()
         m.apply(.progress); _ = m.apply(.settled(isActive: false))   // → notified
         m.apply(.watch(true))                                        // re-armed
-        m.apply(.probe(blocked: true, sig: s1)); m.apply(.progress)  // → .working, blockSig
+        m.apply(.probe(blocked: true, busy: false, sig: s1)); m.apply(.progress)  // → .working, blockSig
         m.apply(.detached)
         #expect(m.phase == .idle)
         #expect(m.watched && m.notified && m.blockSig == s1)   // ⌘W→⌘Z preserves
@@ -108,10 +108,10 @@ struct PaneMachineTests {
     /// 2-strike absent: first miss = gap (latch kept), second = exit (clear).
     @Test func probeAbsentTwoStrike() {
         var m = PaneMachine()
-        m.apply(.probe(blocked: true, sig: s1)); m.apply(.viewed)
+        m.apply(.probe(blocked: true, busy: false, sig: s1)); m.apply(.viewed)
         m.apply(.probeAbsent)
         #expect(m.blockSig == s1)         // gap — survives
-        m.apply(.probe(blocked: true, sig: s1))
+        m.apply(.probe(blocked: true, busy: false, sig: s1))
         #expect(m.blocked == false)       // ack held across the gap
         m.apply(.probeAbsent); m.apply(.probeAbsent)
         #expect(m.blockSig == nil && m.blocked == false)   // exit — cleared
@@ -119,13 +119,50 @@ struct PaneMachineTests {
 
     @Test func dotPrecedence() {
         var m = PaneMachine()
-        m.apply(.probe(blocked: true, sig: s1))
+        m.apply(.probe(blocked: true, busy: false, sig: s1))
         m.apply(.progress)
         #expect(m.dot == .working)      // working masks blocked (which .progress also cleared)
         _ = m.apply(.settled(isActive: false))
         #expect(m.dot == .waiting)
-        m.apply(.probe(blocked: true, sig: s2))
+        m.apply(.probe(blocked: true, busy: false, sig: s2))
         #expect(m.dot == .blocked)      // blocked masks waiting
+    }
+
+    /// `status == "busy"` masks a stale `tempo == "blocked"` the same way OSC does — the
+    /// dot-vs-rail conflict (red `.blocked` next to green busy-ring) closed by construction.
+    @Test func ccBusyMasksBlocked() {
+        var m = PaneMachine()
+        m.apply(.probe(blocked: true, busy: true, sig: s1))
+        #expect(m.dot == .working)
+        #expect(m.blocked == false)     // busy clears the latch, not just the projection
+        m.apply(.probe(blocked: true, busy: false, sig: s1))
+        #expect(m.dot == nil)           // same sig → no re-edge; busy gone → not working
+        m.apply(.probe(blocked: true, busy: false, sig: s2))
+        #expect(m.dot == .blocked)      // genuine new question still reds
+    }
+
+    /// Toggling the probe off while busy must not wedge `.working` — `ccBusy`'s only
+    /// writer is the poll, so `.probeStopped` is its only clear path. `blocked` survives.
+    @Test func probeStoppedClearsBusyKeepsBlocked() {
+        var m = PaneMachine()
+        m.apply(.probe(blocked: true, busy: true, sig: s1))
+        #expect(m.dot == .working)
+        m.apply(.probeStopped)
+        #expect(m.ccBusy == false && m.dot != .working)
+        var b = PaneMachine()
+        b.apply(.probe(blocked: true, busy: false, sig: s1))
+        b.apply(.probeStopped)
+        #expect(b.dot == .blocked)      // blocked latch survives poll teardown
+    }
+
+    /// `phase==.waiting && ccBusy` must not double-report: rail says working, so the badge
+    /// (which counts `dot == .waiting`) must not say "needs you".
+    @Test func dotWaitingExcludesBusy() {
+        var m = PaneMachine()
+        m.apply(.progress); _ = m.apply(.settled(isActive: false))
+        #expect(m.dot == .waiting)
+        m.apply(.probe(blocked: false, busy: true, sig: .init(tempo: nil, needs: nil)))
+        #expect(m.phase == .waiting && m.dot == .working)
     }
 }
 #endif

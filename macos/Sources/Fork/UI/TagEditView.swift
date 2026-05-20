@@ -24,9 +24,9 @@ struct TagEditView: View {
             HStack(spacing: 6) {
                 ForEach(Self.hues, id: \.self) { h in
                     Circle()
-                        .fill(Color(hue: h, saturation: 0.6, brightness: 0.5))
+                        .fill(Theme.tag(h))
                         .frame(width: 18, height: 18)
-                        .overlay(Circle().strokeBorder(.primary, lineWidth: hue == h ? 2 : 0))
+                        .overlay(Circle().strokeBorder(.primary, lineWidth: hue == h ? Theme.ringWidth : 0))
                         .onTapGesture { hue = h }
                 }
             }
