@@ -25,8 +25,13 @@ final class ForkNotify: NSObject, UNUserNotificationCenterDelegate {
                 wrapped = center.delegate
                 center.delegate = self
                 center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+                // Not `dot == .waiting`: `dot` demotes to `.blocked` when the probe flags
+                // the pane, which would drop it from the count one probe-tick after it
+                // settled — badge flashes then vanishes while the pane still needs input.
+                // `!ccBusy` is the only `dot`-ism that belongs here (a busy pane renders a
+                // working rail; badging "needs you" at the same time would contradict it).
                 let waiting = { (p: [SessionRef: PaneMachine]) in
-                    p.values.lazy.filter { $0.phase == .waiting }.count
+                    p.values.lazy.filter { $0.phase == .waiting && !$0.ccBusy }.count
                 }
                 // Upstream's `setDockBadge` (AppDelegate.swift:745) is the second writer; it's
                 // `private`, so on the 1→0 edge we re-derive its bell label locally instead

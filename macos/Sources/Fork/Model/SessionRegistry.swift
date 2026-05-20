@@ -24,6 +24,7 @@ final class SessionRegistry: ObservableObject {
     /// renaming the `@AppStorage` literal alone would silently desync ⌘1-9.
     static let kFilterTagged = "forkSidebarFilterTagged"
     static let kFocusMode = "forkSidebarFocus"
+    static let kFocusCutoffHours = "forkFocusCutoffHours"
 
     @Published private(set) var hosts: [ForkHost]
     @Published private(set) var tabs: [TabModel]
@@ -122,7 +123,10 @@ final class SessionRegistry: ObservableObject {
     /// visual-only; PR33's "blocked surfaces past the 16h cutoff and sorts above MRU"
     /// was removed at the user's request. Don't re-add.
     func focusTabs(taggedOnly: Bool) -> [TabModel] {
-        let cutoff = Date().addingTimeInterval(-16 * 3600)
+        // `> 0` covers unset (UserDefaults returns 0). The slider's `@AppStorage` write
+        // triggers a SidebarView re-render that re-calls this — no registry plumbing.
+        let h = UserDefaults.standard.double(forKey: Self.kFocusCutoffHours)
+        let cutoff = Date().addingTimeInterval(-(h > 0 ? h : 16) * 3600)
         let active = activeTabID
         func mru(_ t: TabModel) -> Date {
             t.id == active ? .distantFuture : (t.lastActive.values.max() ?? .distantPast)
@@ -284,8 +288,10 @@ final class SessionRegistry: ObservableObject {
             ccPoll?.cancel(); ccPoll = nil
             if !ccLive.isEmpty { ccLive = [:] }
             ccUpdatedAt = [:]
-            // `panes[ref].blockSig` survives toggle — clearing `ccLive` is harmless because
-            // the machine itself holds the edge-detect latch.
+            // `blocked`/`blockSig` survive toggle (the machine holds the edge-detect latch),
+            // but `ccBusy` must not — nothing else clears it once the poll stops, and `dot`
+            // would wedge at `.working` forever.
+            for ref in Array(panes.keys) { apply(ref, .probeStopped) }
         }
     }
 
@@ -318,7 +324,16 @@ final class SessionRegistry: ObservableObject {
     private func mergeCC(hostID: ForkHost.ID, result: [String: CCProbe.Info]?) {
         // `ccPoll == nil` ⇒ toggled off mid-tick; `host == nil` ⇒ removed mid-tick. Either
         // way the in-flight task-group can still drain a result here after the clear.
-        guard ccPoll != nil, host(id: hostID) != nil, let result else { return }
+        guard ccPoll != nil, host(id: hostID) != nil else { return }
+        // Probe failed (unreachable host / timeout / zero sessions) → keep last-known for
+        // `ccLive`/`blocked`, but `ccBusy` is a liveness signal with no other clear path —
+        // left set it wedges the rail at a permanent `.working` (same hazard as toggle-off).
+        guard let result else {
+            for ref in Set(tabs.lazy.filter({ $0.hostID == hostID }).flatMap(\.tree.leafRefs)) {
+                apply(ref, .probeStopped)
+            }
+            return
+        }
         // Emit `.probe` per *in-tree* ref on this host — `result` may include never-attached
         // sessions (would leak `panes`), and iterating `prev∪result` can't deliver a second
         // `.probeAbsent` because `prev = ccLive` already dropped the key after the first miss.
@@ -326,7 +341,7 @@ final class SessionRegistry: ObservableObject {
         // `Set` — dup-attached refs (PR26) would otherwise double-emit and burn both strikes.
         for ref in Set(tabs.lazy.filter({ $0.hostID == hostID }).flatMap(\.tree.leafRefs)) {
             if let info = result[ref.key] {
-                apply(ref, .probe(blocked: info.isBlocked,
+                apply(ref, .probe(blocked: info.isBlocked, busy: info.status == "busy",
                                   sig: .init(tempo: info.tempo, needs: info.needs)))
             } else { apply(ref, .probeAbsent) }
         }
