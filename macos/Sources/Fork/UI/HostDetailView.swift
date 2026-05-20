@@ -2,8 +2,8 @@
 import SwiftUI
 
 /// Detail pane for `HostsView`: rename · accent · live zmx session list with kill.
-/// No own chrome (padding/width/Done) — `HostsView` provides that. Edits apply on
-/// `.onDisappear` so switching selection in the master list saves.
+/// No own chrome (padding/width/Done) — `HostsView` provides that. Edits save eagerly on
+/// change — there is no Cancel.
 struct HostDetailView: View {
     let host: ForkHost
     let onRemove: () -> Void
@@ -55,7 +55,12 @@ struct HostDetailView: View {
             }
         }
         .task { await reload() }
-        .onDisappear(perform: save)
+        // Eager saves — `.onDisappear` never fires when `endSheet` releases the panel, and
+        // ⏎/focus-loss both miss the click-Done-while-still-editing path. Per-change is the
+        // only hook that covers every exit; the registry publish per keystroke is measured
+        // cheap (sidebar body re-eval, n≤20 hosts) and fork.json writes stay 500ms-debounced.
+        .onChange(of: label) { _ in save() }
+        .onChange(of: slot) { _ in save() }
     }
 
     @ViewBuilder private var sessionList: some View {
@@ -125,7 +130,7 @@ struct SlotPicker: View {
                       alignment: .leading, spacing: 4) {
                 ForEach(0..<ForkHost.slotCount, id: \.self) { s in
                     HostDot(slot: s, size: 18)
-                        .overlay(Circle().stroke(s == slot ? Color.primary : .clear, lineWidth: 1.5))
+                        .overlay(Circle().stroke(s == slot ? Color.primary : .clear, lineWidth: Theme.ringWidth))
                         .onTapGesture { slot = s }
                 }
             }

@@ -12,9 +12,9 @@ struct SessionMetaLabel: View {
                 Image(systemName: "person.fill").font(.system(size: 8))
                 Text("\(entry.clients)")
             }
-            .foregroundStyle(entry.clients > 0 ? Color.accentColor : Color.secondary)
+            .foregroundStyle(entry.clients > 0 ? Theme.clay : Color.secondary)
             Text("·").foregroundStyle(.secondary)
-            Text(entry.created.shortAge).foregroundStyle(.secondary)
+            Text(entry.created.shortAge).foregroundStyle(Theme.ageStyle(entry.created))
             if entry.external {
                 Text("ext").foregroundStyle(.secondary)
             }

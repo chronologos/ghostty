@@ -1092,7 +1092,11 @@ final class ForkWindowController: TerminalController {
             // gotcha). super.newSplit would spawn a non-zmx, unbound pane; swallow instead.
             return nil
         }
-        let placeholder = registry.uniqueAutoName(derivedFrom: registry.refs[oldView.id]?.name)
+        // External names bypass charset validation; seeding `uniqueAutoName` with one would
+        // mint a *managed* ref that fails `isValid` → scrubbed + orphaned on restart (same
+        // guard as `runPaneCommand`).
+        let seed = registry.refs[oldView.id].flatMap { $0.isValid ? $0.name : nil }
+        let placeholder = registry.uniqueAutoName(derivedFrom: seed)
         if ForkBootstrap.noPicker {
             return completeSplit(at: oldView, direction: direction, host: host,
                                  ref: .init(hostID: host.id, name: placeholder))
