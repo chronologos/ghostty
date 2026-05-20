@@ -15,25 +15,63 @@ struct ForkHost: Codable, Identifiable, Hashable {
     var label: String
     var transport: Transport
     var expanded: Bool = true
-    var accentHue: Double?
-    var icon: String?
+    /// `palette` index pair encoded as `a*N+b`; `a==b` ⇒ solid. Resolved at add/load time
+    /// (`resolveAutoSlots`) so deleting host A can't shift host B's color.
+    var accentSlot: Int?
 
     static let local = ForkHost(id: "local", label: "localhost", transport: .local)
 
-    init(id: String, label: String, transport: Transport,
-         expanded: Bool = true, accentHue: Double? = nil, icon: String? = nil) {
-        self.id = id; self.label = label; self.transport = transport
-        self.expanded = expanded; self.accentHue = accentHue; self.icon = icon
+    /// 10 hand-picked hue stops; rendered at sat 0.45 / bright 0.7. Slot space = N², solids
+    /// on the diagonal (`i*N+i`).
+    static let palette: [Double] = [0.00, 0.08, 0.13, 0.24, 0.34, 0.45, 0.54, 0.63, 0.74, 0.88]
+    static let N = palette.count, slotCount = N * N
+    static func pair(_ s: Int) -> (a: Int, b: Int) { ((s / N) % N, s % N) }
+    var slot: Int { accentSlot ?? Self.autoSlot(for: id, avoiding: []) }
+
+    /// FNV-1 → preferred solid, probe the diagonal (hosts 1–N get clean solids), then
+    /// linear over the whole space (revisits diagonals harmlessly). Storage is what makes
+    /// the result stable — see `resolveAutoSlots`.
+    static func autoSlot(for id: String, avoiding taken: Set<Int>) -> Int {
+        let h = Int(id.utf8.reduce(UInt32(2166136261)) { ($0 &* 16777619) ^ UInt32($1) })
+        let c = h % N
+        for i in 0..<N { let d = (c+i) % N; if !taken.contains(d*N + d) { return d*N + d } }
+        for i in 0..<slotCount { let s = (c*N + c + i) % slotCount; if !taken.contains(s) { return s } }
+        return c*N + c
     }
 
+    init(id: String, label: String, transport: Transport,
+         expanded: Bool = true, accentSlot: Int? = nil) {
+        self.id = id; self.label = label; self.transport = transport
+        self.expanded = expanded; self.accentSlot = accentSlot
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, label, transport, expanded, accentSlot
+        case accentHue   // phantom — legacy migration only; drop with `encode(to:)` once
+                         // every fork.json has been re-saved (one release)
+    }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
         label = try c.decode(String.self, forKey: .label)
         transport = try c.decode(Transport.self, forKey: .transport)
         expanded = try c.decodeIfPresent(Bool.self, forKey: .expanded) ?? true
-        accentHue = try c.decodeIfPresent(Double.self, forKey: .accentHue)
-        icon = try c.decodeIfPresent(String.self, forKey: .icon)
+        // Clamp — fork.json is hand-editable; an out-of-range slot would reach
+        // `palette[-1]` via `pair().a` (Swift `%` keeps the dividend's sign) and trap on
+        // launch. nil → `resolveAutoSlots` re-derives. Migrate legacy `accentHue` →
+        // nearest-palette solid.
+        if let s = try c.decodeIfPresent(Int.self, forKey: .accentSlot) {
+            accentSlot = (0..<Self.slotCount).contains(s) ? s : nil
+        } else if let h = try c.decodeIfPresent(Double.self, forKey: .accentHue) {
+            let i = Self.palette.enumerated().min { abs($0.1 - h) < abs($1.1 - h) }!.0
+            accentSlot = i * Self.N + i
+        }
+    }
+    func encode(to e: Encoder) throws {
+        var c = e.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id); try c.encode(label, forKey: .label)
+        try c.encode(transport, forKey: .transport); try c.encode(expanded, forKey: .expanded)
+        try c.encodeIfPresent(accentSlot, forKey: .accentSlot)
     }
 
     enum Transport: Codable, Hashable {
@@ -41,6 +79,9 @@ struct ForkHost: Codable, Identifiable, Hashable {
         case ssh(SSHTarget)
 
         var isLocal: Bool { if case .local = self { return true } else { return false } }
+        var displayConnection: String {
+            switch self { case .local: "local"; case .ssh(let t): t.connectionString }
+        }
     }
 
     struct SSHTarget: Codable, Hashable {
@@ -50,6 +91,15 @@ struct ForkHost: Codable, Identifiable, Hashable {
         var isValid: Bool { isValidIdent(host) && (user.map(isValidIdent) ?? true) }
 
         var connectionString: String { user.map { "\($0)@\(host)" } ?? host }
+
+        /// Inverse of `connectionString`. nil if `!isValid`.
+        init?(parsing s: String) {
+            let s = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            let p = s.split(separator: "@", maxSplits: 1).map(String.init)
+            self = p.count == 2 ? .init(user: p[0], host: p[1]) : .init(user: nil, host: s)
+            guard isValid else { return nil }
+        }
+        init(user: String? = nil, host: String) { self.user = user; self.host = host }
     }
 
     static func id(for target: SSHTarget) -> String {

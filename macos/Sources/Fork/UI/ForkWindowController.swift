@@ -786,19 +786,11 @@ final class ForkWindowController: TerminalController {
         }
     }
 
-    func showNewHostSheet() {
-        presentSheet(size: .init(width: 360, height: 210)) { [weak self] in
-            NewHostView(onDone: { self?.endSheet() })
-        }
-    }
-
-    /// `id` not `ForkHost`: the only call site is a `.contextMenu` closure, which on macOS
-    /// caches its content past body re-renders, so a captured struct goes stale and the
-    /// sheet opens showing the pre-edit hue/icon. The id is immutable; look up fresh here.
-    func showHostDetail(_ id: ForkHost.ID) {
-        guard let host = registry.host(id: id) else { return }
-        presentSheet(size: .init(width: 420, height: 420)) { [weak self] in
-            HostDetailView(host: host, onDone: { self?.endSheet() })
+    func showHostsSheet(select: ForkHost.ID? = nil) {
+        presentSheet(size: .init(width: 640, height: 560)) { [weak self] in
+            HostsView(select: select,
+                      onRemove: { id in self?.removeHost(id) },
+                      onDone: { self?.endSheet() })
         }
     }
 
