@@ -95,7 +95,7 @@ struct SidebarView: View {
     private var header: some View {
         HStack(spacing: 4) {
             iconButton("plus", help: "New tab") { controller?.showNewSessionSheet() }
-            iconButton("server.rack", help: "Add host") { controller?.showNewHostSheet() }
+            iconButton("server.rack", help: "Hosts") { controller?.showHostsSheet() }
             iconButton("sidebar.left", help: "Hide sidebar") { controller?.toggleSidebar() }
             iconButton(compact ? "rectangle.expand.vertical" : "rectangle.compress.vertical",
                        help: compact ? "Show details" : "Hide details") {
@@ -202,12 +202,8 @@ struct SidebarView: View {
 
     private func hostBadge(_ id: ForkHost.ID) -> some View {
         let h = registry.host(id: id)
-        return Image(systemName: h?.icon ?? "circle.fill")
-            .font(.system(size: 8))
-            .foregroundStyle(h?.accent ?? .secondary)
-            .frame(width: 12)
-            .padding(.top, 5)
-            .help(h?.label ?? "")
+        return HostDot(host: h, size: 9)
+            .frame(width: 12).padding(.top, 5).help(h?.label ?? "")
     }
 
     // MARK: Host section
@@ -237,15 +233,9 @@ struct SidebarView: View {
                     .foregroundStyle(.secondary)
                     .rotationEffect(.degrees(host.expanded ? 90 : 0))
                     .frame(width: 10)
-                Group {
-                    if let icon = host.icon {
-                        Image(systemName: icon).font(.system(size: 9, weight: .medium))
-                    } else {
-                        Circle().frame(width: 6, height: 6)
-                    }
-                }
-                .foregroundStyle(connected ? host.accent : Color.secondary.opacity(0.4))
-                .frame(width: 12)
+                HostDot(host: host, size: 10)
+                    .opacity(connected ? 1 : 0.3)
+                    .frame(width: 14)
                 Text(host.label)
                     .font(mono(12, .medium))
                     .foregroundStyle(connected ? .primary : .secondary)
@@ -275,7 +265,7 @@ struct SidebarView: View {
             Button("New Session on \(host.label)…") {
                 controller?.showSessionPicker(on: host)
             }
-            Button("Manage Host…") { controller?.showHostDetail(host.id) }
+            Button("Manage Host…") { controller?.showHostsSheet(select: host.id) }
             if host.id != ForkHost.local.id {
                 Divider()
                 Button("Remove Host", role: .destructive) {
@@ -815,12 +805,32 @@ extension Ghostty.Config {
 }
 
 extension ForkHost {
-    var accent: Color {
-        let hue = accentHue ?? {
-            let h = id.utf8.reduce(UInt32(2166136261)) { ($0 &* 16777619) ^ UInt32($1) }
-            return Double(h % 360) / 360
-        }()
-        return Color(hue: hue, saturation: 0.45, brightness: 0.7)
+    /// Primary tint (the A half) — used for text/stroke/status-rail; the dot is the only
+    /// bicolor render.
+    var accent: Color { Self.color(Self.pair(slot).a) }
+    static func color(_ i: Int) -> Color {
+        Color(hue: palette[i % N], saturation: 0.45, brightness: 0.7)
+    }
+}
+
+/// Split-circle host marker. Hard-stop gradient at 0.5 for a clean half; same-color stops
+/// render solid (diagonal-slot case — first N hosts) so no `a==b` branch needed.
+struct HostDot: View {
+    let slot: Int
+    var size: CGFloat = 10
+
+    init(slot: Int, size: CGFloat = 10) { self.slot = slot; self.size = size }
+    /// nil → secondary placeholder dot (focus-mode badge for an unknown host).
+    init(host: ForkHost?, size: CGFloat = 10) { self.slot = host?.slot ?? -1; self.size = size }
+
+    var body: some View {
+        let (a, b) = ForkHost.pair(slot)
+        Circle()
+            .fill(slot < 0 ? AnyShapeStyle(Color.secondary) : AnyShapeStyle(LinearGradient(
+                stops: [.init(color: ForkHost.color(a), location: 0.5),
+                        .init(color: ForkHost.color(b), location: 0.5)],
+                startPoint: .leading, endPoint: .trailing)))
+            .frame(width: size, height: size)
     }
 }
 #endif

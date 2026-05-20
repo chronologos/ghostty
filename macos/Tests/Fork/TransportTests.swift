@@ -8,7 +8,15 @@ struct TransportTests {
         let json = #"{"id":"h","label":"host","transport":{"local":{}}}"#
         let h = try JSONDecoder().decode(ForkHost.self, from: Data(json.utf8))
         #expect(h.expanded == true)
-        #expect(h.accentHue == nil)
+        #expect(h.accentSlot == nil)
+    }
+
+    @Test func legacyAccentHueMigratesToSolidSlot() throws {
+        let json = #"{"id":"h","label":"host","transport":{"local":{}},"accentHue":0.08}"#
+        let h = try JSONDecoder().decode(ForkHost.self, from: Data(json.utf8))
+        let (a, b) = ForkHost.pair(h.accentSlot!)
+        #expect(a == b)   // diagonal = solid
+        #expect(ForkHost.palette[a] == 0.08)
     }
 
     @Test func lenientStateDecode() throws {

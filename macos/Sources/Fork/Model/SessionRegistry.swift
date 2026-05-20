@@ -92,6 +92,18 @@ final class SessionRegistry: ObservableObject {
         saveDebounce = objectWillChange
             .debounce(for: .milliseconds(500), scheduler: DispatchQueue.main)
             .sink { [weak self] _ in self?.persistence.save(self?.snapshot()) }
+        // After autosave is wired so the one-time migration of nil-slot hosts persists.
+        resolveAutoSlots()
+    }
+
+    var takenSlots: Set<Int> { Set(hosts.compactMap(\.accentSlot)) }
+    /// Assign every nil-slot host an `autoSlot`. Stored so deleting host A can't shift B's.
+    private func resolveAutoSlots() {
+        var taken = takenSlots
+        for i in hosts.indices where hosts[i].accentSlot == nil {
+            let s = ForkHost.autoSlot(for: hosts[i].id, avoiding: taken)
+            taken.insert(s); hosts[i].accentSlot = s
+        }
     }
 
     // MARK: Queries
@@ -152,7 +164,7 @@ final class SessionRegistry: ObservableObject {
 
     func addHost(_ h: ForkHost) {
         guard host(id: h.id) == nil else { return }
-        hosts.append(h)
+        hosts.append(h); resolveAutoSlots()
     }
 
     func removeHost(_ id: ForkHost.ID) {
@@ -172,8 +184,7 @@ final class SessionRegistry: ObservableObject {
     }
 
     func renameHost(_ id: ForkHost.ID, to label: String) { updateHost(id) { $0.label = label } }
-    func setAccentHue(_ id: ForkHost.ID, _ hue: Double?) { updateHost(id) { $0.accentHue = hue } }
-    func setIcon(_ id: ForkHost.ID, _ icon: String?)     { updateHost(id) { $0.icon = icon } }
+    func setAccentSlot(_ id: ForkHost.ID, _ slot: Int?) { updateHost(id) { $0.accentSlot = slot } }
     func setExpanded(_ id: ForkHost.ID, _ v: Bool)       { updateHost(id) { $0.expanded = v } }
 
     func moveHost(_ id: ForkHost.ID, before target: ForkHost.ID) {

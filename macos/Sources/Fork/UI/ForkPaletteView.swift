@@ -84,7 +84,7 @@ struct ScrollbackSearchView: View {
         let paneIndex: Int
         let label: String
         let crumb: String
-        let accent: Color
+        let slot: Int
         let snippet: String
     }
 
@@ -113,7 +113,7 @@ struct ScrollbackSearchView: View {
                             controller?.activate(tab: hit.tabID, paneIndex: hit.paneIndex)
                         } label: {
                             HStack(spacing: 8) {
-                                Circle().fill(hit.accent).frame(width: 6, height: 6)
+                                HostDot(slot: hit.slot, size: 6)
                                 VStack(alignment: .leading, spacing: 1) {
                                     HStack(spacing: 4) {
                                         Text(hit.label).font(.system(size: 12, weight: .medium))
@@ -167,7 +167,7 @@ struct ScrollbackSearchView: View {
                     tabID: p.tab.id, paneIndex: p.index,
                     label: p.tab.paneLabels[p.ref.key] ?? p.ref.name,
                     crumb: "· \(p.tab.title) · \(p.host.label)",
-                    accent: p.host.accent,
+                    slot: p.host.slot,
                     snippet: String(line).trimmingCharacters(in: .whitespaces)
                 )
             }
