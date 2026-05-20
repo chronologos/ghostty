@@ -57,7 +57,7 @@ struct NewSessionView: View {
     private var hostList: some View {
         List(registry.hosts, selection: Binding(get: { hostID }, set: { hostID = $0 ?? hostID })) { h in
             HStack {
-                Circle().fill(registry.isConnected(h.id) ? .green : .secondary).frame(width: 6, height: 6)
+                HostDot(host: h, size: 8).opacity(registry.isConnected(h.id) ? 1 : 0.3)
                 Text(h.label)
             }
             .tag(h.id)
