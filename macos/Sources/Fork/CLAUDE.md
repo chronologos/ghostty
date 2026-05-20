@@ -92,8 +92,9 @@ Fork/
     NewSessionView.swift       ⌘T sheet
     SplitPickerView.swift      ⌘D picker (new vs attach-existing)
     SessionMetaLabel.swift     shared row trailer: client-count + age
-    NewHostView.swift          add-host sheet
-    HostDetailView.swift       manage-host sheet (rename, accent hue, SF-Symbol icon, remove)
+    HostsView.swift            master-detail Hosts sheet (list + add-host form)
+    HostDetailView.swift       detail pane: rename, N×N SlotPicker (10-hue palette,
+                               bicolor HostDot), sessions, remove
     CheatsheetView.swift       hold-⌘ shortcut overlay (600ms debounce; flagsChanged monitor)
     ForkSheetPanel.swift       NSWindow.performKeyEquivalent → ⌘V/C/X/A/Z to firstResponder
 ```

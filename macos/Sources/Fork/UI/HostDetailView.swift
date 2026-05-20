@@ -1,43 +1,42 @@
 #if os(macOS)
 import SwiftUI
 
-/// Host management sheet: rename · accent color · live zmx session list with kill.
+/// Detail pane for `HostsView`: rename · accent · live zmx session list with kill.
+/// No own chrome (padding/width/Done) — `HostsView` provides that. Edits apply on
+/// `.onDisappear` so switching selection in the master list saves.
 struct HostDetailView: View {
     let host: ForkHost
-    let onDone: () -> Void
+    let onRemove: () -> Void
 
     @EnvironmentObject private var registry: SessionRegistry
     @State private var label: String
-    @State private var hue: Double?
-    @State private var icon: String?
+    @State private var slot: Int
     @State private var sessions = ZmxAdapter.ListResult()
     @State private var loading = true
 
-    init(host: ForkHost, onDone: @escaping () -> Void) {
-        self.host = host
-        self.onDone = onDone
+    init(host: ForkHost, onRemove: @escaping () -> Void) {
+        self.host = host; self.onRemove = onRemove
         self._label = State(initialValue: host.label)
-        self._hue = State(initialValue: host.accentHue)
-        self._icon = State(initialValue: host.icon)
-    }
-
-    private var previewAccent: Color {
-        var h = host; h.accentHue = hue; return h.accent
+        self._slot = State(initialValue: host.slot)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("Manage Host").font(.headline)
+                Text(host.label).font(.headline)
                 Spacer()
-                Text(connectionString).font(.system(size: 11, design: .monospaced))
+                Text(host.transport.displayConnection).font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
 
-            TextField("Label", text: $label)
-
-            HuePicker(hue: $hue)
-            IconPicker(icon: $icon, tint: previewAccent)
+            TextField("Label", text: $label).textFieldStyle(.roundedBorder)
+            // Collapsed by default — the 10×10 grid is ~236pt and would squash `sessionList`
+            // to nothing; sessions are the primary content here.
+            DisclosureGroup {
+                SlotPicker(slot: $slot, hostID: host.id).padding(.top, 6)
+            } label: {
+                HStack(spacing: 8) { HostDot(slot: slot, size: 14); Text("Color") }
+            }
 
             Divider()
 
@@ -49,16 +48,14 @@ struct HostDetailView: View {
                 }
                 .buttonStyle(.borderless).disabled(loading)
             }
-            sessionList.frame(height: 160)
+            sessionList.frame(maxHeight: .infinity)
 
-            HStack {
-                Button("Cancel") { onDone() }.keyboardShortcut(.cancelAction)
-                Spacer()
-                Button("Done") { save(); onDone() }.keyboardShortcut(.defaultAction)
+            if host.id != ForkHost.local.id {
+                Button("Remove Host", role: .destructive, action: onRemove)
             }
         }
-        .padding().frame(width: 420)
         .task { await reload() }
+        .onDisappear(perform: save)
     }
 
     @ViewBuilder private var sessionList: some View {
@@ -94,13 +91,6 @@ struct HostDetailView: View {
         }
     }
 
-    private var connectionString: String {
-        switch host.transport {
-        case .local: "local"
-        case .ssh(let t): t.connectionString
-        }
-    }
-
     private func reload() async {
         loading = true
         sessions = await ZmxAdapter.list(host: host)
@@ -110,60 +100,36 @@ struct HostDetailView: View {
     private func save() {
         let name = label.trimmingCharacters(in: .whitespacesAndNewlines)
         if name != host.label && !name.isEmpty { registry.renameHost(host.id, to: name) }
-        if hue != host.accentHue { registry.setAccentHue(host.id, hue) }
-        if icon != host.icon { registry.setIcon(host.id, icon) }
+        if slot != host.accentSlot { registry.setAccentSlot(host.id, slot) }
     }
 }
 
-/// Curated SF Symbol palette. `nil` = no icon (sidebar falls back to the connection dot).
-struct IconPicker: View {
-    @Binding var icon: String?
-    let tint: Color
-    private static let presets = ["server.rack", "desktopcomputer", "laptopcomputer", "cloud.fill",
-                                  "globe", "bolt.fill", "cpu", "terminal", "network", "house.fill"]
+/// N×N grid (solids on the diagonal) + "Auto" chip. Auto's `own` reads the *stored* slot
+/// so a swatch tap before Auto doesn't subtract the wrong one.
+struct SlotPicker: View {
+    @Binding var slot: Int
+    let hostID: ForkHost.ID
+    @EnvironmentObject private var registry: SessionRegistry
 
     var body: some View {
-        HStack(spacing: 6) {
-            cell(nil)
-            ForEach(Self.presets, id: \.self) { cell($0) }
+        VStack(alignment: .leading, spacing: 6) {
+            Button("Auto") {
+                // Exclude by id, not by subtracting the slot value — `takenSlots` is a Set,
+                // so subtracting a value another host also holds would erase its claim.
+                let others = Set(registry.hosts.lazy.filter { $0.id != hostID }
+                    .compactMap(\.accentSlot))
+                slot = ForkHost.autoSlot(for: hostID, avoiding: others)
+            }
+            .buttonStyle(.link).font(.caption)
+            LazyVGrid(columns: Array(repeating: .init(.fixed(20), spacing: 4), count: ForkHost.N),
+                      alignment: .leading, spacing: 4) {
+                ForEach(0..<ForkHost.slotCount, id: \.self) { s in
+                    HostDot(slot: s, size: 18)
+                        .overlay(Circle().stroke(s == slot ? Color.primary : .clear, lineWidth: 1.5))
+                        .onTapGesture { slot = s }
+                }
+            }
         }
-    }
-
-    private func cell(_ name: String?) -> some View {
-        let selected = name == icon
-        return Image(systemName: name ?? "circle.dashed")
-            .font(.system(size: 13))
-            .foregroundStyle(name == nil ? Color.secondary : tint)
-            .frame(width: 22, height: 22)
-            .background(selected ? Color.primary.opacity(0.12) : .clear,
-                        in: RoundedRectangle(cornerRadius: 4))
-            .contentShape(Rectangle())
-            .onTapGesture { icon = name }
-            .help(name ?? "none")
-    }
-}
-
-/// Preset hue swatch row. `nil` = auto (hash-derived).
-struct HuePicker: View {
-    @Binding var hue: Double?
-    private static let presets: [Double] = [0.02, 0.08, 0.14, 0.28, 0.42, 0.55, 0.68, 0.80, 0.92]
-
-    var body: some View {
-        HStack(spacing: 6) {
-            swatch(nil)
-            ForEach(Self.presets, id: \.self) { swatch($0) }
-        }
-    }
-
-    private func swatch(_ h: Double?) -> some View {
-        let selected = h == hue
-        let color = h.map { Color(hue: $0, saturation: 0.45, brightness: 0.7) } ?? Color.secondary
-        return Circle()
-            .fill(h == nil ? AnyShapeStyle(.secondary.opacity(0.3)) : AnyShapeStyle(color))
-            .frame(width: 18, height: 18)
-            .overlay(Circle().stroke(selected ? Color.primary : .clear, lineWidth: 1.5))
-            .help(h == nil ? "auto" : "")
-            .onTapGesture { hue = h }
     }
 }
 #endif
