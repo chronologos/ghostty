@@ -15,6 +15,7 @@ struct SidebarView: View {
     @AppStorage(SessionRegistry.kFilterTagged) private var filterTagged = false
     @AppStorage(SessionRegistry.kFocusMode) private var focusMode = false
     @AppStorage(SessionRegistry.kFocusCutoffHours) private var cutoffHours = 16.0
+    @AppStorage(SessionRegistry.kFocusSortMRU) private var sortMRU = true
     @State private var showCutoffPopover = false
     @AppStorage("forkSidebarShowCC") private var showCC = false
     /// ⌥-hold peeks the details view (`isCompact` below); ⌥⌥ toggles `compact` itself.
@@ -59,10 +60,17 @@ struct SidebarView: View {
         .task { registry.setCCProbeEnabled(showCC) }
         .onChange(of: showCC) { registry.setCCProbeEnabled($0) }
         .onAppear {
-            flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { ev in
+            flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown]) { ev in
                 // Local monitors are app-wide; QuickTerminal bypasses the fork seam, so
                 // ⌥⌥ in its window would otherwise flip our persisted `compact` flag.
                 guard ev.window === controller?.window else { return ev }
+                // A key typed while ⌥ is down is a Meta chord (readline ⌥b/⌥f, accented
+                // input, ⌘⌥N), not a tap — disqualify the in-flight press so two quick
+                // chords can't read as a double-tap and flip the persisted density.
+                if ev.type == .keyDown {
+                    if ev.modifierFlags.contains(.option) { lastOptionPress = nil }
+                    return ev
+                }
                 let held = ev.modifierFlags.contains(.option)
                 if held, !optionHeld {
                     let now = Date()
@@ -115,9 +123,11 @@ struct SidebarView: View {
                 }
                 .onLongPressGesture(minimumDuration: 0.4) { showCutoffPopover = true }
                 .popover(isPresented: $showCutoffPopover, arrowEdge: .top) {
-                    VStack(alignment: .leading, spacing: 6) {
+                    VStack(alignment: .leading, spacing: 8) {
                         Text("Show tabs from last \(Int(cutoffHours))h").font(.caption)
                         Slider(value: $cutoffHours, in: 1...64, step: 1).frame(width: 180)
+                        Toggle("Sort by most recent", isOn: $sortMRU)
+                            .font(.caption).toggleStyle(.checkbox)
                     }.padding(12)
                 }
                 .help(focusMode ? "All hosts"
@@ -460,6 +470,11 @@ struct SidebarView: View {
         let renaming = registry.renaming == .pane(tab.id, name: ref.key)
         let live = showCC ? registry.ccLive[tab.hostID]?[ref.key] : nil
         let accent = Theme.hostAccent(registry.host(id: tab.hostID))
+        let dot = registry.dot(ref: ref)
+        // "What is it waiting for" is the triage answer for a blocked pane — promote the
+        // probe's `needs` text from the rail tooltip into the subtitle. Scoped to .blocked:
+        // a stale `needs` on a working/waiting pane would read as a false alarm.
+        let blockedDetail = dot == .blocked ? (live?.needs ?? live?.waitingFor) : nil
         // showCC swaps the age column from "when I last focused this pane" to "when CC last
         // turned". `ccLive[].updatedAt` is stale by design (`Info.==` excludes it), so the
         // closure reads the non-@Published `ccUpdatedAt` mirror — fresh on each 30s tick.
@@ -497,7 +512,8 @@ struct SidebarView: View {
                         // pane where CC has exited it'd show the dead session's name as stale.
                         ccLine(live: live,
                                cached: surface == nil ? tab.ccNames[ref.key] : nil,
-                               fallback: ref.name)
+                               fallback: ref.name,
+                               detail: blockedDetail)
                             .frame(height: 12, alignment: .topLeading)
                     }
                 }
@@ -542,8 +558,7 @@ struct SidebarView: View {
             .overlay(alignment: .trailing) {
                 // Anchored to the row (not the content flow) so it reads as a right border,
                 // not a pill competing with the tag circle for the same slot.
-                StatusRail(state: registry.dot(ref: ref), accent: accent,
-                           blockedDetail: live?.needs ?? live?.waitingFor)
+                StatusRail(state: dot, accent: accent, blockedDetail: blockedDetail)
             }
             .contentShape(Rectangle())
         }
@@ -593,10 +608,12 @@ struct SidebarView: View {
     }
 
     /// CC session name only — status and age live in the right-edge rail and the shared age
-    /// column. `live.name` › cached last-seen › cwd basename. Always returns a `Text` (empty
-    /// when no label) so the call-site `.frame(height: 12)` actually reserves the slot;
-    /// `EmptyView().frame(...)` is a layout no-op.
-    private func ccLine(live: CCProbe.Info?, cached: String?, fallback: String) -> some View {
+    /// column. `detail` (a blocked pane's `needs` text) › `live.name` › cached last-seen ›
+    /// cwd basename. Always returns a `Text` (empty when no label) so the call-site
+    /// `.frame(height: 12)` actually reserves the slot; `EmptyView().frame(...)` is a
+    /// layout no-op.
+    private func ccLine(live: CCProbe.Info?, cached: String?, fallback: String,
+                        detail: String?) -> some View {
         // cwd basename is only useful when more specific than the pane's own name — an
         // unnamed CC at a shared repo root would read identically on every row.
         let cwdLeaf = live?.cwd
@@ -605,10 +622,13 @@ struct SidebarView: View {
         // `cached` is for the CC-exited case only; `live?.name` flattens to `String?`, so a
         // running-but-unnamed session would otherwise fall through to the previous session's
         // name and render it in `.secondary` (live) styling.
-        return Text(live != nil ? (live?.name ?? cwdLeaf ?? "") : (cached ?? ""))
+        return Text(detail ?? (live != nil ? (live?.name ?? cwdLeaf ?? "") : (cached ?? "")))
             .font(mono(9)).lineLimit(1)
-            .foregroundStyle(live != nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
-            .help(live?.cwd ?? "")
+            .foregroundStyle(detail != nil ? AnyShapeStyle(Theme.blocked)
+                             : live != nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
+            // Truncated permission prompts are recoverable on hover; cwd keeps the slot
+            // otherwise. `clean()` already C0-stripped + 256-capped both strings.
+            .help(detail ?? live?.cwd ?? "")
     }
 
     // MARK: -

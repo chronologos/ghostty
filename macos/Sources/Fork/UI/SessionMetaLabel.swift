@@ -28,7 +28,10 @@ extension Date {
         let s = max(0, Int(Date().timeIntervalSince(self)))
         switch s {
         case ..<60:      return "\(s)s"
-        case ..<3600:    return "\(s / 60)m"
+        // Exact minutes below 15m ("just touched this"); 15–60m floors to the nearest 5 so
+        // a column of ages doesn't increment a different row on every 30s tick.
+        case ..<900:     return "\(s / 60)m"
+        case ..<3600:    return "\(s / 300 * 5)m"
         case ..<86400:   return "\(s / 3600)h"
         case ..<604800:  return "\(s / 86400)d"
         default:         return "\(s / 604800)w"

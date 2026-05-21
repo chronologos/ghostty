@@ -25,6 +25,7 @@ final class SessionRegistry: ObservableObject {
     static let kFilterTagged = "forkSidebarFilterTagged"
     static let kFocusMode = "forkSidebarFocus"
     static let kFocusCutoffHours = "forkFocusCutoffHours"
+    static let kFocusSortMRU = "forkFocusSortMRU"
 
     @Published private(set) var hosts: [ForkHost]
     @Published private(set) var tabs: [TabModel]
@@ -114,7 +115,8 @@ final class SessionRegistry: ObservableObject {
     var activeTab: TabModel? { activeTabID.flatMap { id in tabs.first { $0.id == id } } }
     var activeHost: ForkHost? { activeTab.flatMap { host(id: $0.hostID) } }
 
-    /// Focus-mode row order: pinned first, then by MRU, filtered to recent (or tagged-only).
+    /// Focus-mode row order: pinned first, then by MRU (or registry order when the
+    /// `kFocusSortMRU` toggle is off), filtered to recent (or tagged-only).
     /// Shared by `SidebarView.focusSection` and `gotoTab` so ⌘1-9 addresses what's visible.
     /// Active tab is forced to `.distantFuture` so a freshly-created tab (whose `lastActive`
     /// is still empty until async focus settlement runs `touchPane`) passes the cutoff and
@@ -131,13 +133,23 @@ final class SessionRegistry: ObservableObject {
         func mru(_ t: TabModel) -> Date {
             t.id == active ? .distantFuture : (t.lastActive.values.max() ?? .distantPast)
         }
-        return tabs
-            .filter {
-                guard $0.id != active else { return true }
-                guard mru($0) >= ($0.dismissedAt ?? .distantPast) else { return false }
-                return $0.pinned || (taggedOnly ? $0.hasTag : mru($0) > cutoff)
-            }
-            .sorted { $0.pinned != $1.pinned ? $0.pinned : mru($0) > mru($1) }
+        let kept = tabs.filter {
+            guard $0.id != active else { return true }
+            guard mru($0) >= ($0.dismissedAt ?? .distantPast) else { return false }
+            return $0.pinned || (taggedOnly ? $0.hasTag : mru($0) > cutoff)
+        }
+        // Filter and sort are decoupled: with MRU sort off, group by host (sidebar host
+        // order) then per-host registry order — the flat `tabs` array interleaves hosts by
+        // creation time, which reads as random next to the host-badge column. Rows never
+        // jump as you switch tabs. Pinned-first survives either way — it's an explicit
+        // gesture, not an implicit reordering. The two-pass filters are deliberate:
+        // `sorted` isn't documented stable. `nil` default = true (current behavior);
+        // `bool(forKey:)` would read unset as false.
+        guard (UserDefaults.standard.object(forKey: Self.kFocusSortMRU) as? Bool) ?? true else {
+            let grouped = hosts.flatMap { h in kept.filter { $0.hostID == h.id } }
+            return grouped.filter(\.pinned) + grouped.filter { !$0.pinned }
+        }
+        return kept.sorted { $0.pinned != $1.pinned ? $0.pinned : mru($0) > mru($1) }
     }
 
     /// "Inbox-zero" hide: stamp `dismissedAt` so `focusTabs` filters the tab until next
