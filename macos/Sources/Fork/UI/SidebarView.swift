@@ -167,7 +167,8 @@ struct SidebarView: View {
         // attaching to the outer body VStack would also animate host-mode reflow.
         return VStack(alignment: .leading, spacing: 4) {
             if tabs.isEmpty {
-                Text(filterTagged ? "No tagged panes" : "Nothing in the last \(Int(cutoffHours))h")
+                Label(filterTagged ? "No tagged panes" : "Nothing in the last \(Int(cutoffHours))h",
+                      systemImage: filterTagged ? "tag.slash" : "moon.zzz")
                     .font(mono(11)).foregroundStyle(.secondary)
                     .padding(.horizontal, 16).padding(.top, 12)
             } else {
@@ -181,10 +182,7 @@ struct SidebarView: View {
                             HStack(spacing: 6) {
                                 // No empty pill on rows 10+ — the Spacer handles alignment.
                                 if i < 9 { keyHint("⌘\(i + 1)") }
-                                if tab.pinned {
-                                    Image(systemName: "pin.fill")
-                                        .font(.system(size: 7)).foregroundStyle(.secondary)
-                                }
+                                if tab.pinned { pinBadge(size: 7) }
                                 Spacer()
                                 HostDot(host: host, size: 7)
                                 Text(host.label)
@@ -198,9 +196,7 @@ struct SidebarView: View {
                                 hostBadge(tab.hostID)
                                     .overlay(alignment: .topTrailing) {
                                         if tab.pinned {
-                                            Image(systemName: "pin.fill")
-                                                .font(.system(size: 6)).foregroundStyle(.secondary)
-                                                .offset(x: 2, y: 1)
+                                            pinBadge(size: 6).offset(x: 2, y: 1)
                                         }
                                     }
                                 tabRow(tab)
@@ -526,9 +522,10 @@ struct SidebarView: View {
                 }
                 if let tag {
                     let c = Theme.tag(tag.hue)
+                    let pebble = Pebble(tagHue: tag.hue)
                     HStack(spacing: 4) {
-                        Circle().strokeBorder(c, lineWidth: 1.5)
-                            .background(Circle().fill(hovered ? c : .clear))
+                        pebble.strokeBorder(c, lineWidth: 1.5)
+                            .background(pebble.fill(hovered ? c : .clear))
                             .frame(width: 8, height: 8)
                         if hovered {
                             Text(tag.text).font(mono(8, .medium))
@@ -538,6 +535,7 @@ struct SidebarView: View {
                     }
                     .padding(.horizontal, hovered ? 5 : 0).padding(.vertical, hovered ? 2 : 0)
                     .background(hovered ? c.opacity(0.12) : .clear, in: Capsule())
+                    .rotationEffect(.degrees(hovered ? -2.5 : 0)) // sticker tilt
                     .animation(.snappy(duration: 0.15), value: hovered)
                     .help(tag.text)
                     .padding(.trailing, 6)
@@ -605,6 +603,13 @@ struct SidebarView: View {
             }
             movePaneMenu(tab, ref: ref)
         }
+    }
+
+    /// Pinned-tab badge — tilted like an actual push-pin.
+    private func pinBadge(size: CGFloat) -> some View {
+        Image(systemName: "pin.fill")
+            .font(.system(size: size)).foregroundStyle(.secondary)
+            .rotationEffect(.degrees(-18))
     }
 
     /// CC session name only — status and age live in the right-edge rail and the shared age
@@ -756,6 +761,12 @@ private struct StatusRail: View {
             case nil:      Color.clear
             }
         }
+        // `.id` forces a view swap on state change so the new pill springs in (scale+fade)
+        // instead of teleporting — a small "hey, this row changed" beat. Keyed on `state`,
+        // so the per-tick re-renders that don't change state animate nothing.
+        .id(state)
+        .transition(.scale(scale: 0.3).combined(with: .opacity))
+        .animation(.bouncy(duration: 0.35, extraBounce: 0.15), value: state)
         .frame(width: 3, height: 20)
     }
 }
@@ -842,8 +853,10 @@ extension ForkHost {
     }
 }
 
-/// Split-circle host marker. Hard-stop gradient at 0.5 for a clean half; same-color stops
-/// render solid (diagonal-slot case — first N hosts) so no `a==b` branch needed.
+/// Split-pebble host marker. Hard-stop gradient at 0.5 for a clean half; same-color stops
+/// render solid (diagonal-slot case — first N hosts) so no `a==b` branch needed. The slot
+/// also seeds `Pebble`, so each host's dot has its own slightly-irregular silhouette —
+/// shape becomes a second recognition cue alongside the color pair.
 struct HostDot: View {
     let slot: Int
     var size: CGFloat = 10
@@ -852,9 +865,13 @@ struct HostDot: View {
     /// nil → secondary placeholder dot (focus-mode badge for an unknown host).
     init(host: ForkHost?, size: CGFloat = 10) { self.slot = host?.slot ?? -1; self.size = size }
 
+    /// The dot's silhouette — selection rings overlay this same shape so they hug the pebble
+    /// outline. Keep the slot→seed mapping here only.
+    static func outline(slot: Int) -> Pebble { Pebble(seed: slot) }
+
     var body: some View {
         let (a, b) = ForkHost.pair(slot)
-        Circle()
+        Self.outline(slot: slot)
             .fill(slot < 0 ? AnyShapeStyle(Color.secondary) : AnyShapeStyle(LinearGradient(
                 stops: [.init(color: ForkHost.color(a), location: 0.5),
                         .init(color: ForkHost.color(b), location: 0.5)],

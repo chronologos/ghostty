@@ -128,7 +128,7 @@ Fork/
   on switch — same idiom upstream uses at `BaseTerminalController.swift:226`.
 - **iOS target shares `Sources/`** via the synchronized group. Every file under `Fork/` must
   be wrapped in `#if os(macOS) … #endif`.
-- **`SessionRef.name` is not unique within a tab**: `ZmxAdapter` strips the `{tabID}-` prefix
+- **`SessionRef.name` is not unique within a tab**: `ZmxAdapter` strips the `{hostID}-` prefix
   on list parse, so a tab-owned `acr` and an external-attached `acr` collide. Per-tab dicts
   (`paneLabels`/`paneTags`/`lastActive`) key on `SessionRef.key` (`@`-prefix for external).
 - **Three pane-title layers**: `paneLabels[ref.key]` (fork-persisted, ⌘I) › `surface.title`
