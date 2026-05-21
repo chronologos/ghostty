@@ -17,12 +17,22 @@ import GhosttyKit
 /// 200ms per leg gives ~175ms for (2); the second cycle is the automated
 /// "press it twice" so a single lost race doesn't drop the repaint. The
 /// half-second of +1-row flicker doubles as visual feedback.
+/// In-flight latch: a re-entrant call (held/double-tapped ⌘⇧R) would sample the bumped
+/// height as its baseline and its own restore would leave the grid one row taller until
+/// the next real resize. One wiggle per surface at a time; the trailing restore clears it.
+/// Main-thread only (callers and the asyncAfter queue are both main).
+private var wiggling = Set<ObjectIdentifier>()
+
 func forkWigglePane(_ view: Ghostty.SurfaceView) {
     guard let s = view.surface else { return }
+    let key = ObjectIdentifier(view)
+    guard wiggling.insert(key).inserted else { return }
     let o = ghostty_surface_size(s)
     let w = o.width_px, h = o.height_px, bump = h + o.cell_height_px
     for (ms, height) in [(0, bump), (200, h), (250, bump), (450, h)] {
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms)) {
+            // Clear before the surface guard — a pane closed mid-wiggle must still unlatch.
+            if ms == 450 { wiggling.remove(key) }
             guard let s = view.surface else { return }
             ghostty_surface_set_size(s, w, height)
         }
