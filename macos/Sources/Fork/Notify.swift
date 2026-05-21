@@ -47,7 +47,7 @@ final class ForkNotify: NSObject, UNUserNotificationCenterDelegate {
                     .removeDuplicates()
                     .sink { NSApp.dockTile.badgeLabel = $0 > 0 ? "\($0)" : bellLabel() }
                 NotificationCenter.default.addObserver(
-                    forName: .init("com.mitchellh.ghostty.terminalWindowBellDidChange"),
+                    forName: .terminalWindowBellDidChangeNotification,
                     object: nil, queue: .main
                 ) { _ in
                     MainActor.assumeIsolated {
