@@ -130,7 +130,8 @@ struct SlotPicker: View {
                       alignment: .leading, spacing: 4) {
                 ForEach(0..<ForkHost.slotCount, id: \.self) { s in
                     HostDot(slot: s, size: 18)
-                        .overlay(Circle().stroke(s == slot ? Color.primary : .clear, lineWidth: Theme.ringWidth))
+                        .overlay(HostDot.outline(slot: s)
+                            .stroke(s == slot ? Color.primary : .clear, lineWidth: Theme.ringWidth))
                         .onTapGesture { slot = s }
                 }
             }
