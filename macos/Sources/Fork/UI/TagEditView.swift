@@ -23,10 +23,11 @@ struct TagEditView: View {
                 .onSubmit { if !trimmed.isEmpty { onCommit(PaneTag(text: trimmed, hue: hue)) } }
             HStack(spacing: 6) {
                 ForEach(Self.hues, id: \.self) { h in
-                    Circle()
+                    let pebble = Pebble(tagHue: h)
+                    pebble
                         .fill(Theme.tag(h))
                         .frame(width: 18, height: 18)
-                        .overlay(Circle().strokeBorder(.primary, lineWidth: hue == h ? Theme.ringWidth : 0))
+                        .overlay(pebble.strokeBorder(.primary, lineWidth: hue == h ? Theme.ringWidth : 0))
                         .onTapGesture { hue = h }
                 }
             }
