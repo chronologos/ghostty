@@ -15,22 +15,32 @@ enum CCProbe {
         var tempo: String?
         /// Human-readable "what it wants from you" when `tempo == "blocked"`.
         var needs: String?
+        /// Live one-line activity summary the agent maintains for itself: current tool +
+        /// description while working, a "what I accomplished" line when done, the open
+        /// question when blocked. Newer CC builds only — always optional.
+        var detail: String?
         /// Per-session control UDS path on the pane's host. Used by `rename`.
         var sock: String?
 
         var isBlocked: Bool { tempo == "blocked" }
+        /// The triage answer for a *blocked* pane — what CC wants from you. `needs` first:
+        /// it's the classifier's precise ask, and older CC builds write it without `detail`.
+        var attention: String? { needs ?? waitingFor ?? detail }
 
         // `updatedAt` excluded so `mergeCC`'s `!=` guard isn't defeated by heartbeat-only
         // ticks (which would publish every 3s). The age column reads
         // `SessionRegistry.ccUpdatedAt` (non-@Published, refreshed every tick) inside its
         // TimelineView closure instead — `ccLive[].updatedAt` is stale by design.
+        // `detail` IS included: it changes per tool call, so an actively-working session now
+        // publishes roughly every poll tick — that's the cost of a live activity subtitle,
+        // and it's bounded by the poll cadence, not by how fast the agent works.
         static func == (l: Self, r: Self) -> Bool {
             l.name == r.name && l.status == r.status && l.cwd == r.cwd && l.waitingFor == r.waitingFor
-                && l.tempo == r.tempo && l.needs == r.needs && l.sock == r.sock
+                && l.tempo == r.tempo && l.needs == r.needs && l.detail == r.detail && l.sock == r.sock
         }
         func hash(into h: inout Hasher) {
             h.combine(name); h.combine(status); h.combine(cwd); h.combine(waitingFor)
-            h.combine(tempo); h.combine(needs); h.combine(sock)
+            h.combine(tempo); h.combine(needs); h.combine(detail); h.combine(sock)
         }
     }
 
@@ -108,6 +118,7 @@ enum CCProbe {
         var waitingFor: String?
         var tempo: String?
         var needs: String?
+        var detail: String?
         var messagingSocketPath: String?
     }
 
@@ -126,6 +137,7 @@ enum CCProbe {
                              updatedAt: r.updatedAt.map { Date(timeIntervalSince1970: $0 / 1000) },
                              waitingFor: clean(r.waitingFor, 256),
                              tempo: clean(r.tempo, 32), needs: clean(r.needs, 256),
+                             detail: clean(r.detail, 512),
                              sock: clean(r.messagingSocketPath, 1024)))
     }
 
