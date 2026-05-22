@@ -1,8 +1,9 @@
 #if os(macOS)
 import Foundation
 
-/// Atomic-write JSON store for the fork's state (SPEC §6).
-struct ForkPersistence {
+/// Atomic-write JSON store for the fork's state (SPEC §6). A class so `save` can keep the
+/// last-written bytes for the no-op gate below.
+final class ForkPersistence {
     struct State: Codable {
         var version = 1
         var hosts: [ForkHost] = []
@@ -41,6 +42,12 @@ struct ForkPersistence {
 
     private let url: URL
     private var bakURL: URL { url.appendingPathExtension("bak") }
+    /// Last successfully-written encoding. The autosave is driven by `objectWillChange`,
+    /// which also fires for state that isn't persisted (ccLive poll ticks, pane status) —
+    /// without this gate an actively-working CC session rewrites a byte-identical
+    /// fork.json + .bak every few seconds for as long as it runs. `.sortedKeys` makes the
+    /// encoding deterministic, so a byte compare is a content compare.
+    private var lastWritten: Data?
 
     init() {
         // Unsandboxed test host resolves `.applicationSupportDirectory` to the real
@@ -69,6 +76,7 @@ struct ForkPersistence {
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? enc.encode(state) else { return }
+        guard data != lastWritten else { return }
         if FileManager.default.fileExists(atPath: url.path) {
             try? FileManager.default.removeItem(at: bakURL)
             try? FileManager.default.copyItem(at: url, to: bakURL)
@@ -77,6 +85,8 @@ struct ForkPersistence {
         do {
             try data.write(to: tmp, options: .atomic)
             _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp)
+            // Only on success — a failed write must retry on the next tick.
+            lastWritten = data
         } catch {
             ForkBootstrap.logger.error("fork.json write failed: \(error.localizedDescription)")
         }
