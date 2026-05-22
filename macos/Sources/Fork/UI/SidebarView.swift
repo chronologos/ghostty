@@ -175,37 +175,26 @@ struct SidebarView: View {
                 ForEach(Array(tabs.enumerated()), id: \.element.id) { i, tab in
                     VStack(alignment: .leading, spacing: 3) {
                         // ⌘N + host on its own row above the tab — frees the ~56pt leading
-                        // column that was truncating pane titles. Compact mode keeps the
-                        // tiny dot inline (single row).
-                        if !isCompact, let host = registry.host(id: tab.hostID) {
-                            // ⌘N left, dot+host right — caption recedes behind the heading.
-                            HStack(spacing: 6) {
-                                // No empty pill on rows 10+ — the Spacer handles alignment.
-                                if i < 9 { keyHint("⌘\(i + 1)") }
-                                if tab.pinned { pinBadge(size: 7) }
-                                Spacer()
-                                HostDot(host: host, size: 7)
-                                Text(host.label)
-                                    .font(mono(9)).foregroundStyle(.secondary).lineLimit(1)
-                            }
-                            .contentShape(Rectangle())
-                            .contextMenu { tabContextMenu(tab) }
-                            tabRow(tab)
-                        } else {
-                            HStack(alignment: .top, spacing: 6) {
-                                hostBadge(tab.hostID)
-                                    .overlay(alignment: .topTrailing) {
-                                        if tab.pinned {
-                                            pinBadge(size: 6).offset(x: 2, y: 1)
-                                        }
-                                    }
-                                tabRow(tab)
-                            }
-                            // Compact rows have no caption line — without this, a
-                            // default-titled single-pane tab (no `tabHeading` either) has
-                            // no tab-level right-click target at all.
-                            .contextMenu { tabContextMenu(tab) }
+                        // column that was truncating pane titles. Same layout in compact
+                        // mode (it used to swap to an inline leading dot, which read as a
+                        // different view entirely); compact's density win is paneRow
+                        // dropping its subtitle/age lines, not a different structure. This
+                        // caption is also the tab-level right-click target — a default-
+                        // titled single-pane tab has no `tabHeading` to carry the menu.
+                        let host = registry.host(id: tab.hostID)
+                        // ⌘N left, dot+host right — caption recedes behind the heading.
+                        HStack(spacing: 6) {
+                            // No empty pill on rows 10+ — the Spacer handles alignment.
+                            if i < 9 { keyHint("⌘\(i + 1)") }
+                            if tab.pinned { pinBadge(size: 7) }
+                            Spacer()
+                            HostDot(host: host, size: 7)
+                            Text(host?.label ?? "—")
+                                .font(mono(9)).foregroundStyle(.secondary).lineLimit(1)
                         }
+                        .contentShape(Rectangle())
+                        .contextMenu { tabContextMenu(tab) }
+                        tabRow(tab)
                     }
                     .modifier(ForkCard())
                 }
@@ -226,8 +215,8 @@ struct SidebarView: View {
     @ViewBuilder
     private func stateDot(_ s: PaneState?, accent: Color) -> some View {
         switch s {
-        case .blocked: Circle().fill(Theme.blocked).frame(width: 6, height: 6).help("Blocked — needs input")
-        case .waiting: Circle().fill(accent).frame(width: 6, height: 6).help("Finished — unread")
+        case .blocked: Circle().fill(Theme.blocked).frame(width: 6, height: 6).help(PaneState.blocked.help)
+        case .waiting: Circle().fill(accent).frame(width: 6, height: 6).help(PaneState.waiting.help)
         case .working: ProgressView().controlSize(.mini).scaleEffect(0.6)
         case nil: EmptyView()
         }
@@ -238,12 +227,6 @@ struct SidebarView: View {
             .font(mono(8, .semibold)).foregroundStyle(.secondary)
             .padding(.horizontal, 4).padding(.vertical, 1)
             .background(Theme.chipBg, in: RoundedRectangle(cornerRadius: 3))
-    }
-
-    private func hostBadge(_ id: ForkHost.ID) -> some View {
-        let h = registry.host(id: id)
-        return HostDot(host: h, size: 9)
-            .frame(width: 12).padding(.top, 5).help(h?.label ?? "")
     }
 
     // MARK: Host section
@@ -467,10 +450,10 @@ struct SidebarView: View {
         let live = showCC ? registry.ccLive[tab.hostID]?[ref.key] : nil
         let accent = Theme.hostAccent(registry.host(id: tab.hostID))
         let dot = registry.dot(ref: ref)
-        // "What is it waiting for" is the triage answer for a blocked pane — promote the
-        // probe's `needs` text from the rail tooltip into the subtitle. Scoped to .blocked:
-        // a stale `needs` on a working/waiting pane would read as a false alarm.
-        let blockedDetail = dot == .blocked ? (live?.needs ?? live?.waitingFor) : nil
+        // Rail-tooltip text: "what is it waiting for" is the triage answer for a blocked
+        // pane. Scoped to .blocked — a stale `needs` on a working pane reads as a false
+        // alarm. ccLine derives the same text itself for the red subtitle.
+        let blockedDetail = dot == .blocked ? live?.attention : nil
         // showCC swaps the age column from "when I last focused this pane" to "when CC last
         // turned". `ccLive[].updatedAt` is stale by design (`Info.==` excludes it), so the
         // closure reads the non-@Published `ccUpdatedAt` mirror — fresh on each 30s tick.
@@ -509,7 +492,7 @@ struct SidebarView: View {
                         ccLine(live: live,
                                cached: surface == nil ? tab.ccNames[ref.key] : nil,
                                fallback: ref.name,
-                               detail: blockedDetail)
+                               blocked: dot == .blocked)
                             .frame(height: 12, alignment: .topLeading)
                     }
                 }
@@ -559,6 +542,17 @@ struct SidebarView: View {
                 StatusRail(state: dot, accent: accent, blockedDetail: blockedDetail)
             }
             .contentShape(Rectangle())
+            // Hover peek — the untruncated version of everything the one-line subtitle
+            // elides (state, the full detail/question, cwd) as a multi-line tooltip on the
+            // whole row. A tooltip rather than a popover/ⓘ button: no extra chrome, can't
+            // steal key status from the terminal, and can't fight the row's hover tracking.
+            // Child `.help`s (rail, tag pill) still win over their own rects.
+            .help(live.map { l in
+                [[l.name, dot?.help ?? l.status].compactMap { $0 }.joined(separator: " — "),
+                 dot == .blocked ? l.attention : l.detail,
+                 l.cwd]
+                    .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n")
+            } ?? "")
         }
         .onTapGesture { controller?.activate(tab: tab.id, paneIndex: index) }
         .simultaneousGesture(TapGesture(count: 2).onEnded {
@@ -612,28 +606,31 @@ struct SidebarView: View {
             .rotationEffect(.degrees(-18))
     }
 
-    /// CC session name only — status and age live in the right-edge rail and the shared age
-    /// column. `detail` (a blocked pane's `needs` text) › `live.name` › cached last-seen ›
-    /// cwd basename. Always returns a `Text` (empty when no label) so the call-site
-    /// `.frame(height: 12)` actually reserves the slot; `EmptyView().frame(...)` is a
-    /// layout no-op.
+    /// CC subtitle — status and age live in the right-edge rail and the shared age column.
+    /// Blocked: the question CC is asking, in red. Otherwise `name · detail` is a live
+    /// one-line activity feed (what the session is, what it's doing / last did), falling
+    /// back to cwd basename, then the cached last-seen name for placeholder rows. Always
+    /// returns a `Text` (empty when no label) so the call-site `.frame(height: 12)`
+    /// actually reserves the slot; `EmptyView().frame(...)` is a layout no-op.
     private func ccLine(live: CCProbe.Info?, cached: String?, fallback: String,
-                        detail: String?) -> some View {
+                        blocked: Bool) -> some View {
         // cwd basename is only useful when more specific than the pane's own name — an
         // unnamed CC at a shared repo root would read identically on every row.
         let cwdLeaf = live?.cwd
             .map { ($0 as NSString).lastPathComponent }
             .flatMap { $0 == fallback ? nil : $0 }
-        // `cached` is for the CC-exited case only; `live?.name` flattens to `String?`, so a
-        // running-but-unnamed session would otherwise fall through to the previous session's
-        // name and render it in `.secondary` (live) styling.
-        return Text(detail ?? (live != nil ? (live?.name ?? cwdLeaf ?? "") : (cached ?? "")))
+        let attention = blocked ? live?.attention : nil
+        let activity = [live?.name, live?.detail].compactMap { $0 }.joined(separator: " · ")
+        // `cached` is for the CC-exited case only; a running-but-unnamed session must not
+        // fall through to the previous session's name in `.secondary` (live) styling.
+        let text = attention
+            ?? (live != nil ? (activity.isEmpty ? (cwdLeaf ?? "") : activity) : (cached ?? ""))
+        return Text(text)
             .font(mono(9)).lineLimit(1)
-            .foregroundStyle(detail != nil ? AnyShapeStyle(Theme.blocked)
+            .foregroundStyle(attention != nil ? AnyShapeStyle(Theme.blocked)
                              : live != nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
-            // Truncated permission prompts are recoverable on hover; cwd keeps the slot
-            // otherwise. `clean()` already C0-stripped + 256-capped both strings.
-            .help(detail ?? live?.cwd ?? "")
+        // Truncation is recoverable via the row-level hover peek (paneRow's `.help`),
+        // which supersets this line — no per-Text tooltip here so the two can't disagree.
     }
 
     // MARK: -
@@ -738,6 +735,18 @@ private struct Hovering<Content: View>: View {
     }
 }
 
+extension PaneState {
+    /// One display string per state, shared by every indicator's tooltip and the peek badge —
+    /// three call sites had drifted into three phrasings of "blocked".
+    var help: String {
+        switch self {
+        case .working: "Working"
+        case .waiting: "Finished — unread"
+        case .blocked: "Needs your input"
+        }
+    }
+}
+
 /// Right-edge status pill — reads as a vertical heatmap down the sidebar; host-accent hue so
 /// busy rows also signal *which* host. `PaneMachine.dot` is the single source of truth
 /// (probe `status` feeds it via `.probe(busy:)`), so `tempo`-vs-`status` can't render
@@ -754,10 +763,10 @@ private struct StatusRail: View {
             case .working: Pulsing { RoundedRectangle(cornerRadius: 1.5).fill(accent) }
             case .waiting:
                 RoundedRectangle(cornerRadius: 1.5).strokeBorder(accent, lineWidth: 1)
-                    .help("Finished — unread")
+                    .help(PaneState.waiting.help)
             case .blocked:
                 RoundedRectangle(cornerRadius: 1.5).fill(Theme.blocked)
-                    .help(blockedDetail ?? "Needs your input")
+                    .help(blockedDetail ?? PaneState.blocked.help)
             case nil:      Color.clear
             }
         }
