@@ -155,8 +155,9 @@ struct PaneMachineTests {
         #expect(b.dot == .blocked)      // blocked latch survives poll teardown
     }
 
-    /// `phase==.waiting && ccBusy` must not double-report: rail says working, so the badge
-    /// (which counts `dot == .waiting`) must not say "needs you".
+    /// `phase==.waiting && ccBusy` must not double-report: the rail (driven by `dot`) says
+    /// working, and the dock badge separately counts `phase == .waiting && !ccBusy` — both
+    /// must agree that a busy pane isn't "needs you".
     @Test func dotWaitingExcludesBusy() {
         var m = PaneMachine()
         m.apply(.progress); _ = m.apply(.settled(isActive: false))

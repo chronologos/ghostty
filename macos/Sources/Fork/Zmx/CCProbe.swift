@@ -28,9 +28,9 @@ enum CCProbe {
         var attention: String? { needs ?? waitingFor ?? detail }
 
         // `updatedAt` excluded so `mergeCC`'s `!=` guard isn't defeated by heartbeat-only
-        // ticks (which would publish every 3s). The age column reads
-        // `SessionRegistry.ccUpdatedAt` (non-@Published, refreshed every tick) inside its
-        // TimelineView closure instead — `ccLive[].updatedAt` is stale by design.
+        // ticks (which would publish every 3s). The hover-peek age line reads
+        // `SessionRegistry.ccUpdatedAt` (non-@Published, refreshed every tick) inside the
+        // pane row's 60s clock instead — `ccLive[].updatedAt` is stale by design.
         // `detail` IS included: it changes per tool call, so an actively-working session now
         // publishes roughly every poll tick — that's the cost of a live activity subtitle,
         // and it's bounded by the poll cadence, not by how fast the agent works.
