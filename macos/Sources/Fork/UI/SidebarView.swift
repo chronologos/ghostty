@@ -29,7 +29,7 @@ struct SidebarView: View {
     private func mono(_ s: CGFloat, _ w: Font.Weight = .regular) -> Font { forkMono(s, w, fontFamily) }
     /// Single source for the details view: header button writes `compact`, ⌥-hold transiently
     /// overrides it, ⌥⌥ toggles it. Everything that differs between compact and details
-    /// (age column, subtitle, ⌘N/host-label cell, host-header ⌘⌥N) gates on this.
+    /// (subtitle, ⌘N/host-label cell, host-header ⌘⌥N) gates on this.
     private var isCompact: Bool { compact && !optionHeld }
 
     private var recentTags: ArraySlice<PaneTag> { registry.recentTags.prefix(5) }
@@ -124,7 +124,7 @@ struct SidebarView: View {
                 .onLongPressGesture(minimumDuration: 0.4) { showCutoffPopover = true }
                 .popover(isPresented: $showCutoffPopover, arrowEdge: .top) {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Show tabs from last \(Int(cutoffHours))h").font(.caption)
+                        Text("Show tabs from last \(Int(cutoffHours))h — older panes dim").font(.caption)
                         Slider(value: $cutoffHours, in: 1...64, step: 1).frame(width: 180)
                         Toggle("Sort by most recent", isOn: $sortMRU)
                             .font(.caption).toggleStyle(.checkbox)
@@ -454,20 +454,29 @@ struct SidebarView: View {
         // pane. Scoped to .blocked — a stale `needs` on a working pane reads as a false
         // alarm. ccLine derives the same text itself for the red subtitle.
         let blockedDetail = dot == .blocked ? live?.attention : nil
-        // showCC swaps the age column from "when I last focused this pane" to "when CC last
-        // turned". `ccLive[].updatedAt` is stale by design (`Info.==` excludes it), so the
-        // closure reads the non-@Published `ccUpdatedAt` mirror — fresh on each 30s tick.
-        let age = { (showCC ? registry.ccUpdatedAt[tab.hostID]?[ref.key] : nil)
-                    ?? (focused ? nil : tab.lastActive[ref.key]) }
-        return Hovering { hovered in
+        // Recency lives in three carriers, not a column: afterglow on the row background
+        // (the short-term "where was I just now" trail — user focus only, or every agent
+        // turn fleet-wide would keep half the sidebar lit), doze opacity (the long tail —
+        // also counts CC activity while the probe is on, so a pane an agent grinds on
+        // overnight doesn't render dusty), and an exact-age line in the hover peek that
+        // names its source ("CC turned" vs "you were here" — they can differ by hours on
+        // the same row). `ccStamp`/`lastSeen` stay closures: `ccUpdatedAt` is a
+        // non-@Published mirror (`Info.==` excludes `updatedAt`, so heartbeat-only ticks
+        // don't publish) and must be re-read inside the row's clock.
+        let ccStamp = { showCC ? registry.ccUpdatedAt[tab.hostID]?[ref.key] : nil }
+        let lastSeen = { [tab.lastActive[ref.key], ccStamp()].compactMap { $0 }.max() }
+        // tick: glow decay, doze, and the peek age all derive from wall-clock age — without
+        // a clock, a row nothing else re-renders (showCC off, no focus changes) would hold
+        // a stale glow indefinitely.
+        return Hovering(tick: 60) { hovered in
             HStack(spacing: 0) {
                 Group {
                     if let spine {
-                        TimelineView(.periodic(from: .now, by: 30)) { _ in
-                            Spine(first: spine.first, last: spine.last)
-                                .stroke(active ? Theme.spineHeat(tab.lastActive.values.max())
-                                               : Theme.spineHeat(nil), lineWidth: 1)
-                        }
+                        // Hovering's 60s tick is the clock here too (spineHeat buckets at
+                        // 5m/1h, so minute granularity is plenty).
+                        Spine(first: spine.first, last: spine.last)
+                            .stroke(active ? Theme.spineHeat(tab.lastActive.values.max())
+                                           : Theme.spineHeat(nil), lineWidth: 1)
                     } else {
                         Color.clear
                     }
@@ -523,19 +532,24 @@ struct SidebarView: View {
                     .help(tag.text)
                     .padding(.trailing, 6)
                 }
-                if !isCompact {
-                    TimelineView(.periodic(from: .now, by: 30)) { _ in
-                        let a = age()
-                        Text(a?.shortAge ?? "")
-                            .font(mono(9)).foregroundStyle(Theme.ageStyle(a))
-                            .frame(width: 24, alignment: .trailing)
-                    }
-                }
             }
+            // Long-tail recency: untouched-for-an-hour rests, past the focus cutoff sleeps.
+            // Content only — selection/glow backgrounds and the StatusRail overlay keep full
+            // strength. Never dozed: the active tab (literally on screen), hovered rows
+            // (hover means you're trying to read it), and blocked rows (a pane asking for
+            // you must not be the faintest row in the sidebar).
+            .opacity(active || hovered || dot == .blocked
+                     ? 1
+                     : Theme.doze(lastSeen(),
+                                  cutoff: SessionRegistry.focusCutoffSeconds(hours: cutoffHours)))
             .padding(.trailing, 12).frame(minHeight: 28)
             .background(
                 focused ? Theme.selectedRow : hovered ? Theme.hover : .clear,
                 in: RoundedRectangle(cornerRadius: 5))
+            // Separate layer so hover/selection ADD to a fresh row's glow instead of
+            // swapping it for a weaker gray wash.
+            .background(Theme.afterglow(tab.lastActive[ref.key]),
+                        in: RoundedRectangle(cornerRadius: 5))
             .overlay(alignment: .trailing) {
                 // Anchored to the row (not the content flow) so it reads as a right border,
                 // not a pill competing with the tag circle for the same slot.
@@ -547,12 +561,13 @@ struct SidebarView: View {
             // whole row. A tooltip rather than a popover/ⓘ button: no extra chrome, can't
             // steal key status from the terminal, and can't fight the row's hover tracking.
             // Child `.help`s (rail, tag pill) still win over their own rects.
-            .help(live.map { l in
-                [[l.name, dot?.help ?? l.status].compactMap { $0 }.joined(separator: " — "),
-                 dot == .blocked ? l.attention : l.detail,
-                 l.cwd]
-                    .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n")
-            } ?? "")
+            .help([
+                live.map { [$0.name, dot?.help ?? $0.status].compactMap { $0 }.joined(separator: " — ") },
+                live.flatMap { dot == .blocked ? $0.attention : $0.detail },
+                live?.cwd,
+                ccStamp().map { "CC turned \($0.shortAge) ago" }
+                    ?? (focused ? nil : tab.lastActive[ref.key]).map { "you were here \($0.shortAge) ago" },
+            ].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n"))
         }
         .onTapGesture { controller?.activate(tab: tab.id, paneIndex: index) }
         .simultaneousGesture(TapGesture(count: 2).onEnded {
@@ -606,7 +621,8 @@ struct SidebarView: View {
             .rotationEffect(.degrees(-18))
     }
 
-    /// CC subtitle — status and age live in the right-edge rail and the shared age column.
+    /// CC subtitle — status lives in the right-edge rail; recency is the row's afterglow /
+    /// doze and the hover peek's age line.
     /// Blocked: the question CC is asking, in red. Otherwise `name · detail` is a live
     /// one-line activity feed (what the session is, what it's doing / last did), falling
     /// back to cwd basename, then the cached last-seen name for placeholder rows. Always
@@ -727,11 +743,16 @@ private struct OverlayScroller: NSViewRepresentable {
 /// Row-local hover scope. Hover changes re-render `content(hovered)` only — not
 /// the enclosing `SidebarView.body` — so scrolling past rows doesn't storm the
 /// `ScrollView` diff.
+/// `tick` also re-evaluates the content on a periodic clock — the row's chrome derives from
+/// wall-clock age (afterglow / doze / peek age) and would otherwise go stale when nothing
+/// else triggers a render.
 private struct Hovering<Content: View>: View {
     @State private var hovered = false
+    let tick: TimeInterval
     @ViewBuilder let content: (Bool) -> Content
     var body: some View {
-        content(hovered).onHover { hovered = $0 }
+        TimelineView(.periodic(from: .now, by: tick)) { _ in content(hovered) }
+            .onHover { hovered = $0 }
     }
 }
 

@@ -50,6 +50,25 @@ enum Theme {
         ramp(age(d), AnyShapeStyle(.primary), AnyShapeStyle(.secondary), AnyShapeStyle(.tertiary))
     }
 
+    // MARK: Afterglow / doze — recency without an age column. Discrete buckets (not a
+    // continuous fade) for the same reason Pebble is seeded: rows redraw on every probe
+    // tick, and a creeping value reads as activity.
+    /// Short-term trail on the row background — "where was I just now". Tighter breakpoints
+    /// than `ramp` (5m/15m, not 5m/1h): after an hour this is history, not a trail. Sits
+    /// below `selectedRow` (clay 0.20/0.14) so selection still reads as the strongest wash.
+    static func afterglow(_ d: Date?) -> Color {
+        let a = age(d)
+        return a < 300 ? clay.opacity(0.09) : a < 900 ? clay.opacity(0.045) : .clear
+    }
+    /// Whole-row content opacity for the long tail. `cutoff` is the focus-mode cutoff in
+    /// seconds — "asleep" reuses the user's own definition of "too old to care about".
+    /// `nil` (never touched) is awake, not ancient — the opposite default from `spineHeat`.
+    static func doze(_ d: Date?, cutoff: TimeInterval) -> Double {
+        guard let d else { return 1 }
+        let a = age(d)
+        return a < 3600 ? 1 : a < cutoff ? 0.82 : 0.55
+    }
+
     // MARK: Swatch selection ring
     static let ringWidth: CGFloat = 1.5
 }
