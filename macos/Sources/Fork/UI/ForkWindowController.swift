@@ -867,6 +867,9 @@ final class ForkWindowController: TerminalController {
         // badge doesn't stick.
         for id in Array(progressSubs.keys) { stopObservingProgress(id) }
         endSheet()  // drops sheetResignSub; child-window auto-close doesn't guarantee resign-key fires first
+        // Focus is leaving the window for good — record the focused pane's departure now,
+        // so a reopen hours later can't back-date it to "just now" via the exit-stamp.
+        registry.flushPaneExit()
         super.windowWillClose(notification)
     }
 

@@ -69,9 +69,9 @@ final class SessionRegistry: ObservableObject {
     @Published private(set) var ccLive: [ForkHost.ID: [String: CCProbe.Info]] = [:]
     /// Heartbeat timestamps split out from `ccLive` so steady-state poll ticks can refresh
     /// them without firing `objectWillChange` (`Info.==` excludes `updatedAt` for that
-    /// reason). The sidebar age column reads this *inside* its 30s TimelineView closure,
-    /// so the displayed value tracks the actual heartbeat — reading `ccLive[].updatedAt`
-    /// instead would freeze at time-of-last-status-change.
+    /// reason). The pane row's doze/peek-age read this *inside* the row's 60s clock, so the
+    /// displayed value tracks the actual heartbeat — reading `ccLive[].updatedAt` instead
+    /// would freeze at time-of-last-status-change.
     private(set) var ccUpdatedAt: [ForkHost.ID: [String: Date]] = [:]
     private var ccPoll: Task<Void, Never>?
 
@@ -115,6 +115,11 @@ final class SessionRegistry: ObservableObject {
     var activeTab: TabModel? { activeTabID.flatMap { id in tabs.first { $0.id == id } } }
     var activeHost: ForkHost? { activeTab.flatMap { host(id: $0.hostID) } }
 
+    /// Effective focus-cutoff in seconds. `> 0` covers unset (UserDefaults returns 0; the
+    /// slider only writes 1–64). Shared by `focusTabs` and the sidebar's doze so "asleep"
+    /// and "hidden from focus" can't drift to different thresholds.
+    static func focusCutoffSeconds(hours: Double) -> TimeInterval { (hours > 0 ? hours : 16) * 3600 }
+
     /// Focus-mode row order: pinned first, then by MRU (or registry order when the
     /// `kFocusSortMRU` toggle is off), filtered to recent (or tagged-only).
     /// Shared by `SidebarView.focusSection` and `gotoTab` so ⌘1-9 addresses what's visible.
@@ -125,10 +130,10 @@ final class SessionRegistry: ObservableObject {
     /// visual-only; PR33's "blocked surfaces past the 16h cutoff and sorts above MRU"
     /// was removed at the user's request. Don't re-add.
     func focusTabs(taggedOnly: Bool) -> [TabModel] {
-        // `> 0` covers unset (UserDefaults returns 0). The slider's `@AppStorage` write
-        // triggers a SidebarView re-render that re-calls this — no registry plumbing.
+        // The slider's `@AppStorage` write triggers a SidebarView re-render that re-calls
+        // this — no registry plumbing needed for cutoff changes.
         let h = UserDefaults.standard.double(forKey: Self.kFocusCutoffHours)
-        let cutoff = Date().addingTimeInterval(-(h > 0 ? h : 16) * 3600)
+        let cutoff = Date().addingTimeInterval(-Self.focusCutoffSeconds(hours: h))
         let active = activeTabID
         func mru(_ t: TabModel) -> Date {
             t.id == active ? .distantFuture : (t.lastActive.values.max() ?? .distantPast)
@@ -255,8 +260,37 @@ final class SessionRegistry: ObservableObject {
     func setFocusedPane(index: Int?) { if focusedPaneIndex != index { focusedPaneIndex = index } }
     func setRenaming(_ t: RenameTarget?) { if renaming != t { renaming = t } }
 
+    /// Last (tab, pane) that `touchPane` stamped — i.e. the pane focus is leaving when the
+    /// next touch arrives. Not persisted: a stale exit-stamp across relaunch is meaningless.
+    private var lastTouched: (TabModel.ID, String)?
+
+    /// Stamp a departed pane's `lastActive` at "now". Guards: skip if the entry was pruned
+    /// (don't resurrect a removed pane) or the tab was dismissed while focused (the
+    /// exit-stamp must not undo Hide — only a touch *of that tab* clears `dismissedAt`).
+    private func exitStamp(_ prev: (TabModel.ID, String)) {
+        guard let p = tabs.firstIndex(where: { $0.id == prev.0 }),
+              tabs[p].dismissedAt == nil, tabs[p].lastActive[prev.1] != nil else { return }
+        tabs[p].lastActive[prev.1] = Date()
+    }
+
+    /// Focus is leaving the fork window entirely (window close, not a pane switch): record
+    /// the departure now and forget it, so the next touch — possibly hours later, on reopen —
+    /// can't back-date the departure to "just now".
+    func flushPaneExit() {
+        if let prev = lastTouched { exitStamp(prev) }
+        lastTouched = nil
+    }
+
     func touchPane(tab id: TabModel.ID, name: String) {
         guard let i = tabs.firstIndex(where: { $0.id == id }) else { return }
+        // Exit-stamp the pane being left: `lastActive` means "last time this pane was the
+        // focused one", and arrival-only stamping would leave a pane you sat in for an hour
+        // reading as an hour old the moment you switch away (kills the sidebar afterglow
+        // trail, and under-ranks the tab in focus-mode MRU). The stamp is written at the
+        // *next* touch, so an absence (⌘-tab away, sleep) inflates the departed pane's
+        // recency by the gap — accepted: it was still the current pane that whole time.
+        if let prev = lastTouched, prev != (id, name) { exitStamp(prev) }
+        lastTouched = (id, name)
         tabs[i].lastActive[name] = Date()
         // Watermark check (`mru >= dismissedAt`) regresses if `setPersistedTree` later
         // prunes `lastActive` to empty, so clear explicitly — same as `setPinned(true)`.
@@ -412,6 +446,10 @@ final class SessionRegistry: ObservableObject {
         if let tag { tabs[di].paneTags[key] = tag }
         if let last { tabs[di].lastActive[key] = last }
         if let cc { tabs[di].ccNames[key] = cc }
+        // The pending exit-stamp follows a moved focused pane: src's entry is pruned below,
+        // so without the retarget the eventual departure stamp dies on the entry-nil guard
+        // and the moved pane reads as old as its arrival time in its new tab.
+        if lastTouched.map({ $0 == (src, key) }) ?? false { lastTouched = (dst, key) }
         setPersistedTree(tabs[di].tree.appending(leaf: ref), for: dst)
         setPersistedTree(tabs[si].tree.removing(ref), for: src)
         return true
