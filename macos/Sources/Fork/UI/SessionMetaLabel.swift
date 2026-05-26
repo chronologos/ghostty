@@ -29,7 +29,8 @@ extension Date {
         switch s {
         case ..<60:      return "\(s)s"
         // Exact minutes below 15m ("just touched this"); 15–60m floors to the nearest 5 so
-        // a column of ages doesn't increment a different row on every 30s tick.
+        // a list of ages (host-sheet sessions, row hover peeks) doesn't increment a
+        // different entry on every refresh tick.
         case ..<900:     return "\(s / 60)m"
         case ..<3600:    return "\(s / 300 * 5)m"
         case ..<86400:   return "\(s / 3600)h"

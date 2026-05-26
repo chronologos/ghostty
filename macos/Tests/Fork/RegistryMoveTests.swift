@@ -173,5 +173,94 @@ struct RegistryMoveTests {
         r.moveHost("b", before: "a")
         #expect(r.hosts.map(\.id) == ["local", "a", "b"])
     }
+
+    // MARK: - touchPane exit-stamp ("lastActive = last time this pane WAS the focused one")
+    // Each test seeds `lastTouched` with its own first touch — the singleton carries the
+    // previous test's value, which the prev-tab guards neutralize but assertions shouldn't
+    // assume away.
+
+    @Test func touchPane_exitStampsPreviousPane() {
+        let r = reset()
+        let t = makeTab(r, names: ["a", "b"])
+        r.touchPane(tab: t, name: "a")
+        let arrival = r.tabs.first { $0.id == t }!.lastActive["a"]!
+        r.touchPane(tab: t, name: "b")
+        let tab = r.tabs.first { $0.id == t }!
+        #expect(tab.lastActive["a"]! > arrival)   // departure stamp, not arrival time
+        #expect(tab.lastActive["b"] != nil)
+    }
+
+    @Test func touchPane_exitStampDoesNotResurfaceDismissedTab() {
+        let r = reset()
+        let t1 = makeTab(r, names: ["a"])
+        let t2 = makeTab(r, names: ["x"])
+        r.touchPane(tab: t1, name: "a")
+        r.dismissFromFocus(t1)
+        // Departing t1/a must NOT undo Hide: the watermark (`mru >= dismissedAt`) stays unmet.
+        r.touchPane(tab: t2, name: "x")
+        let hidden = r.tabs.first { $0.id == t1 }!
+        #expect(hidden.dismissedAt != nil)
+        #expect(hidden.lastActive["a"]! < hidden.dismissedAt!)
+    }
+
+    @Test func touchPane_exitStampDoesNotResurrectPrunedPane() {
+        let r = reset()
+        let t = makeTab(r, names: ["a", "b"])
+        r.touchPane(tab: t, name: "a")
+        // "a" leaves the tree (closed) — setPersistedTree prunes its lastActive entry.
+        r.setPersistedTree(.leaf(SessionRef(hostID: "local", name: "b")), for: t)
+        r.touchPane(tab: t, name: "b")
+        #expect(r.tabs.first { $0.id == t }!.lastActive["a"] == nil)
+    }
+
+    @Test func touchPane_repeatTouchExitStampsOnce() {
+        let r = reset()
+        let t1 = makeTab(r, names: ["a"])
+        let t2 = makeTab(r, names: ["x"])
+        r.touchPane(tab: t1, name: "a")
+        r.touchPane(tab: t2, name: "x")
+        let stamped = r.tabs.first { $0.id == t1 }!.lastActive["a"]!
+        // One real switch drives touchPane twice (activate + async focus settlement) — the
+        // repeat of the same pane must not exit-stamp the departed pane again.
+        r.touchPane(tab: t2, name: "x")
+        #expect(r.tabs.first { $0.id == t1 }!.lastActive["a"]! == stamped)
+    }
+
+    @Test func touchPane_vanishedTabIsNoOp() {
+        let r = reset()
+        let t = makeTab(r, names: ["a", "b"])
+        r.touchPane(tab: t, name: "a")
+        let before = r.tabs.first { $0.id == t }!.lastActive["a"]!
+        r.touchPane(tab: TabModel.ID(), name: "ghost")   // unknown destination: nothing stamped
+        #expect(r.tabs.first { $0.id == t }!.lastActive["a"]! == before)
+        // ...and the pending exit-stamp still targets "a": the next real switch stamps it.
+        r.touchPane(tab: t, name: "b")
+        #expect(r.tabs.first { $0.id == t }!.lastActive["a"]! > before)
+    }
+
+    @Test func movePane_focusedPaneKeepsPendingExitStamp() {
+        let r = reset()
+        let src = makeTab(r, names: ["a", "b"])
+        let dst = makeTab(r, names: ["x"])
+        r.touchPane(tab: src, name: "b")                 // "b" is the focused pane
+        let arrival = r.tabs.first { $0.id == src }!.lastActive["b"]!
+        let ref = SessionRef(hostID: "local", name: "b")
+        _ = r.movePanePersisted(from: src, ref: ref, to: dst)   // pending exit-stamp follows the move
+        r.touchPane(tab: dst, name: "x")                 // focus finally leaves "b"
+        #expect(r.tabs.first { $0.id == dst }!.lastActive["b"]! > arrival)
+    }
+
+    @Test func flushPaneExit_stampsAndClears() {
+        let r = reset()
+        let t = makeTab(r, names: ["a", "b"])
+        r.touchPane(tab: t, name: "a")
+        let arrival = r.tabs.first { $0.id == t }!.lastActive["a"]!
+        r.flushPaneExit()                                // window closes: departure recorded now
+        let flushed = r.tabs.first { $0.id == t }!.lastActive["a"]!
+        #expect(flushed >= arrival)
+        // The pending target was cleared — the next touch must not stamp "a" again.
+        r.touchPane(tab: t, name: "b")
+        #expect(r.tabs.first { $0.id == t }!.lastActive["a"]! == flushed)
+    }
 }
 #endif
