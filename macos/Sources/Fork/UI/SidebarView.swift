@@ -11,26 +11,31 @@ struct SidebarView: View {
     @State private var draggingTab: TabModel.ID?
     @State private var draggingHost: ForkHost.ID?
     @FocusState private var renameFieldFocused: Bool
-    @AppStorage("forkSidebarCompact") private var compact = false
     @AppStorage(SessionRegistry.kFilterTagged) private var filterTagged = false
     @AppStorage(SessionRegistry.kFocusMode) private var focusMode = false
     @AppStorage(SessionRegistry.kFocusCutoffHours) private var cutoffHours = 16.0
     @AppStorage(SessionRegistry.kFocusSortMRU) private var sortMRU = true
     @State private var showCutoffPopover = false
     @AppStorage("forkSidebarShowCC") private var showCC = false
-    /// ⌥-hold peeks the details view (`isCompact` below); ⌥⌥ toggles `compact` itself.
+    /// One density now (the old compact/details toggle is gone — read/unread status text
+    /// self-regulates row height instead): solo ⌥-hold ≥0.5s arms `revealAll` (re-expand
+    /// every read status line, fleet-wide glance); ⌥⌥ — two clean taps, committed on the
+    /// second release — sweeps everything read.
     /// Own monitor (not `navMonitor`) so this stays @State and doesn't churn the registry's
     /// `objectWillChange` → debounce-save on every modifier tap.
     @State private var optionHeld = false
     @State private var lastOptionPress: Date?
     @State private var flagsMonitor: Any?
+    /// Armed only by a *solo* hold — the 0.5s delay plus the key/mouse disqualifier keep
+    /// readline Meta chords (⌥b/⌥f) and ⌥-clicks from flashing the sidebar open mid-typing.
+    @State private var revealAll = false
+    @State private var revealArm: Timer?
+    /// Second ⌥ tap landed inside the 0.4s window — the sweep fires when it's released
+    /// cleanly (no hold, no chord), so "tap, then hold to peek" never reads as ⌥⌥.
+    @State private var sweepOnRelease = false
 
     private var fontFamily: String? { controller?.ghostty.config.forkFontFamily }
     private func mono(_ s: CGFloat, _ w: Font.Weight = .regular) -> Font { forkMono(s, w, fontFamily) }
-    /// Single source for the details view: header button writes `compact`, ⌥-hold transiently
-    /// overrides it, ⌥⌥ toggles it. Everything that differs between compact and details
-    /// (subtitle, ⌘N/host-label cell, host-header ⌘⌥N) gates on this.
-    private var isCompact: Bool { compact && !optionHeld }
 
     private var recentTags: ArraySlice<PaneTag> { registry.recentTags.prefix(5) }
 
@@ -60,33 +65,15 @@ struct SidebarView: View {
         .task { registry.setCCProbeEnabled(showCC) }
         .onChange(of: showCC) { registry.setCCProbeEnabled($0) }
         .onAppear {
-            flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown]) { ev in
-                // Local monitors are app-wide; QuickTerminal bypasses the fork seam, so
-                // ⌥⌥ in its window would otherwise flip our persisted `compact` flag.
-                guard ev.window === controller?.window else { return ev }
-                // A key typed while ⌥ is down is a Meta chord (readline ⌥b/⌥f, accented
-                // input, ⌘⌥N), not a tap — disqualify the in-flight press so two quick
-                // chords can't read as a double-tap and flip the persisted density.
-                if ev.type == .keyDown {
-                    if ev.modifierFlags.contains(.option) { lastOptionPress = nil }
-                    return ev
-                }
-                let held = ev.modifierFlags.contains(.option)
-                if held, !optionHeld {
-                    let now = Date()
-                    if let last = lastOptionPress, now.timeIntervalSince(last) < 0.4 {
-                        compact.toggle()
-                        lastOptionPress = nil
-                    } else {
-                        lastOptionPress = now
-                    }
-                }
-                if held != optionHeld { optionHeld = held }
-                return ev
+            flagsMonitor = NSEvent.addLocalMonitorForEvents(
+                matching: [.flagsChanged, .keyDown, .leftMouseDown, .rightMouseDown]
+            ) { ev in
+                handleOptionEvent(ev)
             }
         }
         .onDisappear {
             flagsMonitor.map(NSEvent.removeMonitor); flagsMonitor = nil
+            disarmOptionGesture(); optionHeld = false; lastOptionPress = nil
             // Stop the singleton's 3s ccPoll loop — `setCCProbeEnabled` cancels the
             // detached `Task`, which `.task`'s own auto-cancel can't (one-shot body
             // returns immediately). Otherwise leaks past last-window close
@@ -94,7 +81,75 @@ struct SidebarView: View {
             registry.setCCProbeEnabled(false)
         }
         .onReceive(NotificationCenter.default.publisher(
-            for: NSApplication.didResignActiveNotification)) { _ in optionHeld = false }
+            for: NSApplication.didResignActiveNotification)) { _ in
+                optionHeld = false
+                disarmOptionGesture()
+            }
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSWindow.didResignKeyNotification)) { note in
+                // An ⌥ release delivered to a sheet / QuickTerminal / another window never
+                // reaches `handleOptionEvent` (window guard) — losing key is the disarm.
+                guard (note.object as? NSWindow) === controller?.window else { return }
+                optionHeld = false
+                disarmOptionGesture()
+            }
+    }
+
+    /// ⌥ recognizer: a solo ⌥ held 0.5s → `revealAll`; ⌥⌥ (two clean taps within 0.4s) →
+    /// quiet sweep (`markAllCCRead`), committed on the second *release* so a tap followed
+    /// by a hold reads as a retry of the peek, not a sweep. Any key or mouse event while
+    /// ⌥ is down is a chord (readline ⌥b/⌥f, accented input, ⌘⌥N, ⌥-click/⌥-drag in the
+    /// terminal), not a tap or a peek — it disqualifies the in-flight press for both.
+    private func handleOptionEvent(_ ev: NSEvent) -> NSEvent? {
+        // Local monitors are app-wide; QuickTerminal bypasses the fork seam, so ⌥⌥ in its
+        // window would otherwise sweep our read-state.
+        guard ev.window === controller?.window else { return ev }
+        if ev.type != .flagsChanged {
+            if ev.modifierFlags.contains(.option) {
+                lastOptionPress = nil
+                disarmOptionGesture()
+            }
+            return ev
+        }
+        let flags = ev.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let held = flags.contains(.option)
+        // "Solo" = no chord modifiers — ⌘⌥1-9 host jumps and other ⌘/⇧/⌃ chords must
+        // neither count as taps nor flash the reveal. Caps Lock / fn are not chords and
+        // must not kill the gesture.
+        let solo = held && flags.isDisjoint(with: [.command, .shift, .control])
+        if solo, !optionHeld {
+            let now = Date()
+            // A second press inside the 0.4s window is a *candidate* sweep — committed on
+            // release, so it can still turn into a hold (peek) or be disqualified.
+            sweepOnRelease = lastOptionPress.map { now.timeIntervalSince($0) < 0.4 } ?? false
+            lastOptionPress = now
+            // Solo-hold reveal arms after a beat (the cheatsheet's ⌘-hold idiom); instant
+            // would still flash open in the gap before a chord's keyDown lands. Re-check
+            // the hardware state at fire time — a release swallowed by a tracking loop or
+            // delivered to another window must not latch it on.
+            revealArm = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { _ in
+                if NSEvent.modifierFlags.contains(.option) { revealAll = true }
+            }
+        }
+        if !held {
+            // Tap-tap commits here — unless the press became a hold (the peek fired: you
+            // were retrying the glance, not asking to sweep) or was disqualified above.
+            let commitSweep = sweepOnRelease && !revealAll
+            disarmOptionGesture()
+            if commitSweep {
+                registry.markAllCCRead()
+                lastOptionPress = nil   // a third tap shouldn't chain into another sweep
+            }
+        }
+        if held != optionHeld { optionHeld = held }
+        return ev
+    }
+
+    /// Cancel a pending solo-hold reveal, drop an active one, and abandon a half-completed ⌥⌥.
+    private func disarmOptionGesture() {
+        revealArm?.invalidate(); revealArm = nil
+        sweepOnRelease = false
+        if revealAll { revealAll = false }
     }
 
     // MARK: Header
@@ -104,10 +159,6 @@ struct SidebarView: View {
             iconButton("plus", help: "New tab") { controller?.showNewSessionSheet() }
             iconButton("server.rack", help: "Hosts") { controller?.showHostsSheet() }
             iconButton("sidebar.left", help: "Hide sidebar") { controller?.toggleSidebar() }
-            iconButton(compact ? "rectangle.expand.vertical" : "rectangle.compress.vertical",
-                       help: compact ? "Show details" : "Hide details") {
-                withAnimation(.snappy(duration: 0.12)) { compact.toggle() }
-            }
             iconButton(filterTagged ? "tag.fill" : "tag",
                        help: filterTagged ? "Show all" : "Tagged only",
                        tint: filterTagged ? Theme.clay : nil) {
@@ -175,12 +226,9 @@ struct SidebarView: View {
                 ForEach(Array(tabs.enumerated()), id: \.element.id) { i, tab in
                     VStack(alignment: .leading, spacing: 3) {
                         // ⌘N + host on its own row above the tab — frees the ~56pt leading
-                        // column that was truncating pane titles. Same layout in compact
-                        // mode (it used to swap to an inline leading dot, which read as a
-                        // different view entirely); compact's density win is paneRow
-                        // dropping its subtitle/age lines, not a different structure. This
-                        // caption is also the tab-level right-click target — a default-
-                        // titled single-pane tab has no `tabHeading` to carry the menu.
+                        // column that was truncating pane titles. This caption is also the
+                        // tab-level right-click target — a default-titled single-pane tab
+                        // has no `tabHeading` to carry the menu.
                         let host = registry.host(id: tab.hostID)
                         // ⌘N left, dot+host right — caption recedes behind the heading.
                         HStack(spacing: 6) {
@@ -267,7 +315,7 @@ struct SidebarView: View {
                     stateDot(controller?.rollup(hostID: host.id), accent: host.accent)
                         .padding(.trailing, 6)
                 }
-                if !isCompact, let i = registry.hosts.firstIndex(where: { $0.id == host.id }), i < 9 {
+                if let i = registry.hosts.firstIndex(where: { $0.id == host.id }), i < 9 {
                     keyHint("⌘⌥\(i + 1)")
                 }
                 Text("\(tabs.count)").font(mono(10)).foregroundStyle(.secondary)
@@ -450,9 +498,9 @@ struct SidebarView: View {
         let live = showCC ? registry.ccLive[tab.hostID]?[ref.key] : nil
         let accent = Theme.hostAccent(registry.host(id: tab.hostID))
         let dot = registry.dot(ref: ref)
-        // Rail-tooltip text: "what is it waiting for" is the triage answer for a blocked
-        // pane. Scoped to .blocked — a stale `needs` on a working pane reads as a false
-        // alarm. ccLine derives the same text itself for the red subtitle.
+        // Rail-tooltip + red-subtitle text: "what is it waiting for" is the triage answer
+        // for a blocked pane. Scoped to .blocked — a stale `needs` on a working pane reads
+        // as a false alarm. Shared with `ccLine` so the two can't derive differently.
         let blockedDetail = dot == .blocked ? live?.attention : nil
         // Recency lives in three carriers, not a column: afterglow on the row background
         // (the short-term "where was I just now" trail — user focus only, or every agent
@@ -465,6 +513,19 @@ struct SidebarView: View {
         // don't publish) and must be re-read inside the row's clock.
         let ccStamp = { showCC ? registry.ccUpdatedAt[tab.hostID]?[ref.key] : nil }
         let lastSeen = { [tab.lastActive[ref.key], ccStamp()].compactMap { $0 }.max() }
+        // Read/unread for the activity text: the focused pane's status is in front of you,
+        // and text unchanged since you last left a pane is already read — both demote to a
+        // dim one-liner (never fully hidden: a vanished line is indistinguishable from "CC
+        // has nothing to say", and the last summary often carries paths/PR numbers you still
+        // need). New text after you've moved away renders bright and multi-line, so the
+        // sidebar reads as unread activity, not a transcript. ⌥-hold (`revealAll`) and the
+        // row hover peek recover the full text; the blocked question is not gated here —
+        // it has its own ack (`.viewed` in PaneMachine).
+        let detail = live?.detail
+        let caughtUp = focused
+            || (detail != nil && detail == registry.ccSeenDetail[tab.hostID]?[ref.key])
+        let unread = detail != nil && !caughtUp
+        let read = detail != nil && caughtUp && !revealAll
         // tick: glow decay, doze, and the peek age all derive from wall-clock age — without
         // a clock, a row nothing else re-renders (showCC off, no focus changes) would hold
         // a stale glow indefinitely.
@@ -487,22 +548,25 @@ struct SidebarView: View {
                         renameField(seed: userLabel ?? ref.name, font: mono(12))
                     } else if let surface {
                         PaneLabel(surface: surface, userLabel: userLabel, fallback: ref.name,
-                                  active: active, compact: isCompact || showCC, fontFamily: fontFamily)
+                                  active: active, suppressSubtitle: showCC, fontFamily: fontFamily)
                     } else {
                         Text(userLabel ?? ref.name).font(mono(12)).lineLimit(1)
                             .foregroundStyle(active ? .primary : .secondary)
                     }
                     if showCC {
-                        // Replaces PaneLabel's zmx-name subtitle (suppressed via the
-                        // `compact || showCC` above) — net zero lines. Fixed-height slot so
-                        // focus-mode reorder doesn't gap rows where `ccLine` is empty.
+                        // Replaces PaneLabel's zmx-name subtitle (suppressed via `showCC`
+                        // above). Min-height (not fixed) slot: empty `ccLine`s still reserve
+                        // a line so focus-mode reorder doesn't gap rows, but a row with
+                        // unread CC status text may grow to 3 subtitle lines (4 total — the
+                        // wrap cap lives in `ccLine`).
                         // `cached` only for placeholder rows (no surface yet) — on a hydrated
                         // pane where CC has exited it'd show the dead session's name as stale.
                         ccLine(live: live,
                                cached: surface == nil ? tab.ccNames[ref.key] : nil,
                                fallback: ref.name,
-                               blocked: dot == .blocked)
-                            .frame(height: 12, alignment: .topLeading)
+                               attention: blockedDetail,
+                               read: read)
+                            .frame(minHeight: 13, alignment: .topLeading)
                     }
                 }
                 Spacer()
@@ -536,9 +600,12 @@ struct SidebarView: View {
             // Long-tail recency: untouched-for-an-hour rests, past the focus cutoff sleeps.
             // Content only — selection/glow backgrounds and the StatusRail overlay keep full
             // strength. Never dozed: the active tab (literally on screen), hovered rows
-            // (hover means you're trying to read it), and blocked rows (a pane asking for
-            // you must not be the faintest row in the sidebar).
-            .opacity(active || hovered || dot == .blocked
+            // (hover means you're trying to read it), blocked rows (a pane asking for you
+            // must not be the faintest row in the sidebar), rows with unread status text
+            // (doze keys on *your* visits, so it would dim hardest exactly the catch-up
+            // content the unread model exists to surface), and every row while the ⌥
+            // reveal is held (you're explicitly trying to read it all).
+            .opacity(active || hovered || dot == .blocked || unread || revealAll
                      ? 1
                      : Theme.doze(lastSeen(),
                                   cutoff: SessionRegistry.focusCutoffSeconds(hours: cutoffHours)))
@@ -623,30 +690,70 @@ struct SidebarView: View {
 
     /// CC subtitle — status lives in the right-edge rail; recency is the row's afterglow /
     /// doze and the hover peek's age line.
-    /// Blocked: the question CC is asking, in red. Otherwise `name · detail` is a live
-    /// one-line activity feed (what the session is, what it's doing / last did), falling
-    /// back to cwd basename, then the cached last-seen name for placeholder rows. Always
-    /// returns a `Text` (empty when no label) so the call-site `.frame(height: 12)`
-    /// actually reserves the slot; `EmptyView().frame(...)` is a layout no-op.
+    /// Blocked: the question CC is asking, in bright `.primary` (the red lives in the
+    /// rail). Otherwise `name · detail` is a live
+    /// activity feed (what the session is, what it's doing / last did), falling back to
+    /// cwd basename, then the cached last-seen name for placeholder rows. Unread text is
+    /// secondary and wraps to 3 lines so the activity is readable in place; `read` text
+    /// (focused pane, or nothing new since the user last left it — see `ccSeenDetail`)
+    /// demotes to one tertiary line: still a scent trail of what the session last said,
+    /// but visually "done". CC session names render a half-step heavier (.medium) than the
+    /// status text — without it the name reads as a second pane title one row down. The
+    /// question (`attention`) is never demoted here — it has its own ack. Always returns a
+    /// `Text` (empty when no label) so the call-site `.frame(minHeight:)` actually reserves
+    /// the slot; `EmptyView().frame(...)` is a layout no-op.
     private func ccLine(live: CCProbe.Info?, cached: String?, fallback: String,
-                        blocked: Bool) -> some View {
+                        attention: String?, read: Bool) -> some View {
         // cwd basename is only useful when more specific than the pane's own name — an
         // unnamed CC at a shared repo root would read identically on every row.
         let cwdLeaf = live?.cwd
             .map { ($0 as NSString).lastPathComponent }
             .flatMap { $0 == fallback ? nil : $0 }
-        let attention = blocked ? live?.attention : nil
-        let activity = [live?.name, live?.detail].compactMap { $0 }.joined(separator: " · ")
+        // The agent identity reads as small caps — a typographic role change (label-like)
+        // rather than a third color: uppercased at a smaller size with a touch of tracking,
+        // because terminal mono families rarely carry a real smcp feature for
+        // `Font.smallCaps()` to use. Color stays with the line (secondary unread / tertiary
+        // read or cached) so "dim = read" remains one rule.
+        func name(_ n: String) -> Text {
+            Text(n.uppercased()).font(mono(9, .medium)).kerning(0.5)
+        }
         // `cached` is for the CC-exited case only; a running-but-unnamed session must not
         // fall through to the previous session's name in `.secondary` (live) styling.
-        let text = attention
-            ?? (live != nil ? (activity.isEmpty ? (cwdLeaf ?? "") : activity) : (cached ?? ""))
-        return Text(text)
-            .font(mono(9)).lineLimit(1)
-            .foregroundStyle(attention != nil ? AnyShapeStyle(Theme.blocked)
-                             : live != nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
-        // Truncation is recoverable via the row-level hover peek (paneRow's `.help`),
-        // which supersets this line — no per-Text tooltip here so the two can't disagree.
+        let label: Text
+        if let attention {
+            label = Text(attention)
+        } else if let live {
+            switch (live.name, live.detail) {
+            case let (n?, d?): label = name(n) + Text(" · \(d)")
+            case let (n?, nil): label = name(n)
+            case let (nil, d?): label = Text(d)
+            case (nil, nil): label = Text(cwdLeaf ?? "")
+            }
+        } else {
+            label = cached.map(name) ?? Text("")
+        }
+        // The question renders bright, not red: with several agents blocked at once a
+        // 3-line red paragraph per row reads as a wall of alarm. Red stays on the
+        // StatusRail bar; the question earns attention by being the only `.primary`
+        // subtitle text in the sidebar.
+        let style: AnyShapeStyle = attention != nil ? AnyShapeStyle(.primary)
+            : (read || live == nil) ? AnyShapeStyle(.tertiary)
+            : AnyShapeStyle(.secondary)
+        return label
+            // `attention == nil`: the read-state belongs to the detail text only — a blocked
+            // question must keep its 3 lines even when the unrelated detail counts as read
+            // (⌥⌥ sweep, unchanged-detail exit-stamp, question arriving while focused).
+            // `live == nil`: a cached placeholder name stays one line, keeping cold-restored
+            // rows as uniform as the old fixed-height slot did.
+            .font(mono(10)).lineLimit((read || live == nil) && attention == nil ? 1 : 3)
+            // vertical: true — claim the wrapped height even when the layout pass proposes
+            // a tight one (otherwise the text can collapse back to one ellipsized line);
+            // horizontal stays flexible so it still wraps to the sidebar width.
+            .fixedSize(horizontal: false, vertical: true)
+            .foregroundStyle(style)
+        // Truncation past the cap is recoverable via the row-level hover peek (paneRow's
+        // `.help`), which supersets this line — no per-Text tooltip here so the two can't
+        // disagree.
     }
 
     // MARK: -
@@ -700,7 +807,7 @@ private struct PaneLabel: View {
     let userLabel: String?
     let fallback: String
     let active: Bool
-    let compact: Bool
+    let suppressSubtitle: Bool
     let fontFamily: String?
     var body: some View {
         // Upstream's `titleFallbackTimer` sets `"👻"` after 500ms if no OSC title arrived
@@ -713,7 +820,7 @@ private struct PaneLabel: View {
         return VStack(alignment: .leading, spacing: 0) {
             Text(label).font(forkMono(12, .regular, fontFamily)).lineLimit(1)
                 .foregroundStyle(active ? .primary : .secondary)
-            if !compact && label != fallback {
+            if !suppressSubtitle && label != fallback {
                 Text(fallback).font(forkMono(9, .regular, fontFamily)).lineLimit(1)
                     .foregroundStyle(.tertiary)
             }
