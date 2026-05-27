@@ -13,6 +13,8 @@ struct HostDetailView: View {
     @State private var slot: Int
     @State private var sessions = ZmxAdapter.ListResult()
     @State private var loading = true
+    @State private var unreachable = false
+    @State private var killError: String?
 
     init(host: ForkHost, onRemove: @escaping () -> Void) {
         self.host = host; self.onRemove = onRemove
@@ -50,6 +52,10 @@ struct HostDetailView: View {
             }
             sessionList.frame(maxHeight: .infinity)
 
+            if let killError {
+                Text(killError).font(.caption).foregroundStyle(.red).lineLimit(2)
+            }
+
             if host.id != ForkHost.local.id {
                 Button("Remove Host", role: .destructive, action: onRemove)
             }
@@ -66,6 +72,12 @@ struct HostDetailView: View {
     @ViewBuilder private var sessionList: some View {
         if loading {
             HStack { ProgressView().controlSize(.small); Text("Listing…").foregroundStyle(.secondary) }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if unreachable {
+            // Distinct from "No sessions": the query failed, so the sessions are very likely
+            // still alive — saying "none" here is how people conclude their work is gone.
+            Text("Couldn't reach \(host.label) — check ssh / zmx, then ⟳")
+                .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if sessions.managed.isEmpty && sessions.external.isEmpty {
             Text("No sessions").foregroundStyle(.secondary)
@@ -85,11 +97,19 @@ struct HostDetailView: View {
             Spacer()
             SessionMetaLabel(entry: e)
             Button("Kill") {
-                if e.external { sessions.external.removeAll { $0.name == e.name } }
-                else { sessions.managed.removeAll { $0.name == e.name } }
+                // No optimistic removal: a kill that fails (host briefly unreachable,
+                // session already gone) must not leave the row missing while the session
+                // keeps running — re-list and let reality drive the UI.
                 Task {
                     let ref = SessionRef(hostID: host.id, name: e.name, external: e.external)
-                    try? await ZmxAdapter.kill(host: host, ref: ref)
+                    do {
+                        try await ZmxAdapter.kill(host: host, ref: ref)
+                        killError = nil
+                    } catch {
+                        killError = "Couldn't kill \(e.name) — " +
+                            (error is CancellationError ? "timed out" : String(describing: error))
+                    }
+                    await reload()
                 }
             }
             .buttonStyle(.borderless).foregroundStyle(.red)
@@ -98,7 +118,9 @@ struct HostDetailView: View {
 
     private func reload() async {
         loading = true
-        sessions = await ZmxAdapter.list(host: host)
+        let r = await ZmxAdapter.list(host: host)
+        unreachable = (r == nil)
+        sessions = r ?? .init()
         loading = false
     }
 
