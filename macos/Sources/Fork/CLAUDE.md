@@ -149,8 +149,16 @@ Fork/
 
 `Transport.wrap` / `controlArgv` are the **only** places strings meet a shell. `SSHTarget`
 and `SessionRef.name` are validated against `^[A-Za-z0-9._-]+$`; `shq` single-quotes argv.
-For ssh, the remote command is double-quoted (`shq(shq(argv))`). Don't build shell strings
-anywhere else.
+For ssh, the remote command is double-quoted (`shq(shq(argv))`) and both ssh argv builders
+pass `--` before the destination. Don't build shell strings anywhere else.
+
+Beyond the shell layer: **external** session names bypass the regex (they come from remote
+`zmx list` verbatim) — `ZmxAdapter.partition` and `Persistence.scrub` drop leading-`-` names
+so they can't become zmx options; `{cwd}` for hover commands must be an absolute path
+(`ZmxAdapter.expand` degrades anything else to `.`) because it originates from OSC 7 / the
+CC probe, both remote-controlled; cached CC names are `stripControl`'d before they reach a
+local pty. On shared-uid hosts the probe still transfers (and heartbeats) every user's CC
+session files — treat `name`/`detail`/`needs` from such hosts as untrusted display text.
 
 ## Hover commands
 
@@ -214,6 +222,17 @@ jj git push --bookmark fork --remote origin   # never push to upstream
 # Re-signed with `ghostty-fork-dev` (or $FORK_SIGN_IDENTITY) so TCC grants persist.
 ./scripts/fork-release.sh
 ```
+
+**Post-rebase smoke pass** (fork-check + a green build can still hide quiet behavior breaks —
+these four exercise the upstream contracts the fork leans on hardest):
+1. Switch tabs in the sidebar, then ⌘Z — must NOT swap the previous tab's tree in (undo
+   retargeting contract).
+2. Background a pane until it settles, click the notification banner — must focus that tab
+   (UN-delegate proxy contract).
+3. Open a new window — sidebar on the left, terminal shifted, no overlap (contentView
+   layout-surgery contract).
+4. Run an `overlay`-mode hover command — panel opens, command runs, panel closes on exit
+   (QuickTerminal animateIn / wait-after-command contract).
 
 ## Backlog
 

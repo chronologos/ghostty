@@ -27,6 +27,8 @@ struct NewSessionView: View {
     let onSubmit: (NewSessionIntent) -> Void
     let onCancel: () -> Void
 
+    @State private var unreachable = false
+
     init(defaultHostID: ForkHost.ID,
          onSubmit: @escaping (NewSessionIntent) -> Void,
          onCancel: @escaping () -> Void) {
@@ -47,10 +49,12 @@ struct NewSessionView: View {
         .onAppear { placeholder = registry.uniqueAutoName() }
         .task(id: hostID) {
             recents = nil
+            unreachable = false
             guard let h = registry.host(id: hostID) else { return }
             let r = await ZmxAdapter.list(host: h)
             guard !Task.isCancelled else { return }
-            recents = r
+            unreachable = (r == nil)
+            recents = r ?? .init()
         }
     }
 
@@ -106,7 +110,10 @@ struct NewSessionView: View {
             }
             .overlay {
                 if recents.managed.isEmpty && recents.external.isEmpty {
-                    Text("No sessions").foregroundStyle(.secondary)
+                    // "Couldn't reach" ≠ "No sessions" — a failed query must not imply the
+                    // host is empty.
+                    Text(unreachable ? "Couldn't reach this host" : "No sessions")
+                        .foregroundStyle(.secondary)
                 }
             }
         } else {
