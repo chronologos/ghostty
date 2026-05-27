@@ -73,6 +73,14 @@ final class SessionRegistry: ObservableObject {
     /// displayed value tracks the actual heartbeat — reading `ccLive[].updatedAt` instead
     /// would freeze at time-of-last-status-change.
     private(set) var ccUpdatedAt: [ForkHost.ID: [String: Date]] = [:]
+    /// Status text the user has caught up on, keyed like `ccLive`: stamped with the pane's
+    /// current `detail` when focus *leaves* it (exit-stamp / window close) or by the ⌥⌥
+    /// sweep, so the sidebar reads as unread activity rather than a transcript — `ccLine`
+    /// demotes text to a dim one-liner while it still equals this. Not @Published (a row
+    /// only needs to flip on the next activation/probe render, both of which already
+    /// publish; `markAllCCRead` sends explicitly) and not persisted (a fresh launch shows
+    /// everything again).
+    private(set) var ccSeenDetail: [ForkHost.ID: [String: String]] = [:]
     private var ccPoll: Task<Void, Never>?
 
     /// Not @Published: pure surface→session bookkeeping the sidebar never renders
@@ -194,6 +202,7 @@ final class SessionRegistry: ObservableObject {
         tabs.removeAll { $0.hostID == id }
         if ccLive[id] != nil { ccLive[id] = nil }
         ccUpdatedAt[id] = nil
+        ccSeenDetail[id] = nil
         panes = panes.filter { $0.key.hostID != id }
         if let active = activeTabID, !tabs.contains(where: { $0.id == active }) { activeTabID = nil }
         pruneRecentTags()
@@ -264,13 +273,47 @@ final class SessionRegistry: ObservableObject {
     /// next touch arrives. Not persisted: a stale exit-stamp across relaunch is meaningless.
     private var lastTouched: (TabModel.ID, String)?
 
-    /// Stamp a departed pane's `lastActive` at "now". Guards: skip if the entry was pruned
-    /// (don't resurrect a removed pane) or the tab was dismissed while focused (the
-    /// exit-stamp must not undo Hide — only a touch *of that tab* clears `dismissedAt`).
+    /// Stamp a departed pane's `lastActive` at "now", and its current CC `detail` as seen
+    /// (`ccSeenDetail`) — whatever was on the status line when you walked away is read; only
+    /// text CC writes after that re-expands the row.
     private func exitStamp(_ prev: (TabModel.ID, String)) {
-        guard let p = tabs.firstIndex(where: { $0.id == prev.0 }),
-              tabs[p].dismissedAt == nil, tabs[p].lastActive[prev.1] != nil else { return }
+        guard let p = tabs.firstIndex(where: { $0.id == prev.0 }) else { return }
+        // Read-state stamps regardless of the recency guards below — what was in front of
+        // you when you left is read even if the same gesture Hid the tab. Keep the previous
+        // stamp through a transient nil (probe gap, CC restart): wiping it would re-flag
+        // the same old text as unread on the next poll.
+        if let d = ccLive[tabs[p].hostID]?[prev.1]?.detail {
+            ccSeenDetail[tabs[p].hostID, default: [:]][prev.1] = d
+        }
+        // The MRU stamp keeps its guards: skip if the entry was pruned (don't resurrect a
+        // removed pane) or the tab was dismissed while focused (the exit-stamp must not
+        // undo Hide — only a touch *of that tab* clears `dismissedAt`).
+        guard tabs[p].dismissedAt == nil, tabs[p].lastActive[prev.1] != nil else { return }
         tabs[p].lastActive[prev.1] = Date()
+    }
+
+    /// ⌥⌥ "quiet sweep": mark every pane's current status text read in one gesture — the
+    /// fleet-wide counterpart of leaving a pane, for the return-from-away wall where nothing
+    /// has actually been visited yet. Demotes, never deletes — rows keep their dim one-line
+    /// trace, and anything CC says *after* the sweep is unread again. Explicit publish:
+    /// nothing this writes is @Published, and the sweep should repaint now, not on the next
+    /// probe tick.
+    func markAllCCRead() {
+        // Delta-guarded: a second ⌥⌥ (or one with nothing unread) must not publish — the
+        // send re-evaluates the whole sidebar and tickles the debounce-save sink for
+        // nothing (`ccSeenDetail` isn't persisted). Scoped to sessions attached in some
+        // tab: `ccLive` also carries never-attached sessions on the host, and "read" must
+        // only ever mean "was on a row you could have seen".
+        var pending: [(ForkHost.ID, String, String)] = []
+        for (host, infos) in ccLive {
+            let attached = Set(tabs.filter { $0.hostID == host }.flatMap { $0.tree.leafRefs.map(\.key) })
+            for (key, info) in infos where attached.contains(key) {
+                if let d = info.detail, ccSeenDetail[host]?[key] != d { pending.append((host, key, d)) }
+            }
+        }
+        guard !pending.isEmpty else { return }
+        objectWillChange.send()
+        for (host, key, d) in pending { ccSeenDetail[host, default: [:]][key] = d }
     }
 
     /// Focus is leaving the fork window entirely (window close, not a pane switch): record
