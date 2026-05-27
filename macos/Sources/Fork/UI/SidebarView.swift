@@ -544,7 +544,7 @@ struct SidebarView: View {
         let caughtUp = focused
             || (detail != nil && detail == registry.ccSeenDetail[tab.hostID]?[ref.key])
         let unread = detail != nil && !caughtUp
-        let read = detail != nil && caughtUp && !revealAll
+        let read = detail != nil && caughtUp
         // tick: glow decay, doze, and the peek age all derive from wall-clock age — without
         // a clock, a row nothing else re-renders (showCC off, no focus changes) would hold
         // a stale glow indefinitely.
@@ -620,11 +620,12 @@ struct SidebarView: View {
             // Content only — selection/glow backgrounds and the StatusRail overlay keep full
             // strength. Never dozed: the active tab (literally on screen), hovered rows
             // (hover means you're trying to read it), blocked rows (a pane asking for you
-            // must not be the faintest row in the sidebar), rows with unread status text
+            // must not be the faintest row in the sidebar), and rows with unread status text
             // (doze keys on *your* visits, so it would dim hardest exactly the catch-up
-            // content the unread model exists to surface), and every row while the ⌥
-            // reveal is held (you're explicitly trying to read it all).
-            .opacity(active || hovered || dot == .blocked || unread || revealAll
+            // content the unread model exists to surface). The ⌥ reveal deliberately does
+            // NOT lift doze or brighten read text — it only un-clamps the line count, so
+            // holding ⌥ reads as "more of the same sidebar", not a different one.
+            .opacity(active || hovered || dot == .blocked || unread
                      ? 1
                      : Theme.doze(lastSeen(),
                                   cutoff: SessionRegistry.focusCutoffSeconds(hours: cutoffHours)))
@@ -764,7 +765,9 @@ struct SidebarView: View {
             // (⌥⌥ sweep, unchanged-detail exit-stamp, question arriving while focused).
             // `live == nil`: a cached placeholder name stays one line, keeping cold-restored
             // rows as uniform as the old fixed-height slot did.
-            .font(mono(10)).lineLimit((read || live == nil) && attention == nil ? 1 : 3)
+            // `!revealAll`: ⌥-hold lifts only this clamp — tertiary color and doze stay, so
+            // the peek expands the text without re-skinning the sidebar.
+            .font(mono(10)).lineLimit(((read && !revealAll) || live == nil) && attention == nil ? 1 : 3)
             // vertical: true — claim the wrapped height even when the layout pass proposes
             // a tight one (otherwise the text can collapse back to one ellipsized line);
             // horizontal stays flexible so it still wraps to the sidebar width.
