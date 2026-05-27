@@ -4,9 +4,21 @@ import CryptoKit
 
 /// Shell-safety identifier check. CLAUDE.md §Security: only validated names reach `Transport.wrap`.
 /// `\A…\z` not `^…$` — ICU `$` matches before a trailing line terminator, so `"foo\n"` would pass.
+/// Deliberately NOT tightened to forbid a leading `-`/`.`: existing fork.json entries were
+/// created under this charset and `validated()`/`scrub()` would silently drop them on the
+/// next launch. Option-injection is covered structurally instead — managed names always get
+/// the `{hostID}-` wire prefix, and both ssh argv builders pass `--` before the destination.
 private let identPattern = try! NSRegularExpression(pattern: #"\A[A-Za-z0-9._-]+\z"#)
 func isValidIdent(_ s: String) -> Bool {
     identPattern.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil
+}
+
+/// External session names bypass `isValidIdent` (they come from remote `zmx list` verbatim;
+/// `shq` keeps them shell-inert) — but a leading `-` would be parsed by zmx itself as an
+/// option, so the one rule they do get lives here, shared by `ZmxAdapter.partition` and
+/// `Persistence.scrub`.
+func isSafeExternalName(_ s: String) -> Bool {
+    !s.isEmpty && !s.hasPrefix("-")
 }
 
 /// A machine zmx sessions can run on.
@@ -47,8 +59,6 @@ struct ForkHost: Codable, Identifiable, Hashable {
 
     private enum CodingKeys: String, CodingKey {
         case id, label, transport, expanded, accentSlot
-        case accentHue   // phantom — legacy migration only; drop with `encode(to:)` once
-                         // every fork.json has been re-saved (one release)
     }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
@@ -58,20 +68,11 @@ struct ForkHost: Codable, Identifiable, Hashable {
         expanded = try c.decodeIfPresent(Bool.self, forKey: .expanded) ?? true
         // Clamp — fork.json is hand-editable; an out-of-range slot would reach
         // `palette[-1]` via `pair().a` (Swift `%` keeps the dividend's sign) and trap on
-        // launch. nil → `resolveAutoSlots` re-derives. Migrate legacy `accentHue` →
-        // nearest-palette solid.
+        // launch. Absent or unknown-key (legacy `accentHue`) → nil → `resolveAutoSlots`
+        // re-derives.
         if let s = try c.decodeIfPresent(Int.self, forKey: .accentSlot) {
             accentSlot = (0..<Self.slotCount).contains(s) ? s : nil
-        } else if let h = try c.decodeIfPresent(Double.self, forKey: .accentHue) {
-            let i = Self.palette.enumerated().min { abs($0.1 - h) < abs($1.1 - h) }!.0
-            accentSlot = i * Self.N + i
         }
-    }
-    func encode(to e: Encoder) throws {
-        var c = e.container(keyedBy: CodingKeys.self)
-        try c.encode(id, forKey: .id); try c.encode(label, forKey: .label)
-        try c.encode(transport, forKey: .transport); try c.encode(expanded, forKey: .expanded)
-        try c.encodeIfPresent(accentSlot, forKey: .accentSlot)
     }
 
     enum Transport: Codable, Hashable {

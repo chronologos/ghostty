@@ -89,10 +89,15 @@ final class ForkWindowController: TerminalController {
         cfg.command = ZmxAdapter.detachedScript(host: host, ref: ref, ccName: ccName)
         let placeholder = Ghostty.SurfaceView(app, baseConfig: cfg)
         detachedPlaceholders.insert(placeholder.id)
-        registry.bind(surface: placeholder.id, to: ref)
-        observeProgress(placeholder)
+        // Tear the dead surface down BEFORE binding its replacement: with the placeholder
+        // already bound to the same ref, `isLastSurface` sees a sibling, the `.detached`
+        // phase-reset never fires, and a pane that died mid-turn keeps a wedged `.working`
+        // spinner (the placeholder replays no OSC to settle it). Stop-then-unbind order
+        // within the teardown still matters — stopObservingProgress reads `refs[id]`.
         stopObservingProgress(dead.id)
         registry.unbind(surface: dead.id)
+        registry.bind(surface: placeholder.id, to: ref)
+        observeProgress(placeholder)
         return placeholder
     }
 
@@ -155,7 +160,7 @@ final class ForkWindowController: TerminalController {
                 killEnabled: !refs.isEmpty,
                 onDetach: { [weak self] in self?.closeForkTab(tab.id) },
                 onKill: { [weak self] in
-                    for ref in refs { Task { try? await ZmxAdapter.kill(host: host, ref: ref) } }
+                    self?.killSessions(refs, on: host)
                     self?.closeForkTab(tab.id)
                 }
             )
@@ -174,7 +179,7 @@ final class ForkWindowController: TerminalController {
                     // Unbind first so the pty-death → placeholder path short-circuits.
                     self.stopObservingProgress(surface.id)
                     self.registry.unbind(surface: surface.id)
-                    Task { try? await ZmxAdapter.kill(host: host, ref: ref) }
+                    self.killSessions([ref], on: host)
                     self.dropPane(tab: tab, ref: ref, surface: surface)
                 }
             )
@@ -323,7 +328,18 @@ final class ForkWindowController: TerminalController {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
             p.arguments = argv
-            try? p.run()
+            // launchd PATH means "tool not found" (env exits 127) is the common failure for
+            // these bindings — without at least a log line it's indistinguishable from the
+            // command doing nothing.
+            p.terminationHandler = { proc in
+                guard proc.terminationStatus != 0 else { return }
+                ForkBootstrap.logger.warning(
+                    "hover command \(argv.first ?? "?") exited \(proc.terminationStatus)")
+            }
+            do { try p.run() } catch {
+                ForkBootstrap.logger.warning(
+                    "hover command \(argv.first ?? "?") failed to launch: \(String(describing: error))")
+            }
         case .overlay:
             // Ephemeral — run argv directly (no zmx) in a fork-owned quick-terminal panel.
             // We do NOT touch `AppDelegate.quickController`: its lazy getter's
@@ -526,7 +542,10 @@ final class ForkWindowController: TerminalController {
     /// `tabGroup.windows.count > 1`, which is never true with `tabbingMode = .disallowed`.
     override func performAction(_ action: String, on surfaceView: Ghostty.SurfaceView) {
         let parts = action.split(separator: ":", maxSplits: 1).map(String.init)
-        switch parts[0] {
+        // `split` on an empty/all-separator string yields [], and upstream's action spelling
+        // is outside our control — fall through to super rather than trap.
+        guard let head = parts.first else { return super.performAction(action, on: surfaceView) }
+        switch head {
         case "previous_tab": stepTab(-1)
         case "next_tab": stepTab(1)
         case "last_tab":
@@ -601,6 +620,27 @@ final class ForkWindowController: TerminalController {
     }
 
     func removeHost(_ id: ForkHost.ID) {
+        guard let host = registry.host(id: id) else { return }
+        let tabCount = registry.tabs(on: id).count
+        // One misclick on a context menu otherwise erases every tab/label/tag for the host
+        // and the debounced autosave makes it durable within a second (zmx sessions survive,
+        // the sidebar organisation doesn't). Same idiom as `confirmKill`.
+        guard let window, tabCount > 0 else { performRemoveHost(id); return }
+        let alert = NSAlert()
+        alert.messageText = "Remove \(host.label)?"
+        alert.informativeText = "Removes \(tabCount) tab\(tabCount == 1 ? "" : "s") from the sidebar. zmx sessions keep running on the host."
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        // The Hosts panel is itself a sheet on this window — a second sheet on the same
+        // window queues invisibly behind it, so present on whatever is frontmost.
+        alert.beginSheetModal(for: window.attachedSheet ?? window) { [weak self] resp in
+            guard resp == .alertFirstButtonReturn else { return }
+            self?.performRemoveHost(id)
+        }
+    }
+
+    private func performRemoveHost(_ id: ForkHost.ID) {
         // dropLiveTab (not closeForkTab) — closeForkTab's positional-neighbour pick
         // would `activate` a dormant same-host sibling mid-loop and spawn its ssh/zmx
         // sessions for one frame each, on the host we're tearing down.
@@ -651,8 +691,31 @@ final class ForkWindowController: TerminalController {
         alert.alertStyle = .warning
         alert.beginSheetModal(for: window) { [weak self] resp in
             guard resp == .alertFirstButtonReturn else { return }
-            for ref in refs { Task { try? await ZmxAdapter.kill(host: host, ref: ref) } }
+            self?.killSessions(refs, on: host)
             self?.closeForkTab(tab.id)
+        }
+    }
+
+    /// Is any *other* visible fork window still open? Gates singleton teardown (the CC poll)
+    /// on window close — the registry is shared, so "this window is closing" is not the same
+    /// as "the fork is done with it".
+    static func anyOtherForkWindow(besides w: NSWindow?) -> Bool {
+        NSApp.windows.contains {
+            $0 !== w && ($0.isVisible || $0.isMiniaturized) && $0.windowController is ForkWindowController
+        }
+    }
+
+    /// Fire-and-track kills: a kill that silently didn't run (host briefly unreachable)
+    /// leaves the remote session — and any agent inside it — running forever while the tab
+    /// is already gone, so failures get a log line instead of vanishing into `try?`.
+    private func killSessions(_ refs: [SessionRef], on host: ForkHost) {
+        for ref in refs {
+            Task {
+                do { try await ZmxAdapter.kill(host: host, ref: ref) } catch {
+                    ForkBootstrap.logger.error(
+                        "zmx kill \(ref.name, privacy: .public) on \(host.label, privacy: .public) failed: \(String(describing: error), privacy: .public)")
+                }
+            }
         }
     }
 
@@ -867,6 +930,20 @@ final class ForkWindowController: TerminalController {
         // badge doesn't stick.
         for id in Array(progressSubs.keys) { stopObservingProgress(id) }
         endSheet()  // drops sheetResignSub; child-window auto-close doesn't guarantee resign-key fires first
+        // The sidebar's `.onDisappear` usually stops the cc poll + ⌥ monitor, but that path
+        // depends on upstream nilling `contentView` during close (a line upstream has marked
+        // as removable). Stop the poll here too — idempotent, and the sidebar re-enables it
+        // on its next appear — so a closed window can't leave a 3s ps/ssh probe running.
+        // Only when this is the *last* fork window: the registry is a singleton, and killing
+        // the probe under a surviving window's sidebar would silently freeze its CC status
+        // (its showCC toggle still reads "on" and nothing re-enables until it's flipped).
+        if !Self.anyOtherForkWindow(besides: window) { registry.setCCProbeEnabled(false) }
+        // The fork's two selector observers: without this a parked pane's pty exit after
+        // close still builds a placeholder surface — a fresh `zmx attach` pty — for a window
+        // that no longer exists. Scoped (not a blanket removeObserver(self)) so upstream's
+        // own observers stay intact for whatever super/dealloc still needs.
+        NotificationCenter.default.removeObserver(self, name: Ghostty.Notification.ghosttyCloseSurface, object: nil)
+        NotificationCenter.default.removeObserver(self, name: .ghosttyBellDidRing, object: nil)
         // Focus is leaving the window for good — record the focused pane's departure now,
         // so a reopen hours later can't back-date it to "just now" via the exit-stamp.
         registry.flushPaneExit()

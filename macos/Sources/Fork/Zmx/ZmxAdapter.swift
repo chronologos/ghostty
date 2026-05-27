@@ -60,14 +60,18 @@ enum ZmxAdapter {
     /// — both treat each element as one word, so an untrusted `cwd` stays inert. Substring
     /// substitution is intentionally not supported (would invite `"-C={cwd}"`-style configs
     /// that are still safe here but train the wrong habit).
+    /// `{cwd}` must be an absolute path: it comes from OSC 7 / the CC probe (both
+    /// remote-controlled), and a relative or dash-leading value handed to a local tool
+    /// (`open`, `lazygit -p`) would be parsed as an option or resolve somewhere surprising.
     static func expand(_ argv: [String], host: ForkHost, ref: SessionRef, cwd: String?) -> [String] {
         let hostStr = switch host.transport {
         case .local: host.label
         case .ssh(let t): t.connectionString
         }
+        let safeCwd = (cwd?.hasPrefix("/") ?? false) ? cwd! : "."
         return argv.map {
             switch $0 {
-            case "{cwd}": cwd ?? "."
+            case "{cwd}": safeCwd
             case "{ref}": ref.name
             case "{host}": hostStr
             default: $0
@@ -112,22 +116,32 @@ enum ZmxAdapter {
         var external: [ListEntry] = []
     }
 
-    /// `zmx list` (full k=v form) partitioned into fork-managed (prefix-stripped) and external.
-    /// Dead-socket lines (`err=…`) are dropped.
-    static func list(host: ForkHost, timeout: TimeInterval = 5) async -> ListResult {
+    /// `zmx list` partitioned into fork-managed and external. `nil` means the *query* failed
+    /// (host unreachable, ssh refused, zmx missing) — callers must not render that as an
+    /// empty-but-healthy host; an empty `ListResult` means the query worked and found nothing.
+    static func list(host: ForkHost, timeout: TimeInterval = 5) async -> ListResult? {
         let argv = host.transport.controlArgv([zmx(on: host), "list"])
-        guard let out = try? await run(argv: argv, timeout: timeout) else { return .init() }
-        let prefix = "\(host.id)-"
+        guard let out = try? await run(argv: argv, timeout: timeout) else { return nil }
+        return partition(out, hostID: host.id)
+    }
+
+    /// Pure half of `list()` (separated for tests): full k=v lines → fork-managed
+    /// (prefix-stripped) / external. Dead-socket lines (`err=…`) are dropped, as are names
+    /// `zmx` itself would parse as options (leading `-`) — those can never become a safe
+    /// `SessionRef`.
+    static func partition(_ output: String, hostID: ForkHost.ID) -> ListResult {
+        let prefix = "\(hostID)-"
         var r = ListResult()
-        for line in out.split(separator: "\n") {
+        for line in output.split(separator: "\n") {
             guard var e = parse(line: line) else { continue }
             if e.name.hasPrefix(prefix) {
                 e.name = String(e.name.dropFirst(prefix.count))
                 e.external = false
-                r.managed.append(e)
-            } else {
-                r.external.append(e)
             }
+            // Checked AFTER the prefix strip so `h1--foo` can't smuggle a dash-leading
+            // managed name through; applies to both partitions.
+            guard isSafeExternalName(e.name) else { continue }
+            if e.external { r.external.append(e) } else { r.managed.append(e) }
         }
         return r
     }
@@ -160,9 +174,11 @@ enum ZmxAdapter {
         // it one word. shq is total (POSIX `'` → `'\''`); see TransportTests.wrapSshInjection.
         let attach = host.transport.wrap([zmx(on: host), "attach", wireName(ref)])
         // External `ref.name` is raw remote `zmx list` output (validation is bypassed for
-        // externals — Persistence.swift:102) and reaches the local pty via `printf %s`.
+        // externals — Persistence.swift scrub) and reaches the local pty via `printf %s`.
+        // `ccName` round-trips through hand-editable fork.json, so it gets the same
+        // control-stripping before it is printed to the local terminal.
         let msg = "session \(stripControl(ref.name, max: 128)) — press ⏎ to reattach, ⌘⇧W to close"
-        let was = ccName.map { "; printf '\\033[2m  was: %s\\033[0m\\n' \(shq($0))" } ?? ""
+        let was = ccName.map { "; printf '\\033[2m  was: %s\\033[0m\\n' \(shq(stripControl($0, max: 96)))" } ?? ""
         return shq(["sh", "-c", "printf '%s\\n' \(shq(msg))\(was); read _; exec \(attach)"])
     }
 
@@ -170,7 +186,7 @@ enum ZmxAdapter {
     /// the trailing argv when *creating* the session, so an existing session ignores this and
     /// a fresh one shows the banner above its first prompt.
     static func restoreCmd(ccName: String) -> [String] {
-        ["sh", "-c", "printf '\\033[2m  was: %s\\033[0m\\n\\n' \(shq(ccName)); exec ${SHELL:-/bin/sh}"]
+        ["sh", "-c", "printf '\\033[2m  was: %s\\033[0m\\n\\n' \(shq(stripControl(ccName, max: 96))); exec ${SHELL:-/bin/sh}"]
     }
 
     static func kill(host: ForkHost, ref: SessionRef) async throws {
@@ -185,19 +201,30 @@ enum ZmxAdapter {
 
     // MARK: -
 
+    /// A control command that ran but exited non-zero — distinct from a timeout
+    /// (`CancellationError`). Carries the tail of stderr so "ssh: connect refused" /
+    /// "no such session" reach a log line or an alert instead of reading as success.
+    struct CommandError: Error, CustomStringConvertible {
+        let status: Int32
+        let stderr: String
+        var description: String { "exit \(status)" + (stderr.isEmpty ? "" : " — \(stderr)") }
+    }
+
     static func run(argv: [String], timeout: TimeInterval) async throws -> String {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         p.arguments = argv
         let pipe = Pipe()
+        let errPipe = Pipe()
         p.standardOutput = pipe
-        p.standardError = FileHandle.nullDevice
+        p.standardError = errPipe
         try p.run()
-        // Close our copy of the write-end now: the child has its dup, and with ours gone
+        // Close our copy of the write-ends now: the child has its dup, and with ours gone
         // `readDataToEndOfFile` sees EOF as soon as the child's copy closes. Otherwise a
         // grandchild that inherited the FD (ssh-via-ProxyCommand) can hold it open past the
         // child's death and the reader never returns.
         try? pipe.fileHandleForWriting.close()
+        try? errPipe.fileHandleForWriting.close()
         // `withThrowingTaskGroup` implicitly awaits ALL children at scope exit, so the
         // timeout only bounds wall-clock if the reader is guaranteed to return; SIGTERM
         // doesn't guarantee that, SIGKILL on the process group does (`Process` puts the
@@ -211,11 +238,37 @@ enum ZmxAdapter {
                     // Blocking read on GCD global, not the cooperative pool — under
                     // N-way fanout (⌘⇧K), pool-blocking reads would starve the
                     // timeout sleeper below and defeat the bound it's meant to enforce.
-                    await withCheckedContinuation { cont in
+                    try await withCheckedThrowingContinuation { cont in
+                        // stderr accumulates via a handler and is consulted only on failure —
+                        // success must NOT be gated on stderr EOF: ssh ControlMaster mux
+                        // masters and ProxyCommand helpers inherit stderr and hold it open
+                        // long after the client exits, and blocking on it would turn every
+                        // command on such hosts into a timeout (the same grandchild-FD class
+                        // the stdout comment above describes).
+                        let errBox = NSLock()
+                        var err = Data()
+                        errPipe.fileHandleForReading.readabilityHandler = { h in
+                            let chunk = h.availableData
+                            if chunk.isEmpty { h.readabilityHandler = nil; return }
+                            errBox.lock(); err.append(chunk); errBox.unlock()
+                        }
                         DispatchQueue.global().async {
-                            // No `waitUntilExit()` — we only need stdout, and `abort()`
-                            // reaps anything still alive on the way out.
                             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                            // stdout is at EOF, so the direct child (ssh/zmx) is done or was
+                            // killed by the timeout's SIGKILL — the wait here is momentary
+                            // and runs on a GCD thread, not the cooperative pool.
+                            p.waitUntilExit()
+                            errPipe.fileHandleForReading.readabilityHandler = nil
+                            errBox.lock(); let errSnapshot = err; errBox.unlock()
+                            // A failed control command must not read as "ran fine, empty
+                            // output" — that's how kills silently don't kill and unreachable
+                            // hosts render as "no sessions".
+                            guard p.terminationStatus == 0 else {
+                                let msg = String(decoding: errSnapshot.suffix(512), as: UTF8.self)
+                                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                                cont.resume(throwing: CommandError(status: p.terminationStatus, stderr: msg))
+                                return
+                            }
                             cont.resume(returning: String(decoding: data, as: UTF8.self))
                         }
                     }

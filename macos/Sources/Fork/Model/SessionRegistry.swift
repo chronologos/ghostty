@@ -81,6 +81,12 @@ final class SessionRegistry: ObservableObject {
     /// publish; `markAllCCRead` sends explicitly) and not persisted (a fresh launch shows
     /// everything again).
     private(set) var ccSeenDetail: [ForkHost.ID: [String: String]] = [:]
+    /// Hosts whose `zmx list` transport is currently failing (unreachable / ssh refused /
+    /// zmx missing), with the time of the first failed poll — drives the sidebar's
+    /// "unreachable" cue so hours-old status can't masquerade as live. Distinct from a nil
+    /// probe (which also covers "no CC sessions"); only a transport failure counts. Not
+    /// @Published — `noteHostReachability` publishes on the rare transition instead.
+    private(set) var hostUnreachableSince: [ForkHost.ID: Date] = [:]
     private var ccPoll: Task<Void, Never>?
 
     /// Not @Published: pure surface→session bookkeeping the sidebar never renders
@@ -203,6 +209,7 @@ final class SessionRegistry: ObservableObject {
         if ccLive[id] != nil { ccLive[id] = nil }
         ccUpdatedAt[id] = nil
         ccSeenDetail[id] = nil
+        hostUnreachableSince[id] = nil
         panes = panes.filter { $0.key.hostID != id }
         if let active = activeTabID, !tabs.contains(where: { $0.id == active }) { activeTabID = nil }
         pruneRecentTags()
@@ -377,6 +384,7 @@ final class SessionRegistry: ObservableObject {
             ccPoll?.cancel(); ccPoll = nil
             if !ccLive.isEmpty { ccLive = [:] }
             ccUpdatedAt = [:]
+            hostUnreachableSince = [:]
             // `blocked`/`blockSig` survive toggle (the machine holds the edge-detect latch),
             // but `ccBusy` must not — nothing else clears it once the poll stops, and `dot`
             // would wedge at `.working` forever.
@@ -391,18 +399,38 @@ final class SessionRegistry: ObservableObject {
                 tabs.contains { $0.hostID == h.id } && (h.transport.isLocal || tick % 5 == 0)
             }
             // Fan-out so one unreachable ssh host (5s timeout) doesn't head-of-line-block
-            // the local 3s cadence; merge each result as it arrives.
-            await withTaskGroup(of: (ForkHost.ID, [String: CCProbe.Info]?).self) { group in
+            // the local 3s cadence; merge each result as it arrives. The third tuple slot is
+            // "the transport itself failed" — `mergeCC` can't tell that apart from "no CC
+            // sessions" (both arrive as nil), and only the former should mark the host
+            // unreachable.
+            await withTaskGroup(of: (ForkHost.ID, [String: CCProbe.Info]?, Bool).self) { group in
                 for h in due {
                     group.addTask {
-                        let list = await ZmxAdapter.list(host: h)
-                        return (h.id, await CCProbe.probe(host: h, entries: list.managed + list.external))
+                        guard let list = await ZmxAdapter.list(host: h) else { return (h.id, nil, true) }
+                        return (h.id, await CCProbe.probe(host: h, entries: list.managed + list.external), false)
                     }
                 }
-                for await (id, result) in group { mergeCC(hostID: id, result: result) }
+                for await (id, result, listFailed) in group {
+                    mergeCC(hostID: id, result: result)
+                    noteHostReachability(id, unreachable: listFailed)
+                }
             }
             tick &+= 1
             try? await Task.sleep(for: .seconds(3))
+        }
+    }
+
+    /// Flip the per-host unreachable marker, publishing only on the transition (appearing or
+    /// clearing) — never per tick.
+    private func noteHostReachability(_ id: ForkHost.ID, unreachable: Bool) {
+        // Removed mid-tick (same drain race `mergeCC` guards against) — don't resurrect.
+        guard host(id: id) != nil else { return }
+        if unreachable, hostUnreachableSince[id] == nil {
+            objectWillChange.send()
+            hostUnreachableSince[id] = Date()
+        } else if !unreachable, hostUnreachableSince[id] != nil {
+            objectWillChange.send()
+            hostUnreachableSince[id] = nil
         }
     }
 

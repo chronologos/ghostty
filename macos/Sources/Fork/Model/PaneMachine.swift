@@ -48,6 +48,9 @@ struct PaneMachine: Equatable {
             return fire
         case .bell:
             defer { watched = false }
+            // A posted bell counts as "the user was told" — otherwise the 250ms settle that
+            // usually follows a completion bell posts a second banner for the same event.
+            if watched { notified = true }
             return watched
         case .viewed:
             // Preserve `.working` — old `clearWaiting` only touched `.waiting`. Clobbering
@@ -63,9 +66,11 @@ struct PaneMachine: Equatable {
             else if sig != blockSig { blocked = true }   // edge: new classifier output
             blockSig = isBlocked ? sig : nil
         case .probeStopped:
-            // Poll torn down (showCC off / host removed). `blocked` survives — it has other
-            // clear paths (`.viewed`/`.progress`) — but `ccBusy`'s only writer is the poll.
-            ccBusy = false
+            // Poll torn down (showCC off / host removed / unreachable tick). `blocked`
+            // survives — it has other clear paths (`.viewed`/`.progress`) — but `ccBusy`'s
+            // only writer is the poll, and a pending `.probeAbsent` strike is no longer
+            // "consecutive" once the poll was interrupted, so it resets too.
+            ccBusy = false; probeMissed = false
         case .probeAbsent:
             // Key not in this tick's `result`. First miss = gap (torn pid-file / CC
             // restart) — keep the latch. Second consecutive miss = CC exited — clear so

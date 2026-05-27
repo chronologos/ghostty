@@ -14,6 +14,7 @@ struct SplitPickerView: View {
     @EnvironmentObject private var registry: SessionRegistry
     @State private var name: String = ""
     @State private var recents: ZmxAdapter.ListResult?
+    @State private var unreachable = false
     @State private var sel: Int?
 
     private var nameValid: Bool {
@@ -49,12 +50,22 @@ struct SplitPickerView: View {
         }
         .padding()
         .frame(width: 280)
-        .task { recents = await ZmxAdapter.list(host: host) }
+        .task {
+            let r = await ZmxAdapter.list(host: host)
+            unreachable = (r == nil)
+            recents = r ?? .init()
+        }
     }
 
     @ViewBuilder private var list: some View {
         if recents == nil {
             ProgressView().controlSize(.small).frame(maxWidth: .infinity)
+        } else if unreachable && items.isEmpty {
+            // A failed query must not read as "no sessions" — the sessions are very likely
+            // still there; ⏎ still works (the new pane will surface the ssh error itself).
+            Text("couldn't reach \(host.label) — ⏎ still creates")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
         } else if items.isEmpty {
             Text(name.isEmpty ? "no sessions on \(host.label)" : "no match — ⏎ to create")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
