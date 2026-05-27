@@ -49,7 +49,7 @@ final class ForkPersistence {
     /// encoding deterministic, so a byte compare is a content compare.
     private var lastWritten: Data?
 
-    init() {
+    convenience init() {
         // Unsandboxed test host resolves `.applicationSupportDirectory` to the real
         // home — `xcodebuild test` would clobber the developer's fork.json via the
         // singleton's debounced save sink. Redirect under XCTest.
@@ -58,17 +58,65 @@ final class ForkPersistence {
             : FileManager.default
                 .urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
                 .appendingPathComponent("com.mitchellh.ghostty", isDirectory: true)
-        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        self.url = base.appendingPathComponent("fork.json")
+        self.init(directory: base)
+    }
+
+    /// Test seam: persistence rooted in an arbitrary directory.
+    init(directory: URL) {
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        self.url = directory.appendingPathComponent("fork.json")
     }
 
     func load() -> State {
         for candidate in [url, bakURL] {
-            guard let data = try? Data(contentsOf: candidate),
-                  let s = try? JSONDecoder().decode(State.self, from: data) else { continue }
+            guard let data = try? Data(contentsOf: candidate) else { continue }
+            guard let s = try? JSONDecoder().decode(State.self, from: data) else {
+                // Undecodable (corrupt / hand-edit gone wrong / future top-level change):
+                // copy it aside *now* — the debounced autosave would otherwise overwrite
+                // it with whatever loads next, and the save after that rotates the same
+                // loss into `.bak`, making it permanent.
+                preserve(candidate, reason: "undecodable")
+                continue
+            }
+            if s.version > State().version {
+                // Written by a newer build. The lenient decoder may have silently dropped
+                // fields it doesn't know; keep the original so the newer build can still
+                // read its own state back after a downgrade-then-upgrade round trip.
+                preserve(candidate, reason: "newer")
+            } else if lossyDropCount(in: data, decoded: s) > 0 {
+                // Per-element decode failures (the unknown-`Transport`-case class of schema
+                // change): the state still loads, minus those entries — preserve the
+                // original before the autosave makes the loss permanent.
+                preserve(candidate, reason: "partial")
+            }
+            // Seed the no-op gate with what's actually on disk so the first debounced save
+            // after launch doesn't rotate `.bak` for a byte-identical file.
+            if candidate == url { lastWritten = data }
             return validated(s)
         }
         return State()
+    }
+
+    /// Copy a problematic state file aside (e.g. `fork.json.undecodable`,
+    /// `fork.json.bak.partial`) so the autosave can't destroy the only good copy. Keyed on
+    /// the *source* file so a bad primary and a bad `.bak` in the same load don't clobber
+    /// each other's copy; overwrites a previous copy of the same kind — one generation per
+    /// failure class is enough to recover by hand.
+    private func preserve(_ file: URL, reason: String) {
+        let dest = file.appendingPathExtension(reason)
+        try? FileManager.default.removeItem(at: dest)
+        try? FileManager.default.copyItem(at: file, to: dest)
+        ForkBootstrap.logger.error(
+            "fork state \(file.lastPathComponent) is \(reason); copied aside to \(dest.lastPathComponent)")
+    }
+
+    /// How many `hosts`/`tabs` elements the lenient decoder dropped, judged against the raw
+    /// JSON — the signal that a schema change is silently eating state.
+    private func lossyDropCount(in data: Data, decoded: State) -> Int {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return 0 }
+        let rawHosts = (obj["hosts"] as? [Any])?.count ?? 0
+        let rawTabs = (obj["tabs"] as? [Any])?.count ?? 0
+        return max(0, rawHosts - decoded.hosts.count) + max(0, rawTabs - decoded.tabs.count)
     }
 
     func save(_ state: State?) {
@@ -114,12 +162,15 @@ final class ForkPersistence {
         return out
     }
 
-    /// `isValid` is the managed-name regex; external refs come from `zmx list` verbatim
-    /// and `shq` covers them at the shell boundary.
+    /// `isValid` is the managed-name regex; external refs only get the `isSafeExternalName`
+    /// rule (shared with `ZmxAdapter.partition`) — `shq` covers them at the shell boundary.
     private func scrub(_ tree: PersistedTree) -> PersistedTree {
         switch tree {
         case .empty: return .empty
-        case .leaf(let ref): return .leaf(ref.flatMap { $0.external || $0.isValid ? $0 : nil })
+        case .leaf(let ref):
+            return .leaf(ref.flatMap {
+                ($0.external ? isSafeExternalName($0.name) : $0.isValid) ? $0 : nil
+            })
         case .split(let h, let r, let a, let b): return .split(horizontal: h, ratio: r, a: scrub(a), b: scrub(b))
         }
     }

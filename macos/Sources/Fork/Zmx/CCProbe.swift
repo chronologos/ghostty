@@ -49,9 +49,9 @@ enum CCProbe {
     /// last-known-good); `[:]` on success-with-no-matches. Same `sh -c` path for local and
     /// remote — `controlArgv` is the identity for `.local`, ssh-wrap for `.ssh`.
     static func probe(host: ForkHost, entries: [ZmxAdapter.ListEntry]) async -> [String: Info]? {
-        // Can't distinguish "host has no zmx sessions" from "list() swallowed an ssh
-        // failure" (ZmxAdapter.list returns `.init()` on both), so treat empty as
-        // failure-keep-last-known rather than success-wipe.
+        // Transport failure is already short-circuited by the caller (`ccPollLoop` skips the
+        // probe when `list()` returns nil); zero entries just means there's nothing to match
+        // against — keep last-known rather than wiping.
         guard !entries.isEmpty else { return nil }
         let argv = host.transport.controlArgv(["/bin/sh", "-c", probeScript])
         guard let out = try? await ZmxAdapter.run(argv: argv,
@@ -157,9 +157,20 @@ enum CCProbe {
     }
 
     static func rename(host: ForkHost, sock: String, to name: String) async {
-        guard let script = renameScript(sock: sock, to: name) else { return }
-        let argv = host.transport.controlArgv(["sh", "-c", script])
-        _ = try? await ZmxAdapter.run(argv: argv, timeout: 5)
+        guard let script = renameScript(sock: sock, to: name) else {
+            ForkBootstrap.logger.warning("CC rename: couldn't build control message")
+            return
+        }
+        // `; true` — `nc -w 1`'s idle-timeout exit code is variant-dependent, and a non-zero
+        // there is the *normal* delivery path; only transport-level failures (ssh refused,
+        // sh missing) should reach the log line below.
+        let argv = host.transport.controlArgv(["sh", "-c", script + "; true"])
+        do { _ = try await ZmxAdapter.run(argv: argv, timeout: 5) } catch {
+            // Sidebar label and CC name silently diverging is confusing enough to deserve
+            // at least a log line (no `nc -U` on the host, dead socket, unreachable).
+            ForkBootstrap.logger.warning(
+                "CC rename failed on \(host.label, privacy: .public): \(String(describing: error), privacy: .public)")
+        }
     }
 
     /// Constant — no interpolation. `controlArgv` handles ssh quoting (CLAUDE.md §Security).
@@ -178,6 +189,10 @@ enum CCProbe {
           [ -f "$f" ] || continue
           cat "$f"; printf '\\036'
         done
+        true
         """
+    // The trailing `true`: `ZmxAdapter.run` now treats a non-zero exit as failure, but this
+    // script is *designed* to tolerate per-file failures (torn reads, vanished pid files) —
+    // its robustness is in the parser, so only transport-level failure should look like one.
 }
 #endif

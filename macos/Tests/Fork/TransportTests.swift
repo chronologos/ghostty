@@ -11,12 +11,16 @@ struct TransportTests {
         #expect(h.accentSlot == nil)
     }
 
-    @Test func legacyAccentHueMigratesToSolidSlot() throws {
-        let json = #"{"id":"h","label":"host","transport":{"local":{}},"accentHue":0.08}"#
-        let h = try JSONDecoder().decode(ForkHost.self, from: Data(json.utf8))
-        let (a, b) = ForkHost.pair(h.accentSlot!)
-        #expect(a == b)   // diagonal = solid
-        #expect(ForkHost.palette[a] == 0.08)
+    /// The PR36 `accentHue` migration shim is gone (TTL passed): the legacy key is now just
+    /// an unknown key, and an out-of-range hand-edited slot clamps to nil instead of
+    /// trapping at `palette[-1]` on launch.
+    @Test func accentSlotDecodeIsLenient() throws {
+        let legacy = #"{"id":"h","label":"host","transport":{"local":{}},"accentHue":0.08}"#
+        #expect(try JSONDecoder().decode(ForkHost.self, from: Data(legacy.utf8)).accentSlot == nil)
+        let outOfRange = #"{"id":"h","label":"host","transport":{"local":{}},"accentSlot":9999}"#
+        #expect(try JSONDecoder().decode(ForkHost.self, from: Data(outOfRange.utf8)).accentSlot == nil)
+        let negative = #"{"id":"h","label":"host","transport":{"local":{}},"accentSlot":-3}"#
+        #expect(try JSONDecoder().decode(ForkHost.self, from: Data(negative.utf8)).accentSlot == nil)
     }
 
     @Test func lenientStateDecode() throws {
