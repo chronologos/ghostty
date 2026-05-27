@@ -85,10 +85,13 @@ Fork/
     ForkWindowController.swift the controller; tab switching = swap surfaceTree
     SidebarView.swift          host sections (drag-reorder); per-pane rows show paneLabel ›
                                surface.title › ref.name; optional tab-title heading + collapse
-                               chevron; ⌘I/⌘⇧I → inline rename; tag pills; compact toggle
-                               (@AppStorage) hides subtitle; recency = afterglow wash (<15m)
-                               + doze opacity (>1h / past focus cutoff) + hover-peek age line,
-                               no age column; focus mode wraps each tab
+                               chevron; ⌘I/⌘⇧I → inline rename; tag pills; single density (no
+                               compact toggle): unread CC status text is bright + up to 3
+                               lines, read text (exit-stamped ccSeenDetail) demotes to one
+                               tertiary line; solo ⌥-hold ≥0.5s reveals all, ⌥⌥ marks all
+                               read; recency = afterglow wash (<15m) + doze opacity (>1h /
+                               past focus cutoff; never on unread/blocked rows) + hover-peek
+                               age line; focus mode wraps each tab
                                in a ForkCard with a ⌘N + HostDot + host-label caption row
     TagEditView.swift          right-click "Tag…" popover (text + 8 hue swatches)
     NewSessionView.swift       ⌘T sheet
