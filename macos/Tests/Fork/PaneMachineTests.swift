@@ -155,6 +155,27 @@ struct PaneMachineTests {
         #expect(b.dot == .blocked)      // blocked latch survives poll teardown
     }
 
+    /// A watched pane that rings BEL at completion must not double-banner: the bell post
+    /// counts as "told", so the trailing 250ms settle is gated like any already-notified one.
+    @Test func bellThenSettlePostsOnce() {
+        var m = PaneMachine()
+        m.apply(.watch(true)); m.apply(.progress)
+        #expect(m.apply(.bell) == true)
+        #expect(m.apply(.settled(isActive: false)) == false)
+        #expect(m.dot == .waiting)
+    }
+
+    /// `.probeStopped` interrupts the 2-strike count — a miss before and a miss after a
+    /// poll gap are not "consecutive", so the blocked latch must survive them.
+    @Test func probeStoppedResetsAbsentStrike() {
+        var m = PaneMachine()
+        m.apply(.probe(blocked: true, busy: false, sig: s1))
+        m.apply(.probeAbsent)          // strike 1
+        m.apply(.probeStopped)         // poll gap
+        m.apply(.probeAbsent)          // not a second consecutive strike
+        #expect(m.blocked == true && m.blockSig == s1)
+    }
+
     /// `phase==.waiting && ccBusy` must not double-report: the rail (driven by `dot`) says
     /// working, and the dock badge separately counts `phase == .waiting && !ccBusy` — both
     /// must agree that a busy pane isn't "needs you".
