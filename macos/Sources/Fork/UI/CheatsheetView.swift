@@ -22,6 +22,8 @@ struct CheatsheetView: View {
         ("⌘⇧R", "Repaint pane"),
         ("⌘⌥P", "Pin / unpin tab"),
         ("⌘⇧B", "Toggle sidebar"),
+        ("⌥ hold", "Reveal read CC status text"),
+        ("⌥⌥", "Mark all CC status read"),
     ]
 
     var body: some View {
