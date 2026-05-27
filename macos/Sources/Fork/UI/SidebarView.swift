@@ -78,7 +78,11 @@ struct SidebarView: View {
             // detached `Task`, which `.task`'s own auto-cancel can't (one-shot body
             // returns immediately). Otherwise leaks past last-window close
             // (`shouldQuitAfterLastWindowClosed` defaults false, AppDelegate.swift:1035).
-            registry.setCCProbeEnabled(false)
+            // Last-window only: the registry is shared, and a sibling window's sidebar has
+            // no re-enable path short of the user toggling showCC off and on.
+            if !ForkWindowController.anyOtherForkWindow(besides: controller?.window) {
+                registry.setCCProbeEnabled(false)
+            }
         }
         .onReceive(NotificationCenter.default.publisher(
             for: NSApplication.didResignActiveNotification)) { _ in
@@ -130,6 +134,13 @@ struct SidebarView: View {
             revealArm = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { _ in
                 if NSEvent.modifierFlags.contains(.option) { revealAll = true }
             }
+        }
+        if held, !solo, optionHeld {
+            // A chord modifier joined an already-held ⌥ (⌥ first, then ⌘ for ⌘⌥N): that's a
+            // chord in progress, not a peek — disarm the pending/active reveal and abandon
+            // the half-completed tap so a slow chord can't flash the sidebar open.
+            lastOptionPress = nil
+            disarmOptionGesture()
         }
         if !held {
             // Tap-tap commits here — unless the press became a hold (the peek fired: you
@@ -310,6 +321,14 @@ struct SidebarView: View {
                 Text(host.label)
                     .font(mono(12, .medium))
                     .foregroundStyle(connected ? .primary : .secondary)
+                if let since = registry.hostUnreachableSince[host.id] {
+                    // Transport-level cue (zmx list failing), distinct from the dot's
+                    // "no live surface" dimming — without it, hours-old CC status on a
+                    // dead ssh host reads as live.
+                    Image(systemName: "wifi.slash")
+                        .font(.system(size: 8)).foregroundStyle(.secondary)
+                        .help("Unreachable since \(since.formatted(date: .omitted, time: .shortened)) — CC status may be stale")
+                }
                 Spacer()
                 if !host.expanded {
                     stateDot(controller?.rollup(hostID: host.id), accent: host.accent)
