@@ -5,7 +5,8 @@ import Foundation
 enum ZmxAdapter {
     /// Absolute local path to `zmx`. Spotlight/Dock launches inherit launchd's minimal
     /// PATH, and Ghostty runs commands via `bash --noprofile --norc`, so bare `zmx` fails.
-    /// Resolved once: env override → current PATH → common install dirs → login-shell probe.
+    /// Resolved once: env override → current PATH (usually already enriched by install()'s
+    /// login-PATH export) → common install dirs → login-shell probe.
     static let localZmx: String = {
         let fm = FileManager.default
         let env = ProcessInfo.processInfo.environment
@@ -19,27 +20,16 @@ enum ZmxAdapter {
         if let hit = candidates.compactMap({ $0 }).first(where: fm.isExecutableFile(atPath:)) {
             return hit
         }
-        // Last resort: ask the user's login shell. Bounded — a hung .zshrc must not
-        // wedge the static-let initializer (and with it, every caller).
-        let p = Process(), pipe = Pipe(), done = DispatchSemaphore(value: 0)
-        p.executableURL = URL(fileURLWithPath: env["SHELL"] ?? "/bin/zsh")
-        p.arguments = ["-lic", "command -v zmx"]
-        p.standardOutput = pipe
-        p.standardError = FileHandle.nullDevice
-        p.terminationHandler = { _ in done.signal() }
-        if (try? p.run()) != nil {
-            if done.wait(timeout: .now() + 2) == .timedOut {
-                // Interactive zsh ignores SIGTERM; with the pipe still open the read
-                // below would block past the 2s bound and wedge this swift_once init.
-                Darwin.kill(-p.processIdentifier, SIGKILL)
-            } else {
-                // `-i` sources .zshrc, which may chatter to stdout (nvm/pyenv init, fortune) —
-                // `command -v` is the last line.
-                let out = String(decoding: pipe.fileHandleForReading.availableData, as: UTF8.self)
-                    .split(separator: "\n").last.map(String.init) ?? ""
-                if (out as NSString).lastPathComponent == "zmx",
-                   fm.isExecutableFile(atPath: out) { return out }
-            }
+        // Last resort: ask the user's login shell (rarely reached now that install() exports
+        // the login PATH before forcing this). Bounded inside `loginShellOutput` — a hung
+        // .zshrc must not wedge the static-let initializer (and with it, every caller).
+        // `-i` sources .zshrc, which may chatter to stdout (nvm/pyenv init, fortune) —
+        // `command -v` is the last line.
+        if let out = ForkBootstrap.loginShellOutput("command -v zmx")?
+            .split(separator: "\n").last.map(String.init),
+           (out as NSString).lastPathComponent == "zmx",
+           fm.isExecutableFile(atPath: out) {
+            return out
         }
         ForkBootstrap.logger.warning("zmx not resolved; falling back to PATH lookup")
         return "zmx"
@@ -210,80 +200,179 @@ enum ZmxAdapter {
         var description: String { "exit \(status)" + (stderr.isEmpty ? "" : " — \(stderr)") }
     }
 
+    /// Wall-clock-bounded, fully event-driven: stdout/stderr arrive via readability
+    /// handlers, exit via the termination handler, deadlines via timers — all serialized on
+    /// one queue, so no thread ever blocks. The previous shape parked a GCD thread in
+    /// `readDataToEndOfFile` + `waitUntilExit`; when Foundation lost track of a SIGKILLed
+    /// child's exit, that wait never returned and — because `ccPollLoop` awaits every host
+    /// task — CC polling and the reachability cue froze for *all* hosts.
+    ///
+    /// Completion rules:
+    /// - stdout EOF **and** exit status seen → success (status 0) or `CommandError`.
+    ///   A failed control command must not read as "ran fine, empty output" — that's how
+    ///   kills silently don't kill and unreachable hosts render as "no sessions". A
+    ///   *failure* additionally gives stderr the same `grace` to land so the error isn't
+    ///   an empty string; success never waits on stderr (ControlMaster mux masters and
+    ///   ProxyCommand helpers hold it open long after the client exits).
+    /// - exit seen but stdout EOF missing after `grace` → resolve by status with whatever
+    ///   stdout accumulated: a grandchild holding the write-end (the same mux/helper class)
+    ///   must not stall the result — and is left alone, a surviving master is often the point.
+    /// - stdout EOF seen but exit unobserved after `grace` (Foundation losing a child's
+    ///   termination is a real, observed failure mode) → SIGKILL the group (with no status
+    ///   we can't tell a wanted survivor from a hung child) and throw `CommandError`
+    ///   ("exit status unobserved") — never fake success, never hang.
+    /// - `timeout` first → resolve from whichever leg did arrive; with neither, SIGKILL the
+    ///   child's process group (`Process` gives the child its own pgid, so `-pid` reaches
+    ///   grandchildren too) and throw `CancellationError`.
     static func run(argv: [String], timeout: TimeInterval) async throws -> String {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         p.arguments = argv
-        let pipe = Pipe()
+        let outPipe = Pipe()
         let errPipe = Pipe()
-        p.standardOutput = pipe
+        p.standardOutput = outPipe
         p.standardError = errPipe
-        try p.run()
-        // Close our copy of the write-ends now: the child has its dup, and with ours gone
-        // `readDataToEndOfFile` sees EOF as soon as the child's copy closes. Otherwise a
-        // grandchild that inherited the FD (ssh-via-ProxyCommand) can hold it open past the
-        // child's death and the reader never returns.
-        try? pipe.fileHandleForWriting.close()
-        try? errPipe.fileHandleForWriting.close()
-        // `withThrowingTaskGroup` implicitly awaits ALL children at scope exit, so the
-        // timeout only bounds wall-clock if the reader is guaranteed to return; SIGTERM
-        // doesn't guarantee that, SIGKILL on the process group does (`Process` puts the
-        // child in its own pgid, so `-pid` reaches grandchildren too).
-        let abort: @Sendable () -> Void = {
-            if p.isRunning { Darwin.kill(-p.processIdentifier, SIGKILL) }
+
+        /// Mutable state, touched only on `q`.
+        final class RunState: @unchecked Sendable {
+            var out = Data()
+            var err = Data()
+            var stdoutEOF = false
+            var stderrEOF = false
+            var status: Int32?
+            var done = false
+            var graceArmed = false
+            var cancelled = false
+            var abort: (() -> Void)?
         }
+        let q = DispatchQueue(label: "fork.zmx.run")
+        let box = RunState()
+        let grace: TimeInterval = 1.5
+
         return try await withTaskCancellationHandler {
-            try await withThrowingTaskGroup(of: String.self) { group in
-                group.addTask {
-                    // Blocking read on GCD global, not the cooperative pool — under
-                    // N-way fanout (⌘⇧K), pool-blocking reads would starve the
-                    // timeout sleeper below and defeat the bound it's meant to enforce.
-                    try await withCheckedThrowingContinuation { cont in
-                        // stderr accumulates via a handler and is consulted only on failure —
-                        // success must NOT be gated on stderr EOF: ssh ControlMaster mux
-                        // masters and ProxyCommand helpers inherit stderr and hold it open
-                        // long after the client exits, and blocking on it would turn every
-                        // command on such hosts into a timeout (the same grandchild-FD class
-                        // the stdout comment above describes).
-                        let errBox = NSLock()
-                        var err = Data()
-                        errPipe.fileHandleForReading.readabilityHandler = { h in
-                            let chunk = h.availableData
-                            if chunk.isEmpty { h.readabilityHandler = nil; return }
-                            errBox.lock(); err.append(chunk); errBox.unlock()
-                        }
-                        DispatchQueue.global().async {
-                            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                            // stdout is at EOF, so the direct child (ssh/zmx) is done or was
-                            // killed by the timeout's SIGKILL — the wait here is momentary
-                            // and runs on a GCD thread, not the cooperative pool.
-                            p.waitUntilExit()
-                            errPipe.fileHandleForReading.readabilityHandler = nil
-                            errBox.lock(); let errSnapshot = err; errBox.unlock()
-                            // A failed control command must not read as "ran fine, empty
-                            // output" — that's how kills silently don't kill and unreachable
-                            // hosts render as "no sessions".
-                            guard p.terminationStatus == 0 else {
-                                let msg = String(decoding: errSnapshot.suffix(512), as: UTF8.self)
-                                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                                cont.resume(throwing: CommandError(status: p.terminationStatus, stderr: msg))
-                                return
-                            }
-                            cont.resume(returning: String(decoding: data, as: UTF8.self))
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
+                q.async {
+                    /// Resolve exactly once; tear down the handlers so the Pipe↔handler and
+                    /// Process↔handler retain cycles break even when a leg never reported.
+                    /// Nil-ing `abort` also means a task cancellation that lands after we've
+                    /// already resolved can't SIGKILL survivors (a freshly established
+                    /// ControlMaster master, say) we just returned success around.
+                    func settle(_ r: Result<String, Error>) {
+                        guard !box.done else { return }
+                        box.done = true
+                        box.abort = nil
+                        outPipe.fileHandleForReading.readabilityHandler = nil
+                        errPipe.fileHandleForReading.readabilityHandler = nil
+                        p.terminationHandler = nil
+                        cont.resume(with: r)
+                        // The deadline closure keeps `box` alive until `timeout` even after an
+                        // early settle; drop the buffers so a finished ⌘⇧K history call doesn't
+                        // hold a duplicate multi-MB copy for the rest of its window.
+                        box.out = Data()
+                        box.err = Data()
+                    }
+                    /// Only while the exit is unobserved — after a clean exit the survivors
+                    /// are wanted (a freshly established ControlMaster master, say), not strays.
+                    func kill() {
+                        if box.status == nil, p.processIdentifier > 0 {
+                            Darwin.kill(-p.processIdentifier, SIGKILL)
                         }
                     }
+                    func finishFromState() {
+                        switch box.status {
+                        case .some(0):
+                            settle(.success(String(decoding: box.out, as: UTF8.self)))
+                        case .some(let st):
+                            let msg = String(decoding: box.err.suffix(512), as: UTF8.self)
+                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                            settle(.failure(CommandError(status: st, stderr: msg)))
+                        case .none:
+                            // Output arrived and the pipes closed, but the exit never reached
+                            // us. The command *probably* ran fine — but "probably" isn't good
+                            // enough for kill verification or list()'s nil-vs-empty contract,
+                            // so report failure (callers degrade to keep-last-known / a logged
+                            // error) rather than fake the one outcome this file exists to
+                            // never fake.
+                            ForkBootstrap.logger.warning(
+                                "control command exit unobserved (\(argv.first ?? "", privacy: .public))")
+                            settle(.failure(CommandError(status: -1, stderr: "exit status unobserved")))
+                        }
+                    }
+                    func maybeSettle() {
+                        guard !box.done else { return }
+                        // A failure also waits for stderr EOF (bounded by the same grace) so
+                        // CommandError doesn't race the err pipe to an empty message; success
+                        // never waits on stderr.
+                        if box.stdoutEOF, let st = box.status, st == 0 || box.stderrEOF {
+                            finishFromState(); return
+                        }
+                        if box.stdoutEOF || box.status != nil, !box.graceArmed {
+                            box.graceArmed = true
+                            q.asyncAfter(deadline: .now() + grace) {
+                                guard !box.done else { return }
+                                kill()
+                                finishFromState()
+                            }
+                        }
+                    }
+
+                    box.abort = {
+                        kill()
+                        settle(.failure(CancellationError()))
+                    }
+                    if box.cancelled { box.abort?(); return }
+
+                    outPipe.fileHandleForReading.readabilityHandler = { h in
+                        let chunk = h.availableData
+                        // Detach on the handler's own queue — deferring the nil to `q`
+                        // would let an EOF'd handle re-fire in a tight loop until it lands.
+                        if chunk.isEmpty { h.readabilityHandler = nil }
+                        q.async {
+                            if chunk.isEmpty { box.stdoutEOF = true; maybeSettle() }
+                            else { box.out.append(chunk) }
+                        }
+                    }
+                    errPipe.fileHandleForReading.readabilityHandler = { h in
+                        let chunk = h.availableData
+                        if chunk.isEmpty { h.readabilityHandler = nil }
+                        q.async {
+                            if chunk.isEmpty { box.stderrEOF = true; maybeSettle() }
+                            else { box.err.append(chunk) }
+                        }
+                    }
+                    p.terminationHandler = { t in
+                        let st = t.terminationStatus
+                        q.async { box.status = st; maybeSettle() }
+                    }
+
+                    do { try p.run() } catch {
+                        settle(.failure(error))
+                        return
+                    }
+                    // Close our copy of the write-ends now: the child has its dups, and with
+                    // ours gone the readability handlers see EOF as soon as the child's
+                    // copies close (a grandchild that inherits one is what `grace` is for).
+                    try? outPipe.fileHandleForWriting.close()
+                    try? errPipe.fileHandleForWriting.close()
+
+                    // Hard deadline. The closure holds the pipes until it fires even when
+                    // the command finished long before — bounded by `timeout`, so at most a
+                    // handful of fds linger for a few seconds; not worth a cancelable token.
+                    q.asyncAfter(deadline: .now() + timeout) {
+                        guard !box.done else { return }
+                        kill()
+                        // If a leg did arrive (a status moments ago, or output whose exit got
+                        // lost), report that rather than discarding it as a bare timeout.
+                        if box.stdoutEOF || box.status != nil { finishFromState() }
+                        else { settle(.failure(CancellationError())) }
+                    }
                 }
-                group.addTask {
-                    try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                    throw CancellationError()
-                }
-                defer { abort() }
-                let result = try await group.next()!
-                group.cancelAll()
-                return result
             }
         } onCancel: {
-            abort()
+            q.async {
+                box.cancelled = true
+                box.abort?()
+            }
         }
     }
 }

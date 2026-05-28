@@ -27,6 +27,14 @@ enum ForkBootstrap {
     /// PR1: no-op beyond logging. PR2: loads `SessionRegistry` from `fork.json`.
     static func install(ghostty: Ghostty.App) {
         guard enabled else { return }
+        // GUI launches inherit launchd's bare PATH (/usr/bin:/bin:/usr/sbin:/sbin). Anything
+        // the fork spawns that resolves helpers by *name* — ssh ProxyCommand wrappers in
+        // ~/.ssh/config above all — fails with "command not found" unless a ControlMaster
+        // socket already happens to exist, which reads as "host unreachable" / instantly-dead
+        // panes on a cold morning. Export the login shell's PATH before the first surface or
+        // control command spawns (and before the zmx probe below, which can then resolve zmx
+        // from PATH instead of falling back to its own login-shell run).
+        exportLoginShellPATH()
         // Force `localZmx` resolution now. `static let` is swift_once-serialized — a
         // detached "warm-up" can't beat main to the once-barrier, so we take the hit
         // here (before any window draws) rather than mid-`newWindow`.
@@ -44,6 +52,72 @@ enum ForkBootstrap {
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
         ) { _ in MainActor.assumeIsolated { SessionRegistry.shared.saveNow() } }
+    }
+
+    /// Inherited entries first — the control plane's `ssh`/`sh`/`nc` keep resolving to the
+    /// same system binaries they always have — then login-shell entries appended for
+    /// everything launchd's PATH lacks (ProxyCommand wrappers, zmx, hover tools). First
+    /// occurrence wins; empty and relative segments are dropped (a relative PATH entry
+    /// resolves against whatever cwd a child happens to have).
+    static func mergedPATH(login: String, current: String) -> String {
+        var seen = Set<String>()
+        return (current.split(separator: ":") + login.split(separator: ":"))
+            .map(String.init)
+            .filter { $0.hasPrefix("/") && seen.insert($0).inserted }
+            .joined(separator: ":")
+    }
+
+    private static func exportLoginShellPATH() {
+        guard let login = loginShellPATH(), login.contains("/") else { return }
+        let merged = mergedPATH(login: login,
+                                current: ProcessInfo.processInfo.environment["PATH"] ?? "")
+        setenv("PATH", merged, 1)
+        logger.info("fork PATH: \(merged, privacy: .public)")
+    }
+
+    /// Bounded probe of the user's login shell: run `cmd` under `$SHELL -lic`, return raw
+    /// stdout once it hits EOF (the child's exit closes it), or nil after `timeout`. `cmd`
+    /// must be a compile-time literal — this is deliberately NOT a third place where runtime
+    /// strings meet a shell (CLAUDE.md §Security boundary). Both callers — the PATH export
+    /// above and `ZmxAdapter.localZmx`'s last-resort lookup — run before the first window
+    /// draws, so a hung .zshrc must not wedge launch: stdout drains via a handler (rc chatter
+    /// bigger than the pipe buffer can't deadlock the child into the timeout), the wait is
+    /// bounded, and interactive zsh ignores SIGTERM, so on timeout the probe's process group
+    /// is SIGKILLed and we give up.
+    static func loginShellOutput(_ cmd: String, timeout: TimeInterval = 2) -> String? {
+        let p = Process(), pipe = Pipe(), done = DispatchSemaphore(value: 0)
+        p.executableURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh")
+        p.arguments = ["-lic", cmd]
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        let lock = NSLock()
+        var out = Data()
+        pipe.fileHandleForReading.readabilityHandler = { h in
+            let chunk = h.availableData
+            // EOF (not exit) is the completion signal: it can only arrive after every write
+            // end closed, so `out` is complete by construction — no exit-vs-last-chunk race.
+            if chunk.isEmpty { h.readabilityHandler = nil; done.signal(); return }
+            lock.lock(); out.append(chunk); lock.unlock()
+        }
+        guard (try? p.run()) != nil else {
+            pipe.fileHandleForReading.readabilityHandler = nil
+            return nil
+        }
+        if done.wait(timeout: .now() + timeout) == .timedOut {
+            pipe.fileHandleForReading.readabilityHandler = nil
+            Darwin.kill(-p.processIdentifier, SIGKILL)
+            return nil
+        }
+        lock.lock(); defer { lock.unlock() }
+        return String(decoding: out, as: UTF8.self)
+    }
+
+    /// The marker prefix keeps rc-file chatter (nvm init, direnv, fortune) from being
+    /// mistaken for the answer.
+    private static func loginShellPATH() -> String? {
+        loginShellOutput("printf '__FORKPATH__%s\\n' \"$PATH\"")?
+            .split(separator: "\n").last(where: { $0.hasPrefix("__FORKPATH__") })
+            .map { String($0.dropFirst("__FORKPATH__".count)) }
     }
 
     /// Chromatic-aberration "degauss" — split RGB, offset R/B by ±px, recombine. Channels
