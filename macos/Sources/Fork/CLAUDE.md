@@ -65,7 +65,11 @@ in fork-check.sh in the same commit*.
 
 ```
 Fork/
-  ForkBootstrap.swift          enabled flag (env GHOSTTY_FORK=1), seam entry points
+  ForkBootstrap.swift          enabled flag (env GHOSTTY_FORK=1), seam entry points;
+                               exports the login-shell PATH at install, appended after the
+                               inherited PATH (GUI launches get launchd's bare PATH, which
+                               breaks ssh ProxyCommand wrappers resolved by name — e.g.
+                               coder tunnels)
   Notify.swift                 UN delegate proxy (wraps AppDelegate's); userInfo["forkTab"]
                                → foreground banner + click→activate(tab:); dock badge =
                                .waiting count
@@ -151,6 +155,9 @@ Fork/
 and `SessionRef.name` are validated against `^[A-Za-z0-9._-]+$`; `shq` single-quotes argv.
 For ssh, the remote command is double-quoted (`shq(shq(argv))`) and both ssh argv builders
 pass `--` before the destination. Don't build shell strings anywhere else.
+(`ForkBootstrap.loginShellOutput` does run the user's login shell at launch, but only with
+compile-time-literal commands — never pass it anything derived from session, host, or
+remote data.)
 
 Beyond the shell layer: **external** session names bypass the regex (they come from remote
 `zmx list` verbatim) — `ZmxAdapter.partition` and `Persistence.scrub` drop leading-`-` names
@@ -185,8 +192,10 @@ local), not the internal hash id. `mode` (unknown values drop that one binding):
   inherit the sibling's directory — pass `{cwd}` via the tool's own flag (`-C`/`-R`/`-p`).
   No-ops on a tab whose `liveTabs` entry hasn't been built yet (cold-restored, never
   activated).
-- `local` — fire-and-forget `Process` on the mac via `/usr/bin/env`; PATH is launchd's,
-  so non-system tools need an absolute path. `{cwd}` still expands to the *pane's* cwd,
+- `local` — fire-and-forget `Process` on the mac via `/usr/bin/env`; PATH is the
+  login-shell PATH exported at install (launchd's bare PATH if that probe failed), so
+  most tools resolve by name; an absolute path is still the safe choice for anything
+  exotic. `{cwd}` still expands to the *pane's* cwd,
   which for ssh panes is a remote path that likely doesn't exist locally — only useful
   with tools that take a remote path on purpose (e.g. `code --remote ssh-{host} {cwd}`).
 - `overlay` — ephemeral surface in a fork-owned `QuickTerminalController` subclass
@@ -270,10 +279,12 @@ A terminal that runs arbitrary shells will trip every macOS privacy surface. Thr
 
 ## Known limitations
 
-- First cold launch may freeze ≤2s if `zmx` isn't in env/PATH or the hardcoded dir
-  list (ZmxAdapter.swift:15). `static let` is swift_once-serialized, so the login-shell
-  probe can't be moved off main; it's forced eagerly in `install()` so the stall lands
-  before the first window draws. Set `GHOSTTY_FORK_ZMX=/abs/path` to skip the probe.
+- Launch runs a bounded (2s) login-shell probe for PATH (`ForkBootstrap.exportLoginShellPATH`)
+  and, if `zmx` still isn't found in env/PATH or the hardcoded dir list, a second 2s probe
+  for zmx (`ZmxAdapter.localZmx`) — so a hung `.zshrc` can stall a cold launch up to ~4s.
+  `static let` is swift_once-serialized, so the zmx probe can't be moved off main; both are
+  forced eagerly in `install()` so the stall lands before the first window draws. Set
+  `GHOSTTY_FORK_ZMX=/abs/path` to skip the zmx probe (the PATH probe always runs).
 - `refs` is never pruned (see undo gotcha) — closed-split entries leak until quit;
   `isConnected()` may stay green slightly stale. In-memory only, not persisted.
 
