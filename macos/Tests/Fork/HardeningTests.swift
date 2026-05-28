@@ -126,4 +126,26 @@ struct PersistenceSafetyTests {
         #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("fork.json.bak.undecodable").path))
     }
 }
+
+/// PATH export at install: inherited (launchd) entries keep the lead so system binaries
+/// resolve exactly as before, login-shell entries append for everything launchd lacks,
+/// nothing is duplicated, and only absolute segments survive.
+struct BootstrapPATHTests {
+    @Test func currentLeadsAndLoginAppends() {
+        let merged = ForkBootstrap.mergedPATH(
+            login: "/opt/homebrew/bin:/Users/u/code/bin:/usr/bin",
+            current: "/usr/bin:/bin:/usr/sbin:/sbin")
+        #expect(merged == "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/Users/u/code/bin")
+    }
+
+    @Test func emptyRelativeAndDuplicateSegmentsDrop() {
+        // Empty (`::`) and relative (`bin`, `.`) segments never survive — a relative PATH
+        // entry resolves against whatever cwd a child happens to have.
+        #expect(ForkBootstrap.mergedPATH(login: ":/a/bin::bin:.:/b/bin:", current: "/a/bin:/usr/bin")
+                == "/a/bin:/usr/bin:/b/bin")
+        // Degenerate inputs stay sane (the caller skips export entirely on a failed probe).
+        #expect(ForkBootstrap.mergedPATH(login: "", current: "/usr/bin:/bin") == "/usr/bin:/bin")
+        #expect(ForkBootstrap.mergedPATH(login: "/a/bin:/b/bin:/a/bin", current: "") == "/a/bin:/b/bin")
+    }
+}
 #endif
