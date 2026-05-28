@@ -189,7 +189,7 @@ final class ForkWindowController: TerminalController {
         super.closeSurface(node, withConfirmation: false)
     }
 
-    /// ⌘W sheet: Detach (⏎, default) / Kill (K, destructive) / Cancel (Esc).
+    /// ⌘W sheet: Detach (⏎, default) / Kill (K or a second ⌘W, destructive) / Cancel (Esc).
     private func confirmDetachOrKill(
         messageText: String,
         informativeText: String,
@@ -201,7 +201,7 @@ final class ForkWindowController: TerminalController {
         guard let window else { onDetach(); return }
         let alert = NSAlert()
         alert.messageText = messageText
-        alert.informativeText = informativeText + "\n\n⏎ Detach · K Kill · Esc Cancel"
+        alert.informativeText = informativeText + "\n\n⏎ Detach · K or ⌘W Kill · Esc Cancel"
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Detach")
         let kill = alert.addButton(withTitle: killTitle)
@@ -209,7 +209,20 @@ final class ForkWindowController: TerminalController {
         kill.hasDestructiveAction = true
         kill.isEnabled = killEnabled
         alert.addButton(withTitle: "Cancel")
+        // ⌘W,⌘W = Kill: the second ⌘W lands on the alert panel (now key), where it would
+        // otherwise just beep — treating it as "yes, really close it" keeps the whole
+        // gesture on one chord. A button only carries one keyEquivalent, so K stays the
+        // labelled shortcut and this monitor adds the ⌘W alias for the sheet's lifetime.
+        let wMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { ev in
+            guard ev.window === alert.window,
+                  ev.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+                  ev.charactersIgnoringModifiers?.lowercased() == "w",
+                  kill.isEnabled else { return ev }
+            kill.performClick(nil)
+            return nil
+        }
         alert.beginSheetModal(for: window) { resp in
+            wMonitor.map(NSEvent.removeMonitor)
             alert.window.orderOut(nil)
             switch resp {
             case .alertFirstButtonReturn: onDetach()
