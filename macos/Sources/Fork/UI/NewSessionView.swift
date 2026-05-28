@@ -132,7 +132,9 @@ struct NewSessionView: View {
                     }
                 }
                 Spacer()
-                SessionMetaLabel(entry: e)
+                SessionMetaLabel(entry: e,
+                                 inSidebar: registry.isInSidebar(e.name, external: e.external, on: hostID),
+                                 ccInfo: registry.ccInfo(for: e, on: hostID))
             }
         }
         .buttonStyle(.plain)

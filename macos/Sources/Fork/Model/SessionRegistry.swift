@@ -184,15 +184,39 @@ final class SessionRegistry: ObservableObject {
         refs.values.contains { $0.hostID == hostID }
     }
 
-    /// Title of the tab containing `sessionName`, iff that title differs from the name
-    /// (i.e. the user renamed it). Lets pickers annotate raw zmx names with the label
-    /// the user actually recognizes.
-    func tabTitle(for sessionName: String, external: Bool, on hostID: ForkHost.ID) -> String? {
+    private func tab(containing sessionName: String, external: Bool, on hostID: ForkHost.ID) -> TabModel? {
         tabs.first {
             $0.hostID == hostID && $0.tree.leafRefs.contains {
                 $0.name == sessionName && $0.external == external
             }
-        }.flatMap { $0.title == sessionName ? nil : $0.title }
+        }
+    }
+
+    /// Title of the tab containing `sessionName`, iff that title differs from the name
+    /// (i.e. the user renamed it). Lets pickers annotate raw zmx names with the label
+    /// the user actually recognizes.
+    func tabTitle(for sessionName: String, external: Bool, on hostID: ForkHost.ID) -> String? {
+        tab(containing: sessionName, external: external, on: hostID)
+            .flatMap { $0.title == sessionName ? nil : $0.title }
+    }
+
+    /// The session is already open as a pane somewhere in the sidebar — including a
+    /// cold-restored placeholder, which holds no zmx client and would otherwise read as
+    /// orphaned in the session lists.
+    func isInSidebar(_ sessionName: String, external: Bool, on hostID: ForkHost.ID) -> Bool {
+        tab(containing: sessionName, external: external, on: hostID) != nil
+    }
+
+    /// Last-known CC info for a *listed* session (open as a pane or not — `mergeCC` stores
+    /// the whole probe result per host, so detached sessions with an agent inside are
+    /// covered). Nil unless the host is currently polled (CC toggle on *and* the host has
+    /// at least one sidebar tab): an unpolled host's slice stays frozen at whatever the
+    /// last poll saw — possibly hours old — and a stale "working" glyph is worse than an
+    /// honest unknown. Within a polled host the data lags by up to a poll tick and
+    /// survives probe failures (keep-last-known).
+    func ccInfo(for entry: ZmxAdapter.ListEntry, on hostID: ForkHost.ID) -> CCProbe.Info? {
+        guard tabs.contains(where: { $0.hostID == hostID }) else { return nil }
+        return ccLive[hostID]?[SessionRef(hostID: hostID, name: entry.name, external: entry.external).key]
     }
 
     // MARK: Mutations
@@ -423,8 +447,10 @@ final class SessionRegistry: ObservableObject {
     /// Flip the per-host unreachable marker, publishing only on the transition (appearing or
     /// clearing) — never per tick.
     private func noteHostReachability(_ id: ForkHost.ID, unreachable: Bool) {
-        // Removed mid-tick (same drain race `mergeCC` guards against) — don't resurrect.
-        guard host(id: id) != nil else { return }
+        // Same drain races `mergeCC` guards against: probe toggled off mid-tick (the
+        // cancelled list() reports a spurious failure after the clear, and with the poll
+        // off nothing would ever clear the badge again) or host removed mid-tick.
+        guard ccPoll != nil, host(id: id) != nil else { return }
         if unreachable, hostUnreachableSince[id] == nil {
             objectWillChange.send()
             hostUnreachableSince[id] = Date()
