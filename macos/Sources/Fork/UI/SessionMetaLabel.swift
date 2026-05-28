@@ -1,25 +1,61 @@
 #if os(macOS)
 import SwiftUI
 
-/// Trailing metadata for a zmx session row. Client count is the actionable bit:
-/// 0 → dim (orphaned, safe to take); ≥1 → accent (someone's attached).
+/// Trailing metadata for a zmx session row. The client count alone is a poor "in use"
+/// signal — it counts attached *viewers* (live `zmx attach` clients), so a detached session
+/// with a CC agent working inside, or one whose only presence is a cold-restored placeholder
+/// pane in the sidebar, reads as an orphaned `0`. The sparkle and sidebar glyphs carry those
+/// two signals so "0 people + old age" stops looking like "safe to kill". The age is the
+/// session's *creation* age (`zmx list` has no activity field).
 struct SessionMetaLabel: View {
     let entry: ZmxAdapter.ListEntry
+    /// Session is already open as a pane in the sidebar (even a cold placeholder).
+    var inSidebar: Bool = false
+    /// Last-known CC session running inside it (attached or not), from the poll's `ccLive`.
+    var ccInfo: CCProbe.Info? = nil
 
     var body: some View {
         HStack(spacing: 4) {
+            if let ccInfo {
+                // Busy outranks blocked, same as PaneMachine.dot — CC doesn't reliably
+                // rewrite `tempo` after a reply, so a stale "needs input" must not paint
+                // this red while the sidebar rail shows the same session working.
+                let busy = ccInfo.status == "busy"
+                Image(systemName: "sparkles")
+                    .font(.system(size: 8))
+                    .foregroundStyle(busy ? Theme.clay
+                                     : ccInfo.isBlocked ? Theme.blocked : Color.secondary)
+                    .opacity(busy || ccInfo.isBlocked ? 1 : 0.6)
+                    .help(ccHelp(ccInfo, busy: busy))
+            }
+            if inSidebar {
+                Image(systemName: "sidebar.left")
+                    .font(.system(size: 8))
+                    .foregroundStyle(.secondary)
+                    .help("Already open as a pane in the sidebar")
+            }
             HStack(spacing: 2) {
                 Image(systemName: "person.fill").font(.system(size: 8))
                 Text("\(entry.clients)")
             }
             .foregroundStyle(entry.clients > 0 ? Theme.clay : Color.secondary)
+            .help(entry.clients == 1 ? "1 attached client" : "\(entry.clients) attached clients")
             Text("·").foregroundStyle(.secondary)
-            Text(entry.created.shortAge).foregroundStyle(Theme.ageStyle(entry.created))
+            // Creation age in plain secondary, not the recency ramp — an old-but-busy
+            // session must not render faded as if abandoned.
+            Text("\(entry.created.shortAge) old").foregroundStyle(.secondary)
+                .help("Created \(entry.created.shortAge) ago")
             if entry.external {
                 Text("ext").foregroundStyle(.secondary)
             }
         }
         .font(.system(size: 9))
+    }
+
+    private func ccHelp(_ info: CCProbe.Info, busy: Bool) -> String {
+        let state = busy ? "working" : info.isBlocked ? "needs input" : "idle"
+        return ["CC \(state)", info.name, info.attention]
+            .compactMap { $0 }.joined(separator: " — ")
     }
 }
 
