@@ -94,7 +94,9 @@ struct SplitPickerView: View {
                     }
                 }
                 Spacer()
-                SessionMetaLabel(entry: e)
+                SessionMetaLabel(entry: e,
+                                 inSidebar: registry.isInSidebar(e.name, external: e.external, on: host.id),
+                                 ccInfo: registry.ccInfo(for: e, on: host.id))
             }
             .padding(.horizontal, 6).padding(.vertical, 3)
             .background(sel == i ? Theme.selectedRow : .clear,
