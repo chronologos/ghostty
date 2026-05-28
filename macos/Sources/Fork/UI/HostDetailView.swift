@@ -50,6 +50,13 @@ struct HostDetailView: View {
                 }
                 .buttonStyle(.borderless).disabled(loading)
             }
+            // Absence of a sparkle must not read as "verified no agent": CC info only
+            // exists for hosts the poll currently covers (toggle on + ≥1 sidebar tab).
+            if !loading, !unreachable,
+               registry.ccLive[host.id] == nil || !registry.tabs.contains(where: { $0.hostID == host.id }) {
+                Text("CC status unknown for this host (not currently polled)")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
             sessionList.frame(maxHeight: .infinity)
 
             if let killError {
@@ -95,7 +102,9 @@ struct HostDetailView: View {
         HStack {
             Text(e.name).font(.system(size: 12, design: .monospaced))
             Spacer()
-            SessionMetaLabel(entry: e)
+            SessionMetaLabel(entry: e,
+                             inSidebar: registry.isInSidebar(e.name, external: e.external, on: host.id),
+                             ccInfo: registry.ccInfo(for: e, on: host.id))
             Button("Kill") {
                 // No optimistic removal: a kill that fails (host briefly unreachable,
                 // session already gone) must not leave the row missing while the session

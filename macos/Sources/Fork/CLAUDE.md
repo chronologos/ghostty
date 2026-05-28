@@ -100,7 +100,8 @@ Fork/
     TagEditView.swift          right-click "Tag…" popover (text + 8 hue swatches)
     NewSessionView.swift       ⌘T sheet
     SplitPickerView.swift      ⌘D picker (new vs attach-existing)
-    SessionMetaLabel.swift     shared row trailer: client-count + age
+    SessionMetaLabel.swift     shared row trailer: CC sparkle (busy/blocked/idle) +
+                               in-sidebar glyph + client-count + creation age
     HostsView.swift            master-detail Hosts sheet (list + add-host form)
     HostDetailView.swift       detail pane: rename, N×N SlotPicker (10-hue palette,
                                bicolor HostDot), sessions, remove
