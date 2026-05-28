@@ -214,7 +214,11 @@ final class ForkWindowController: TerminalController {
         // gesture on one chord. A button only carries one keyEquivalent, so K stays the
         // labelled shortcut and this monitor adds the ⌘W alias for the sheet's lifetime.
         let wMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { ev in
+            // `!isARepeat`: the alias must be a second deliberate press — a *held* ⌘W
+            // auto-repeats into the just-presented sheet and would fire Kill (and then
+            // chain into the next pane's sheet) with no chance to Esc.
             guard ev.window === alert.window,
+                  !ev.isARepeat,
                   ev.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
                   ev.charactersIgnoringModifiers?.lowercased() == "w",
                   kill.isEnabled else { return ev }
@@ -943,6 +947,11 @@ final class ForkWindowController: TerminalController {
         // badge doesn't stick.
         for id in Array(progressSubs.keys) { stopObservingProgress(id) }
         endSheet()  // drops sheetResignSub; child-window auto-close doesn't guarantee resign-key fires first
+        // Focus is leaving the window for good — record the focused pane's departure now,
+        // so a reopen hours later can't back-date it to "just now" via the exit-stamp.
+        // Must run BEFORE the probe stop below: the read-stamp half reads `ccLive`, which
+        // `setCCProbeEnabled(false)` wipes.
+        registry.flushPaneExit()
         // The sidebar's `.onDisappear` usually stops the cc poll + ⌥ monitor, but that path
         // depends on upstream nilling `contentView` during close (a line upstream has marked
         // as removable). Stop the poll here too — idempotent, and the sidebar re-enables it
@@ -957,9 +966,6 @@ final class ForkWindowController: TerminalController {
         // own observers stay intact for whatever super/dealloc still needs.
         NotificationCenter.default.removeObserver(self, name: Ghostty.Notification.ghosttyCloseSurface, object: nil)
         NotificationCenter.default.removeObserver(self, name: .ghosttyBellDidRing, object: nil)
-        // Focus is leaving the window for good — record the focused pane's departure now,
-        // so a reopen hours later can't back-date it to "just now" via the exit-stamp.
-        registry.flushPaneExit()
         super.windowWillClose(notification)
     }
 

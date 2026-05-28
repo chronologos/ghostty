@@ -262,5 +262,21 @@ struct RegistryMoveTests {
         r.touchPane(tab: t, name: "b")
         #expect(r.tabs.first { $0.id == t }!.lastActive["a"]! == flushed)
     }
+
+    // MARK: - Session-list presence (the "already open as a pane" cue)
+
+    @Test func isInSidebar_externalFlagHostScopeAndColdPlaceholder() {
+        let r = reset()
+        _ = makeTab(r, names: ["acr"])                    // managed acr; never hydrated (cold)
+        r.addHost(ForkHost(id: "remote", label: "r", transport: .ssh(.init(host: "r"))))
+        let ext = r.newTab(on: "local", title: "ext")
+        r.setPersistedTree(.leaf(SessionRef(hostID: "local", name: "logs", external: true)), for: ext.id)
+        #expect(r.isInSidebar("acr", external: false, on: "local"))    // cold placeholder still counts
+        #expect(!r.isInSidebar("acr", external: true, on: "local"))    // external shadow must not cross-match
+        #expect(!r.isInSidebar("acr", external: false, on: "remote"))  // host-scoped
+        #expect(r.isInSidebar("logs", external: true, on: "local"))
+        #expect(!r.isInSidebar("logs", external: false, on: "local"))
+        #expect(!r.isInSidebar("ghost", external: false, on: "local"))
+    }
 }
 #endif
