@@ -23,9 +23,10 @@ struct PaneMachine: Equatable {
                            // probe doesn't re-edge after the user's looked
     var probeMissed = false // 2-strike for `.probeAbsent` (torn pid-file vs CC-exit)
 
-    /// What the sidebar rail / `rollup` read. (The dock badge reads `phase`/`ccBusy`
-    /// directly — `dot` demotes `.waiting` to `.blocked`, which would drop a
-    /// needs-input pane from the count.)
+    /// What the sidebar rail / `rollup` read. (The dock badge reads `phase`/`blocked`/
+    /// `ccBusy` directly — `dot` collapses waiting+blocked into one "needs me most"
+    /// precedence for rendering, while the badge counts *both* states, so it can't read
+    /// this projection.)
     var dot: PaneState? {
         phase == .working || ccBusy ? .working
             : blocked ? .blocked
@@ -46,10 +47,17 @@ struct PaneMachine: Equatable {
             phase = isActive ? .idle : .waiting
             if fire, !isActive { notified = true }
             return fire
-        case .bell:
+        case .bell(let isActive):
+            // An active-pane bell is interaction noise (readline/vim beeps under the user's
+            // own typing), not a completion signal: don't consume the ⌘⌥A watch, don't
+            // latch `notified`, don't banner. Counting it as "the user was told" was the
+            // PR43 bell-latch trade-off — a stray beep in the pane you're working in would
+            // silently swallow the banner for a completion that happened much later.
+            guard !isActive else { return false }
             defer { watched = false }
-            // A posted bell counts as "the user was told" — otherwise the 250ms settle that
-            // usually follows a completion bell posts a second banner for the same event.
+            // A posted *background* bell still counts as "the user was told" — otherwise the
+            // 250ms settle that usually follows a completion bell posts a second banner for
+            // the same event.
             if watched { notified = true }
             return watched
         case .viewed:
@@ -90,7 +98,7 @@ struct PaneMachine: Equatable {
 enum PaneEvent {
     case progress                     // OSC 9;4 non-nil
     case settled(isActive: Bool)      // 250ms after nil (or upstream's 15s auto-nil)
-    case bell                         // BEL / OSC 133;D
+    case bell(isActive: Bool)         // BEL / OSC 133;D — isActive: pane is in the visible tab
     case viewed                       // `activate(tab:)`
     case watch(Bool)                  // ⌘⌥A
     case probe(blocked: Bool, busy: Bool, sig: PaneMachine.Sig)

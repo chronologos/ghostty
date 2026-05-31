@@ -34,6 +34,15 @@ struct TransportTests {
         #expect(s.hosts.map(\.id) == ["ok"])
     }
 
+    @Test func lenientRecentTagsDecode() throws {
+        // One malformed tag (hue typed as a string) drops just that tag — it must not fail
+        // the whole State decode (which would route fork.json through the "undecodable"
+        // path and load .bak / empty state).
+        let json = #"{"version":1,"hosts":[],"tabs":[],"recentTags":[{"text":"good","hue":0.5},{"text":"bad","hue":"oops"}]}"#
+        let s = try JSONDecoder().decode(ForkPersistence.State.self, from: Data(json.utf8))
+        #expect(s.recentTags.map(\.text) == ["good"])
+    }
+
     @Test func shqRoundTrip() {
         #expect(shq("a") == "'a'")
         #expect(shq("a b") == "'a b'")
@@ -84,6 +93,77 @@ struct TransportTests {
         #expect(ForkHost.SSHTarget(user: nil, host: "10.40.12.22").isValid)
         #expect(!ForkHost.SSHTarget(user: nil, host: "h;rm -rf").isValid)
         #expect(!ForkHost.SSHTarget(user: "u$(id)", host: "h").isValid)
+    }
+
+    /// `init?(parsing:)` is the path every user-typed connection string takes (HostsView
+    /// add form). The doc comment claims it's the inverse of `connectionString`.
+    @Test func sshTargetParsing() {
+        // Basic split + whitespace trim.
+        let full = ForkHost.SSHTarget(parsing: "  deploy@prod-web-01 \n")
+        #expect(full?.user == "deploy" && full?.host == "prod-web-01")
+        let bare = ForkHost.SSHTarget(parsing: "prod-web-01")
+        #expect(bare?.user == nil && bare?.host == "prod-web-01")
+        // Round trip: parsing(connectionString) == self for valid targets.
+        let t = ForkHost.SSHTarget(user: "me", host: "box.local")
+        #expect(ForkHost.SSHTarget(parsing: t.connectionString) == t)
+        // Rejections — empty parts, double-@ (host charset), ports, IPv6, shell metachars.
+        #expect(ForkHost.SSHTarget(parsing: "") == nil)
+        #expect(ForkHost.SSHTarget(parsing: "@host") == nil)
+        #expect(ForkHost.SSHTarget(parsing: "user@") == nil)
+        #expect(ForkHost.SSHTarget(parsing: "a@b@c") == nil)
+        #expect(ForkHost.SSHTarget(parsing: "host:22") == nil)       // ports unsupported
+        #expect(ForkHost.SSHTarget(parsing: "user@host:22") == nil)
+        #expect(ForkHost.SSHTarget(parsing: "::1") == nil)           // IPv6 unsupported
+        #expect(ForkHost.SSHTarget(parsing: "[fe80::1]") == nil)
+        #expect(ForkHost.SSHTarget(parsing: "host;rm -rf /") == nil)
+        #expect(ForkHost.SSHTarget(parsing: "$(id)@h") == nil)
+        // Leading-dash host is ACCEPTED by the charset — the `--` in both ssh argv builders
+        // is the load-bearing defense against option injection. Pin that so tightening the
+        // charset (or dropping the `--`) is a conscious decision.
+        #expect(ForkHost.SSHTarget(parsing: "-h") != nil)
+    }
+
+    /// fork.json is hand-editable: a hostile/typo'd tag hue must clamp at decode, not trap
+    /// at `Int(hue * 97)` (the Pebble seed) on every launch — that's a launch-loop brick.
+    @Test func paneTagHueClampsAtDecode() throws {
+        func tag(_ hue: String) throws -> PaneTag {
+            try JSONDecoder().decode(PaneTag.self, from: Data(#"{"text":"t","hue":\#(hue)}"#.utf8))
+        }
+        #expect(try tag("0.5").hue == 0.5)
+        #expect(try tag("1e300").hue == 1.0)     // overflow → clamp
+        #expect(try tag("-3").hue == 0.0)        // negative → clamp
+        #expect(try tag("1e-320").hue >= 0)      // subnormal → finite, in range
+        // Non-finite (JSON can't carry literal NaN/Infinity, but a future encoder bug or a
+        // hand-edit through a tolerant parser could) — covered by the memberwise path too.
+        #expect(PaneTag(text: "t", hue: 7).hue == 7)  // memberwise unclamped (UI passes 0...1)
+    }
+
+    /// `Info.==` is the publish guard for the whole CC poll: a field added to `Info` but not
+    /// to `==` silently defeats `mergeCC`'s `!=` check and the sidebar stops repainting for
+    /// changes in that field. The Mirror count forces the conscious decision.
+    @Test func ccInfoEqualityContract() {
+        let base = CCProbe.Info(name: "n", status: "idle", cwd: "/x", updatedAt: .distantPast,
+                                waitingFor: nil, tempo: "active", needs: nil, detail: "d",
+                                sock: "/s")
+        // 9 stored fields today: name, status, cwd, updatedAt, waitingFor, tempo, needs,
+        // detail, sock. Adding a 10th without updating `==`/`hash`/this test fails here.
+        #expect(Mirror(reflecting: base).children.count == 9)
+        // updatedAt is excluded BY DESIGN (heartbeat-only ticks must not publish).
+        var heartbeat = base; heartbeat.updatedAt = .distantFuture
+        #expect(base == heartbeat)
+        #expect(base.hashValue == heartbeat.hashValue)
+        // Every other field participates in ==.
+        func differs(_ mutate: (inout CCProbe.Info) -> Void) -> Bool {
+            var m = base; mutate(&m); return m != base
+        }
+        #expect(differs { $0.name = "y" })
+        #expect(differs { $0.status = "busy" })
+        #expect(differs { $0.cwd = "/y" })
+        #expect(differs { $0.waitingFor = "w" })
+        #expect(differs { $0.tempo = "blocked" })
+        #expect(differs { $0.needs = "answer" })
+        #expect(differs { $0.detail = "other" })
+        #expect(differs { $0.sock = "/t" })
     }
 
     @Test func sessionRefValidation() {
@@ -155,9 +235,12 @@ struct TransportTests {
     }
 
     @Test func lenientHoverCommandsDecode() throws {
-        let json = #"{"hoverCommands":{"j":{"cmd":["jj","log"],"mode":"overlay"},"x":{"cmd":["a"],"mode":"nope"}}}"#
+        let json = #"{"hoverCommands":{"j":{"cmd":["jj","log"],"mode":"pane"},"o":{"cmd":["open"],"mode":"overlay"},"x":{"cmd":["a"],"mode":"nope"}}}"#
         let s = try JSONDecoder().decode(ForkPersistence.State.self, from: Data(json.utf8))
-        #expect(s.hoverCommands["j"]?.mode == .overlay)
+        #expect(s.hoverCommands["j"]?.mode == .pane)
+        // `overlay` mode was removed (PR51): old entries drop like any unknown mode, and
+        // the load path's lossyDropCount preserves the original file aside.
+        #expect(s.hoverCommands["o"] == nil)
         #expect(s.hoverCommands["x"] == nil)
     }
 
@@ -211,26 +294,7 @@ struct TransportTests {
         }
     }
 
-    @Test func mergingConcatsLeavesInOrder() {
-        let a = SessionRef(hostID: "h", name: "a")
-        let b = SessionRef(hostID: "h", name: "b")
-        let c = SessionRef(hostID: "h", name: "c")
-        let left = PersistedTree.leaf(a)
-        let right = PersistedTree.split(horizontal: true, ratio: 0.5,
-                                        a: .leaf(b), b: .leaf(c))
-        #expect(left.merging(right).leafRefs == [a, b, c])
-        // Merging into empty flattens other's shape to a right-leaning chain,
-        // starting with its first leaf as a bare leaf.
-        #expect(PersistedTree.empty.merging(right).leafRefs == [b, c])
-    }
-
-    @Test func mergingEmptyIsIdentity() {
-        let a = SessionRef(hostID: "h", name: "a")
-        let t = PersistedTree.split(horizontal: false, ratio: 0.5,
-                                    a: .leaf(a), b: .leaf(a))
-        #expect(t.merging(.empty) == t)
-        #expect(PersistedTree.empty.merging(.empty) == .empty)
-    }
+    // (`merging(_:)` tests removed with the API — it had no production caller.)
 
     // MARK: CCProbe
 
@@ -273,6 +337,15 @@ struct TransportTests {
             hostID: "h", children: children, cc: cc)
         #expect(r["acr"]?.name == "mine")
         #expect(r["@acr"]?.name == "theirs")
+    }
+
+    /// The native local probe's process-table read: must see this very test process and
+    /// its parent relationship — that's the same edge the zmx-pid → CC-pid BFS walks.
+    @Test func localProcessTreeContainsSelf() {
+        let tree = CCProbe.localProcessTree()
+        #expect(tree != nil)
+        let me = getpid(), parent = getppid()
+        #expect(tree?[parent]?.contains(me) == true)
     }
 }
 #endif

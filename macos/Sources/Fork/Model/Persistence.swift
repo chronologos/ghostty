@@ -28,7 +28,12 @@ final class ForkPersistence {
             hosts = (try? c.decode([Lossy<ForkHost>].self, forKey: .hosts))?.compactMap(\.value) ?? []
             tabs = (try? c.decode([Lossy<TabModel>].self, forKey: .tabs))?.compactMap(\.value) ?? []
             activeTabID = try c.decodeIfPresent(TabModel.ID.self, forKey: .activeTabID)
-            recentTags = try c.decodeIfPresent([PaneTag].self, forKey: .recentTags) ?? []
+            // Lossy like its siblings: one malformed hand-edited tag (e.g. a hue typed as a
+            // string) must not fail the whole State decode — that would route fork.json
+            // through the "undecodable" path and load .bak / empty. A dropped recent tag is
+            // harmless: the MRU list is rebuilt from live paneTags by pruneRecentTags.
+            recentTags = (try? c.decode([Lossy<PaneTag>].self, forKey: .recentTags))?
+                .compactMap(\.value) ?? []
             hoverCommands = (try? c.decode([String: Lossy<HoverCommand>].self, forKey: .hoverCommands))?
                 .compactMapValues(\.value) ?? [:]
         }
@@ -48,6 +53,11 @@ final class ForkPersistence {
     /// fork.json + .bak every few seconds for as long as it runs. `.sortedKeys` makes the
     /// encoding deterministic, so a byte compare is a content compare.
     private var lastWritten: Data?
+    /// Set when this launch's `load()` couldn't read or decode the *primary* — the first
+    /// `save()` must then skip the `.bak` rotation, or it would copy the bad primary over
+    /// a possibly-good `.bak` (the exact recovery copy `load()` just fell back to) before
+    /// writing. Cleared once a write succeeds (the primary is good again).
+    private var primaryWasBad = false
 
     convenience init() {
         // Unsandboxed test host resolves `.applicationSupportDirectory` to the real
@@ -69,13 +79,17 @@ final class ForkPersistence {
 
     func load() -> State {
         for candidate in [url, bakURL] {
-            guard let data = try? Data(contentsOf: candidate) else { continue }
+            guard let data = try? Data(contentsOf: candidate) else {
+                if candidate == url { primaryWasBad = true }
+                continue
+            }
             guard let s = try? JSONDecoder().decode(State.self, from: data) else {
                 // Undecodable (corrupt / hand-edit gone wrong / future top-level change):
                 // copy it aside *now* — the debounced autosave would otherwise overwrite
                 // it with whatever loads next, and the save after that rotates the same
                 // loss into `.bak`, making it permanent.
                 preserve(candidate, reason: "undecodable")
+                if candidate == url { primaryWasBad = true }
                 continue
             }
             if s.version > State().version {
@@ -144,7 +158,9 @@ final class ForkPersistence {
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? enc.encode(state) else { return }
         guard data != lastWritten else { return }
-        if FileManager.default.fileExists(atPath: url.path) {
+        // Never rotate a primary this launch couldn't decode over the `.bak` we may have
+        // just recovered from — if the write below then failed, no good copy would remain.
+        if FileManager.default.fileExists(atPath: url.path), !primaryWasBad {
             try? FileManager.default.removeItem(at: bakURL)
             try? FileManager.default.copyItem(at: url, to: bakURL)
         }
@@ -154,6 +170,7 @@ final class ForkPersistence {
             _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp)
             // Only on success — a failed write must retry on the next tick.
             lastWritten = data
+            primaryWasBad = false
         } catch {
             ForkBootstrap.logger.error("fork.json write failed: \(error.localizedDescription)")
         }

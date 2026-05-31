@@ -126,9 +126,11 @@ struct NewSessionView: View {
         Button { submit(name: e.name, external: e.external) } label: {
             HStack {
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(e.name)
+                    // Session names render mono-12 in every sheet (SplitPicker / HostDetail /
+                    // here) — they're zmx identifiers, not prose.
+                    Text(e.name).font(.system(size: 12, design: .monospaced))
                     if let title = registry.tabTitle(for: e.name, external: e.external, on: hostID) {
-                        Text(title).font(.system(size: 9)).foregroundStyle(.secondary)
+                        Text(title).font(.system(size: 10)).foregroundStyle(.secondary)
                     }
                 }
                 Spacer()

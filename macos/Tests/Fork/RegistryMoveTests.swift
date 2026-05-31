@@ -1,4 +1,5 @@
 #if os(macOS)
+import Combine
 import Foundation
 import Testing
 @testable import Ghostty
@@ -8,14 +9,12 @@ import Testing
 /// and the no-touch-refs invariant.
 @MainActor
 struct RegistryMoveTests {
-    // Fresh registry per test — `SessionRegistry.shared` is a singleton but all
-    // @Published state resets via the helpers below.
+    // Fresh registry per test. `resetForTesting()` clears the state the old removeHost/
+    // removeTab loop missed: `refs`, the pending exit-stamp, local-host ccLive/ccSeenDetail,
+    // focusedPaneIndex — all of which leaked across test cases before.
     private func reset() -> SessionRegistry {
         let r = SessionRegistry.shared
-        // Remove every non-local host (trailing tabs too, via removeHost).
-        for h in r.hosts where h.id != ForkHost.local.id { r.removeHost(h.id) }
-        // Close all tabs on local.
-        for t in r.tabs { r.removeTab(t.id) }
+        r.resetForTesting()
         return r
     }
 
@@ -261,6 +260,218 @@ struct RegistryMoveTests {
         // The pending target was cleared — the next touch must not stamp "a" again.
         r.touchPane(tab: t, name: "b")
         #expect(r.tabs.first { $0.id == t }!.lastActive["a"]! == flushed)
+    }
+
+    // MARK: - Pane GC (PaneMachine lifecycle on tab close — dup-attach + ⌘W→⌘Z contracts)
+
+    @Test func paneGC_dupAttachSurvivesFirstTabClose() {
+        let r = reset()
+        let ref = SessionRef(hostID: "local", name: "shared")
+        let a = makeTab(r, names: ["shared"])
+        let b = makeTab(r, names: ["shared"])      // same session attached in two tabs (PR26)
+        r.apply(ref, .watch(true))
+        #expect(r.panes[ref] != nil)
+        // Closing one tab must keep the machine — the other tab still renders it.
+        r.removeTab(a)
+        #expect(r.panes[ref]?.watched == true)
+        // Closing the last tab is the drop point.
+        r.removeTab(b)
+        #expect(r.panes[ref] == nil)
+    }
+
+    @Test func paneGC_detachPreservesMachineForUndo() {
+        let r = reset()
+        let detached = SessionRef(hostID: "local", name: "a")
+        let kept = SessionRef(hostID: "local", name: "b")
+        let t = makeTab(r, names: ["a", "b"])
+        r.apply(detached, .watch(true))
+        // Per-pane Detach = setPersistedTree without the ref — machine must survive (⌘W→⌘Z
+        // restores the pane and its watch/blockSig must still be there).
+        r.setPersistedTree(.leaf(kept), for: t)
+        #expect(r.panes[detached]?.watched == true)
+        // Tab close drops in-tree refs; the already-detached ref's machine stays until
+        // host-remove or quit — pin the documented leak policy so a "fix" is conscious.
+        r.removeTab(t)
+        #expect(r.panes[kept] == nil)
+        #expect(r.panes[detached]?.watched == true)
+    }
+
+    @Test func paneGC_removeHostDropsAllItsMachines() {
+        let r = reset()
+        r.addHost(ForkHost(id: "rh", label: "r", transport: .ssh(.init(host: "rh"))))
+        _ = makeTab(r, names: ["x"], host: "rh")
+        _ = makeTab(r, names: ["y"])               // local — must survive
+        let remote = SessionRef(hostID: "rh", name: "x")
+        let local = SessionRef(hostID: "local", name: "y")
+        r.apply(remote, .watch(true))
+        r.apply(local, .watch(true))
+        r.removeHost("rh")
+        #expect(r.panes[remote] == nil)
+        #expect(r.panes[local] != nil)
+    }
+
+    // MARK: - focusTabs (what ⌘1-9 + focus mode address)
+
+    @Test func focusTabs_pinnedFirstThenActiveThenMRU() {
+        let r = reset()
+        defer { UserDefaults.standard.removeObject(forKey: SessionRegistry.kFocusSortMRU) }
+        UserDefaults.standard.set(true, forKey: SessionRegistry.kFocusSortMRU)
+        let a = makeTab(r, names: ["a"])
+        let b = makeTab(r, names: ["b"])
+        let c = makeTab(r, names: ["c"])
+        r.touchPane(tab: a, name: "a")
+        r.touchPane(tab: b, name: "b")
+        r.touchPane(tab: c, name: "c")
+        r.setPinned(a, true)
+        r.setActive(tab: b)
+        let order = r.focusTabs(taggedOnly: false).map(\.id)
+        // Pinned floats over everything; the active tab gets .distantFuture MRU next.
+        #expect(order.first == a)
+        #expect(order.dropFirst().first == b)
+        #expect(Set(order) == Set([a, b, c]))
+    }
+
+    @Test func focusTabs_dismissedHiddenUntilTouched() {
+        let r = reset()
+        let a = makeTab(r, names: ["a"])
+        let b = makeTab(r, names: ["b"])
+        r.touchPane(tab: a, name: "a")
+        r.touchPane(tab: b, name: "b")
+        r.dismissFromFocus(a)
+        #expect(!r.focusTabs(taggedOnly: false).map(\.id).contains(a))
+        // Re-activating the tab (touchPane) clears the dismiss watermark.
+        r.touchPane(tab: a, name: "a")
+        #expect(r.focusTabs(taggedOnly: false).map(\.id).contains(a))
+    }
+
+    @Test func focusTabs_taggedOnlyFiltersUntagged() {
+        let r = reset()
+        let tagged = makeTab(r, names: ["t"])
+        let plain = makeTab(r, names: ["p"])
+        r.touchPane(tab: tagged, name: "t")
+        r.touchPane(tab: plain, name: "p")
+        r.setPaneTag(tab: tagged, name: "t", to: PaneTag(text: "wip", hue: 0.2))
+        let ids = r.focusTabs(taggedOnly: true).map(\.id)
+        #expect(ids.contains(tagged))
+        #expect(!ids.contains(plain))
+    }
+
+    @Test func focusTabs_hostGroupedModeFollowsSidebarOrder() {
+        let r = reset()
+        defer { UserDefaults.standard.removeObject(forKey: SessionRegistry.kFocusSortMRU) }
+        UserDefaults.standard.set(false, forKey: SessionRegistry.kFocusSortMRU)
+        r.addHost(ForkHost(id: "zzz", label: "z", transport: .ssh(.init(host: "z"))))
+        let remote = makeTab(r, names: ["r1"], host: "zzz")
+        let local1 = makeTab(r, names: ["l1"])
+        let local2 = makeTab(r, names: ["l2"])
+        // Touch the remote tab last (most recent) — host-grouped order must still win.
+        r.touchPane(tab: local1, name: "l1")
+        r.touchPane(tab: local2, name: "l2")
+        r.touchPane(tab: remote, name: "r1")
+        let order = r.focusTabs(taggedOnly: false).map(\.id)
+        #expect(order == [local1, local2, remote])
+    }
+
+    // MARK: - uniqueAutoName
+
+    @Test func uniqueAutoName_collisionsAndDerivedStems() {
+        let r = reset()
+        _ = makeTab(r, names: ["api-prod"])
+        // Always valid, never collides with an existing leaf.
+        let fresh = r.uniqueAutoName()
+        #expect(fresh != "api-prod" && SessionRef(hostID: "local", name: fresh).isValid)
+        // Deriving from a live name appends one 4-char suffix.
+        let derived = r.uniqueAutoName(derivedFrom: "api-prod")
+        #expect(derived.hasPrefix("api-prod-") && derived.count == "api-prod".count + 5)
+        // Chained splits don't grow names: deriving from the derived name strips its
+        // auto-suffix back to the live stem.
+        _ = makeTab(r, names: [derived])
+        let chained = r.uniqueAutoName(derivedFrom: derived)
+        #expect(chained.hasPrefix("api-prod-") && chained.count == derived.count)
+        // A user name whose tail merely looks auto-generated keeps its full name as stem
+        // (the stem "release" isn't a live session).
+        #expect(r.uniqueAutoName(derivedFrom: "release-v123").hasPrefix("release-v123-"))
+    }
+
+    // MARK: - applyProbeResult (mergeCC body — first direct tests for the poll's merge)
+
+    private func info(name: String? = nil, status: String? = nil, tempo: String? = nil,
+                      needs: String? = nil) -> CCProbe.Info {
+        .init(name: name, status: status, cwd: nil, updatedAt: nil, waitingFor: nil,
+              tempo: tempo, needs: needs, detail: nil, sock: nil)
+    }
+
+    @Test func applyProbe_busyAndBlockedDriveDots() {
+        let r = reset()
+        _ = makeTab(r, names: ["agent"])
+        let ref = SessionRef(hostID: "local", name: "agent")
+        r.applyProbeResult(hostID: "local", result: ["agent": info(status: "busy")])
+        #expect(r.dot(ref: ref) == .working)
+        r.applyProbeResult(hostID: "local", result: ["agent": info(tempo: "blocked", needs: "answer?")])
+        #expect(r.dot(ref: ref) == .blocked)
+    }
+
+    @Test func applyProbe_nilResultKeepsLastKnownAndBlockedLatch() {
+        let r = reset()
+        _ = makeTab(r, names: ["agent"])
+        let ref = SessionRef(hostID: "local", name: "agent")
+        r.applyProbeResult(hostID: "local",
+                           result: ["agent": info(name: "cc", tempo: "blocked", needs: "x")])
+        #expect(r.dot(ref: ref) == .blocked)
+        // Probe failure (nil): ccLive keeps last-known, blocked latch survives, busy clears.
+        r.applyProbeResult(hostID: "local", result: nil)
+        #expect(r.ccLive["local"]?["agent"] != nil)
+        #expect(r.dot(ref: ref) == .blocked)
+    }
+
+    @Test func applyProbe_neverAttachedSessionsDoNotLeakMachines() {
+        let r = reset()
+        _ = makeTab(r, names: ["agent"])
+        r.applyProbeResult(hostID: "local", result: [
+            "agent": info(name: "ours"),
+            "stranger": info(name: "not-ours"),
+        ])
+        // The stranger is in ccLive (whole-host slice — pickers read it) but must not get
+        // a PaneMachine (panes is keyed by in-tree refs only).
+        #expect(r.ccLive["local"]?["stranger"] != nil)
+        #expect(r.panes[SessionRef(hostID: "local", name: "stranger")] == nil)
+    }
+
+    @Test func applyProbe_ccNamesWriteThroughOnlyForLiveKeys() {
+        let r = reset()
+        let t = makeTab(r, names: ["agent"])
+        r.applyProbeResult(hostID: "local", result: [
+            "agent": info(name: "fixing-tests"),
+            "other": info(name: "stray"),
+        ])
+        let tab = r.tabs.first { $0.id == t }!
+        #expect(tab.ccNames["agent"] == "fixing-tests")
+        #expect(tab.ccNames["other"] == nil)
+    }
+
+    @Test func applyProbe_removedHostMidTickIsNoOp() {
+        let r = reset()
+        r.addHost(ForkHost(id: "gone", label: "g", transport: .ssh(.init(host: "g"))))
+        _ = makeTab(r, names: ["x"], host: "gone")
+        r.removeHost("gone")
+        // An in-flight poll result draining after removeHost must not resurrect its ccLive.
+        r.applyProbeResult(hostID: "gone", result: ["x": info(name: "ghost")])
+        #expect(r.ccLive["gone"] == nil)
+    }
+
+    @Test func applyProbe_identicalResultDoesNotRepublish() {
+        let r = reset()
+        _ = makeTab(r, names: ["agent"])
+        let payload = ["agent": info(name: "cc", status: "busy")]
+        r.applyProbeResult(hostID: "local", result: payload)
+        // The `!=` publish guard: a steady-state tick (value-identical result) must not
+        // fire objectWillChange — that's what keeps the debounce-save and the sidebar
+        // re-render off the 3s poll cadence.
+        var publishes = 0
+        let sub = r.objectWillChange.sink { _ in publishes += 1 }
+        r.applyProbeResult(hostID: "local", result: payload)
+        sub.cancel()
+        #expect(publishes == 0)
     }
 
     // MARK: - Session-list presence (the "already open as a pane" cue)
