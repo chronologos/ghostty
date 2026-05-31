@@ -56,6 +56,25 @@ struct PersistenceSafetyTests {
         try? Data(s.utf8).write(to: dir.appendingPathComponent(name))
     }
 
+    @Test func validationDropsArePreservedAside() {
+        let (p, dir) = tempStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        var state = ForkPersistence.State()
+        // The ssh target decodes fine but fails validation — the load must drop the host
+        // and its tab (never hand an unvalidated string to a spawn) AND copy the original
+        // aside so the drop is recoverable, not silently made permanent by the autosave.
+        state.hosts = [ForkHost(id: "ok", label: "ok", transport: .local),
+                       ForkHost(id: "bad", label: "bad", transport: .ssh(.init(host: "host;rm -rf /")))]
+        state.tabs = [TabModel(id: UUID(), hostID: "bad", title: "doomed",
+                               tree: .leaf(SessionRef(hostID: "bad", name: "work")))]
+        p.save(state)
+        let p2 = ForkPersistence(directory: dir)
+        let loaded = p2.load()
+        #expect(loaded.hosts.map(\.id) == ["ok"])
+        #expect(loaded.tabs.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("fork.json.invalid").path))
+    }
+
     @Test func roundTripAndNoOpGate() {
         let (p, dir) = tempStore()
         defer { try? FileManager.default.removeItem(at: dir) }

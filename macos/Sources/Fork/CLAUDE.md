@@ -280,12 +280,14 @@ A terminal that runs arbitrary shells will trip every macOS privacy surface. Thr
 
 ## Known limitations
 
-- Launch runs a bounded (2s) login-shell probe for PATH (`ForkBootstrap.exportLoginShellPATH`)
-  and, if `zmx` still isn't found in env/PATH or the hardcoded dir list, a second 2s probe
-  for zmx (`ZmxAdapter.localZmx`) — so a hung `.zshrc` can stall a cold launch up to ~4s.
-  `static let` is swift_once-serialized, so the zmx probe can't be moved off main; both are
-  forced eagerly in `install()` so the stall lands before the first window draws. Set
-  `GHOSTTY_FORK_ZMX=/abs/path` to skip the zmx probe (the PATH probe always runs).
+- Launch applies the *cached* login-shell PATH instantly and refreshes the cache via a
+  background probe (15s bound — heavy rc inits measured at 2-4s defeat any short inline
+  probe; `ForkBootstrap.exportLoginShellPATH`). The first-ever launch has no cache, so
+  ProxyCommand-by-name hosts may stay unreachable until the background probe lands
+  (seconds). Only `ZmxAdapter.localZmx`'s last-resort 2s login-shell probe can still stall
+  a cold launch, and only when zmx isn't in env/PATH or the hardcoded dir list (`static
+  let` is swift_once-serialized, so it can't move off main). Set `GHOSTTY_FORK_ZMX=/abs/path`
+  to skip the zmx probe.
 - `refs` is never pruned (see undo gotcha) — closed-split entries leak until quit;
   `isConnected()` may stay green slightly stale. In-memory only, not persisted.
 
@@ -307,6 +309,9 @@ A terminal that runs arbitrary shells will trip every macOS privacy surface. Thr
   `ps -A -o pid=,ppid=`; BusyBox/Alpine untested. Shared-uid remotes
   (`deploy@`) ship every user's CC pid-files over the wire — BFS filters the
   *result* to descendants of our zmx sessions, but the raw transfer doesn't.
+  The poll stretches from 3s to 30s while no fork window is visible (occluded /
+  minimized / locked screen) — agents running overnight otherwise make the idle
+  poll the fork's biggest CPU and ssh-traffic source.
   The red `.blocked` indicator depends on classifier fields (`tempo`/`needs`)
   that the agent only writes while it believes it's being watched —
   `probeScript` touches the heartbeat file every poll to keep that true, but
