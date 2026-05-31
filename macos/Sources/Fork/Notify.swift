@@ -44,34 +44,50 @@ final class ForkNotify: NSObject, UNUserNotificationCenterDelegate {
             wrapped = center.delegate
             center.delegate = self
             center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
-            // Not `dot == .waiting`: `dot` demotes to `.blocked` when the probe flags
-            // the pane, which would drop it from the count one probe-tick after it
-            // settled — badge flashes then vanishes while the pane still needs input.
-            // `!ccBusy` is the only `dot`-ism that belongs here (a busy pane renders a
-            // working rail; badging "needs you" at the same time would contradict it).
-            let waiting = { (p: [SessionRef: PaneMachine]) in
-                p.values.lazy.filter { $0.phase == .waiting && !$0.ccBusy }.count
+            // "Needs you" = finished-unread OR probe-blocked. Not `dot == .waiting`: `dot`
+            // demotes `.waiting` to `.blocked` when the probe flags the pane, which would
+            // drop it from a waiting-only count one probe-tick after it settled — badge
+            // flashes then vanishes while the pane still needs input. Counting `blocked`
+            // directly closes the inverse gap: the most urgent state (red rail) previously
+            // never reached the badge at all. `!ccBusy` is the only `dot`-ism that belongs
+            // here (a busy pane renders a working rail; badging "needs you" at the same
+            // time would contradict it — and `ccBusy` also masks `blocked` in `dot`).
+            let needsYou = { (p: [SessionRef: PaneMachine]) in
+                p.values.lazy.filter { ($0.phase == .waiting || $0.blocked) && !$0.ccBusy }.count
             }
-            // Upstream's `setDockBadge` (AppDelegate.swift:745) is the second writer; it's
-            // `private`, so on the 1→0 edge we re-derive its bell label locally instead
-            // of writing nil and clobbering a pending bell.
+            // Upstream's `setDockBadge` (AppDelegate) is the second writer; it's `private`,
+            // so on the 1→0 edge we re-derive its bell label locally instead of writing
+            // nil and clobbering a pending bell. Match its gate (the user-disableable
+            // `bell-features = attention`) and its 99+ cap so the fork can never show a
+            // bell badge upstream itself wouldn't.
             let bellLabel = { () -> String? in
+                guard ForkWindowController.instance?.ghostty.config.bellFeatures
+                    .contains(.attention) ?? false else { return nil }
                 let c = NSApp.windows
                     .compactMap { $0.windowController as? BaseTerminalController }
                     .reduce(0) { $0 + ($1.bell ? 1 : 0) }
-                return c > 0 ? "\(c)" : nil
+                return c > 0 ? (c > 99 ? "99+" : "\(c)") : nil
             }
             badgeSub = SessionRegistry.shared.$panes
-                .map(waiting)
+                .map(needsYou)
                 .removeDuplicates()
                 .sink { NSApp.dockTile.badgeLabel = $0 > 0 ? "\($0)" : bellLabel() }
             NotificationCenter.default.addObserver(
                 forName: .terminalWindowBellDidChangeNotification,
                 object: nil, queue: .main
             ) { _ in
-                MainActor.assumeIsolated {
-                    let n = waiting(SessionRegistry.shared.panes)
-                    if n > 0 { NSApp.dockTile.badgeLabel = "\(n)" }
+                // Upstream's writer on this same notification defers behind a
+                // getNotificationSettings async IPC + a main.async hop (syncDockBadge →
+                // setDockBadge), so a re-assert at post time ALWAYS loses that race — the
+                // badge would show the bell count (or nothing, on the bell-clear edge)
+                // until the needs-you count next *changes value* (removeDuplicates gates
+                // the Combine path). Re-assert after a beat that outlasts the IPC
+                // roundtrip: upstream's value shows for under a second, then ours wins.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                    MainActor.assumeIsolated {
+                        let n = needsYou(SessionRegistry.shared.panes)
+                        if n > 0 { NSApp.dockTile.badgeLabel = "\(n)" }
+                    }
                 }
             }
         }
