@@ -18,21 +18,13 @@ struct SidebarView: View {
     @State private var showCutoffPopover = false
     @AppStorage("forkSidebarShowCC") private var showCC = false
     /// One density now (the old compact/details toggle is gone — read/unread status text
-    /// self-regulates row height instead): solo ⌥-hold ≥0.5s arms `revealAll` (re-expand
-    /// every read status line, fleet-wide glance); ⌥⌥ — two clean taps, committed on the
-    /// second release — sweeps everything read.
-    /// Own monitor (not `navMonitor`) so this stays @State and doesn't churn the registry's
-    /// `objectWillChange` → debounce-save on every modifier tap.
-    @State private var optionHeld = false
-    @State private var lastOptionPress: Date?
-    @State private var flagsMonitor: Any?
-    /// Armed only by a *solo* hold — the 0.5s delay plus the key/mouse disqualifier keep
-    /// readline Meta chords (⌥b/⌥f) and ⌥-clicks from flashing the sidebar open mid-typing.
+    /// self-regulates row height instead). The ⌥ gesture machinery lives in
+    /// `OptionGestureRecognizer`; this is the only piece of its state row rendering reads
+    /// (ccLine's lineLimit un-clamp).
     @State private var revealAll = false
-    @State private var revealArm: Timer?
-    /// Second ⌥ tap landed inside the 0.4s window — the sweep fires when it's released
-    /// cleanly (no hold, no chord), so "tap, then hold to peek" never reads as ⌥⌥.
-    @State private var sweepOnRelease = false
+    /// Tag-popover cursor — view-local: its only readers/writers are sidebar rows, and
+    /// registry residence churned the debounce-save sink on every popover open/close.
+    @State private var taggingPane: (tab: TabModel.ID, key: String)?
 
     private var fontFamily: String? { controller?.ghostty.config.forkFontFamily }
     private func mono(_ s: CGFloat, _ w: Font.Weight = .regular) -> Font { forkMono(s, w, fontFamily) }
@@ -64,16 +56,10 @@ struct SidebarView: View {
         .background(.ultraThinMaterial)
         .task { registry.setCCProbeEnabled(showCC) }
         .onChange(of: showCC) { registry.setCCProbeEnabled($0) }
-        .onAppear {
-            flagsMonitor = NSEvent.addLocalMonitorForEvents(
-                matching: [.flagsChanged, .keyDown, .leftMouseDown, .rightMouseDown]
-            ) { ev in
-                handleOptionEvent(ev)
-            }
-        }
+        .modifier(OptionGestureRecognizer(window: { controller?.window },
+                                          revealAll: $revealAll,
+                                          onSweep: { registry.markAllCCRead() }))
         .onDisappear {
-            flagsMonitor.map(NSEvent.removeMonitor); flagsMonitor = nil
-            disarmOptionGesture(); optionHeld = false; lastOptionPress = nil
             // Stop the singleton's 3s ccPoll loop — `setCCProbeEnabled` cancels the
             // detached `Task`, which `.task`'s own auto-cancel can't (one-shot body
             // returns immediately). Otherwise leaks past last-window close
@@ -84,83 +70,6 @@ struct SidebarView: View {
                 registry.setCCProbeEnabled(false)
             }
         }
-        .onReceive(NotificationCenter.default.publisher(
-            for: NSApplication.didResignActiveNotification)) { _ in
-                optionHeld = false
-                disarmOptionGesture()
-            }
-        .onReceive(NotificationCenter.default.publisher(
-            for: NSWindow.didResignKeyNotification)) { note in
-                // An ⌥ release delivered to a sheet / QuickTerminal / another window never
-                // reaches `handleOptionEvent` (window guard) — losing key is the disarm.
-                guard (note.object as? NSWindow) === controller?.window else { return }
-                optionHeld = false
-                disarmOptionGesture()
-            }
-    }
-
-    /// ⌥ recognizer: a solo ⌥ held 0.5s → `revealAll`; ⌥⌥ (two clean taps within 0.4s) →
-    /// quiet sweep (`markAllCCRead`), committed on the second *release* so a tap followed
-    /// by a hold reads as a retry of the peek, not a sweep. Any key or mouse event while
-    /// ⌥ is down is a chord (readline ⌥b/⌥f, accented input, ⌘⌥N, ⌥-click/⌥-drag in the
-    /// terminal), not a tap or a peek — it disqualifies the in-flight press for both.
-    private func handleOptionEvent(_ ev: NSEvent) -> NSEvent? {
-        // Local monitors are app-wide; QuickTerminal bypasses the fork seam, so ⌥⌥ in its
-        // window would otherwise sweep our read-state.
-        guard ev.window === controller?.window else { return ev }
-        if ev.type != .flagsChanged {
-            if ev.modifierFlags.contains(.option) {
-                lastOptionPress = nil
-                disarmOptionGesture()
-            }
-            return ev
-        }
-        let flags = ev.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let held = flags.contains(.option)
-        // "Solo" = no chord modifiers — ⌘⌥1-9 host jumps and other ⌘/⇧/⌃ chords must
-        // neither count as taps nor flash the reveal. Caps Lock / fn are not chords and
-        // must not kill the gesture.
-        let solo = held && flags.isDisjoint(with: [.command, .shift, .control])
-        if solo, !optionHeld {
-            let now = Date()
-            // A second press inside the 0.4s window is a *candidate* sweep — committed on
-            // release, so it can still turn into a hold (peek) or be disqualified.
-            sweepOnRelease = lastOptionPress.map { now.timeIntervalSince($0) < 0.4 } ?? false
-            lastOptionPress = now
-            // Solo-hold reveal arms after a beat (the cheatsheet's ⌘-hold idiom); instant
-            // would still flash open in the gap before a chord's keyDown lands. Re-check
-            // the hardware state at fire time — a release swallowed by a tracking loop or
-            // delivered to another window must not latch it on.
-            revealArm = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { _ in
-                if NSEvent.modifierFlags.contains(.option) { revealAll = true }
-            }
-        }
-        if held, !solo, optionHeld {
-            // A chord modifier joined an already-held ⌥ (⌥ first, then ⌘ for ⌘⌥N): that's a
-            // chord in progress, not a peek — disarm the pending/active reveal and abandon
-            // the half-completed tap so a slow chord can't flash the sidebar open.
-            lastOptionPress = nil
-            disarmOptionGesture()
-        }
-        if !held {
-            // Tap-tap commits here — unless the press became a hold (the peek fired: you
-            // were retrying the glance, not asking to sweep) or was disqualified above.
-            let commitSweep = sweepOnRelease && !revealAll
-            disarmOptionGesture()
-            if commitSweep {
-                registry.markAllCCRead()
-                lastOptionPress = nil   // a third tap shouldn't chain into another sweep
-            }
-        }
-        if held != optionHeld { optionHeld = held }
-        return ev
-    }
-
-    /// Cancel a pending solo-hold reveal, drop an active one, and abandon a half-completed ⌥⌥.
-    private func disarmOptionGesture() {
-        revealArm?.invalidate(); revealArm = nil
-        sweepOnRelease = false
-        if revealAll { revealAll = false }
     }
 
     // MARK: Header
@@ -195,8 +104,10 @@ struct SidebarView: View {
                 .help(focusMode ? "All hosts"
                                 : "Focus (last \(Int(cutoffHours))h) — long-press to adjust")
                 .modifier(HoverHighlight())
+            // "CC", matching every other surface (tooltips, cheatsheet, host sheet) — this
+            // toggle was the one label spelling the name out.
             iconButton("sparkle",
-                       help: showCC ? "Hide Claude session names" : "Show Claude session names",
+                       help: showCC ? "Hide CC session status" : "Show CC session status",
                        tint: showCC ? Theme.clay : nil) {
                 withAnimation(.snappy(duration: 0.12)) { showCC.toggle() }
             }
@@ -271,11 +182,15 @@ struct SidebarView: View {
 
     /// Worst-child rollup for collapsed headers — compact dot/spinner; the per-row indicator
     /// is `StatusRail` (right-edge anchored, doesn't fit inline here).
+    /// Same encoding as the rail: stroked = finished-unread, solid red = blocked, motion =
+    /// working. (A *solid* accent dot for waiting inverted the rail's solid-means-working.)
     @ViewBuilder
     private func stateDot(_ s: PaneState?, accent: Color) -> some View {
         switch s {
         case .blocked: Circle().fill(Theme.blocked).frame(width: 6, height: 6).help(PaneState.blocked.help)
-        case .waiting: Circle().fill(accent).frame(width: 6, height: 6).help(PaneState.waiting.help)
+        case .waiting:
+            Circle().strokeBorder(accent, lineWidth: 1)
+                .frame(width: 6, height: 6).help(PaneState.waiting.help)
         case .working: ProgressView().controlSize(.mini).scaleEffect(0.6)
         case nil: EmptyView()
         }
@@ -292,14 +207,22 @@ struct SidebarView: View {
 
     @ViewBuilder
     private func hostSection(_ host: ForkHost) -> some View {
-        let allTabs = registry.tabs(on: host.id)
-        let tabs = filterTagged ? allTabs.filter(\.hasTag) : allTabs
+        // Same accessor ⌘1-9 indexes (`gotoTab`) — a filter added here alone would desync them.
+        let tabs = registry.hostTabs(on: host.id, taggedOnly: filterTagged)
         // Filter-on + no tagged tabs on this host → hide the whole section so the
         // sidebar isn't cluttered with empty host cards.
         if !(filterTagged && tabs.isEmpty) {
             hostHeader(host, tabs: tabs)
-            if host.expanded && !tabs.isEmpty {
-                hostBody(tabs: tabs)
+            if host.expanded {
+                if !tabs.isEmpty {
+                    hostBody(tabs: tabs)
+                } else {
+                    // Expanded host, zero tabs: without this the chevron rotates and nothing
+                    // appears — the section reads as broken rather than empty.
+                    Text("No sessions — right-click the host to create one")
+                        .font(mono(10)).foregroundStyle(.tertiary)
+                        .padding(.horizontal, 26).padding(.vertical, 2)
+                }
             }
         }
     }
@@ -331,7 +254,11 @@ struct SidebarView: View {
                 }
                 Spacer()
                 if !host.expanded {
-                    stateDot(controller?.rollup(hostID: host.id), accent: host.accent)
+                    // Roll up over the same filtered set the rows render (and the count
+                    // shows) — with the tag filter on, a hidden untagged tab's state must
+                    // not drive a dot that points at something the user can't see.
+                    stateDot(tabs.lazy.compactMap { registry.rollup(tab: $0) }.max(),
+                             accent: host.accent)
                         .padding(.trailing, 6)
                 }
                 if let i = registry.hosts.firstIndex(where: { $0.id == host.id }), i < 9 {
@@ -437,7 +364,7 @@ struct SidebarView: View {
             }
             Spacer()
             if tab.collapsed {
-                stateDot(controller?.rollup(tab: tab), accent: accent)
+                stateDot(registry.rollup(tab: tab), accent: accent)
                     .padding(.trailing, 6)
                 Text("\(paneCount)").font(mono(10)).foregroundStyle(.tertiary)
             }
@@ -662,17 +589,17 @@ struct SidebarView: View {
         })
         .contextMenu { paneContextMenu(tab, ref: ref, tag: tag) }
         .popover(isPresented: Binding(
-            get: { registry.taggingPane.map { $0 == (tab.id, ref.key) } ?? false },
+            get: { taggingPane.map { $0 == (tab.id, ref.key) } ?? false },
             // Only clear shared state if it still points at *this* row — opening B's popover
             // (context-menu "New Tag…") flips A's getter false, and A's NSPopover-dismiss
             // callback would otherwise race B's open by nilling `taggingPane` from under it.
-            set: { if !$0, registry.taggingPane.map({ $0 == (tab.id, ref.key) }) ?? false {
-                registry.taggingPane = nil
+            set: { if !$0, taggingPane.map({ $0 == (tab.id, ref.key) }) ?? false {
+                taggingPane = nil
             } }
         ), arrowEdge: .trailing) {
             TagEditView(seed: tag) {
                 registry.setPaneTag(tab: tab.id, name: ref.key, to: $0)
-                registry.taggingPane = nil
+                taggingPane = nil
             }
         }
     }
@@ -687,7 +614,7 @@ struct SidebarView: View {
             Menu("Tag") {
                 ForEach(recentTags.dropFirst(3), id: \.self) { tagButton($0, tab: tab.id, ref: ref.key) }
                 if recentTags.count > 3 { Divider() }
-                Button("New Tag…") { registry.taggingPane = (tab.id, ref.key) }
+                Button("New Tag…") { taggingPane = (tab.id, ref.key) }
                 if tag != nil {
                     Button("Clear Tag") { registry.setPaneTag(tab: tab.id, name: ref.key, to: nil) }
                 }

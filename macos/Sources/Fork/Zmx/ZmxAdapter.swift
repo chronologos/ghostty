@@ -69,15 +69,6 @@ enum ZmxAdapter {
         }
     }
 
-    /// `SurfaceConfiguration` for an ephemeral (no-zmx) command on `host` — keeps
-    /// `Transport.wrap` calls inside this file per the §Security-boundary invariant.
-    static func ephemeralConfig(host: ForkHost, argv: [String], cwd: String?) -> Ghostty.SurfaceConfiguration {
-        var c = Ghostty.SurfaceConfiguration()
-        c.command = host.transport.wrap(argv)
-        if host.transport.isLocal { c.workingDirectory = cwd }
-        return c
-    }
-
     /// SurfaceConfiguration whose pty child is `zmx attach <wireName> [cmd...]`, wrapped by transport.
     static func surfaceConfig(
         host: ForkHost,
@@ -87,7 +78,6 @@ enum ZmxAdapter {
     ) -> Ghostty.SurfaceConfiguration {
         var c = Ghostty.SurfaceConfiguration()
         if host.transport.isLocal { c.workingDirectory = cwd }
-        if ForkBootstrap.noZmx { return c }
         let argv = [zmx(on: host), "attach", wireName(ref)] + (initialCmd ?? [])
         c.command = host.transport.wrap(argv)
         return c
@@ -124,7 +114,13 @@ enum ZmxAdapter {
         var r = ListResult()
         for line in output.split(separator: "\n") {
             guard var e = parse(line: line) else { continue }
-            if e.name.hasPrefix(prefix) {
+            // Only a name the fork could have created itself (managed charset) is trusted
+            // as managed: the wire prefix alone is forgeable by anyone on the host, and a
+            // forged name with shell-hostile characters must not become a non-external
+            // `SessionRef` (downstream code assumes managed ⇒ `isValid` — derived-name
+            // seeding, `Persistence.scrub`'s rule choice). Forged-prefix names that fail
+            // the charset stay external under their full wire name.
+            if e.name.hasPrefix(prefix), isValidIdent(String(e.name.dropFirst(prefix.count))) {
                 e.name = String(e.name.dropFirst(prefix.count))
                 e.external = false
             }
@@ -283,8 +279,13 @@ enum ZmxAdapter {
                         case .some(0):
                             settle(.success(String(decoding: box.out, as: UTF8.self)))
                         case .some(let st):
-                            let msg = String(decoding: box.err.suffix(512), as: UTF8.self)
-                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                            // stderr is remote-controlled bytes (whatever ssh / zmx / the
+                            // remote shell emits) and ends up in os_log lines and alert
+                            // text — strip terminal escapes at the source.
+                            let msg = stripControl(
+                                String(decoding: box.err.suffix(512), as: UTF8.self)
+                                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                                max: 512)
                             settle(.failure(CommandError(status: st, stderr: msg)))
                         case .none:
                             // Output arrived and the pipes closed, but the exit never reached
@@ -322,6 +323,14 @@ enum ZmxAdapter {
                     }
                     if box.cancelled { box.abort?(); return }
 
+                    // Accumulation caps: a runaway/hostile child can write at pipe speed for
+                    // the whole timeout window — without a ceiling, `zmx history` over a
+                    // pathological buffer (or a compromised remote streaming garbage) grows
+                    // these Data buffers without bound. Past the cap we keep *draining* (so
+                    // the child can't block on a full pipe and wedge into the deadline) but
+                    // stop retaining. 8 MiB stdout covers any legitimate history; stderr is
+                    // diagnostics only.
+                    let outCap = 8 << 20, errCap = 256 << 10
                     outPipe.fileHandleForReading.readabilityHandler = { h in
                         let chunk = h.availableData
                         // Detach on the handler's own queue — deferring the nil to `q`
@@ -329,7 +338,7 @@ enum ZmxAdapter {
                         if chunk.isEmpty { h.readabilityHandler = nil }
                         q.async {
                             if chunk.isEmpty { box.stdoutEOF = true; maybeSettle() }
-                            else { box.out.append(chunk) }
+                            else if box.out.count < outCap { box.out.append(chunk) }
                         }
                     }
                     errPipe.fileHandleForReading.readabilityHandler = { h in
@@ -337,7 +346,7 @@ enum ZmxAdapter {
                         if chunk.isEmpty { h.readabilityHandler = nil }
                         q.async {
                             if chunk.isEmpty { box.stderrEOF = true; maybeSettle() }
-                            else { box.err.append(chunk) }
+                            else if box.err.count < errCap { box.err.append(chunk) }
                         }
                     }
                     p.terminationHandler = { t in

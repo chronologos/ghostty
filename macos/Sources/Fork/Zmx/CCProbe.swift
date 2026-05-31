@@ -53,9 +53,15 @@ enum CCProbe {
         // probe when `list()` returns nil); zero entries just means there's nothing to match
         // against — keep last-known rather than wiping.
         guard !entries.isEmpty else { return nil }
+        // Local host: pure-Swift probe. The shell pipeline below spawned ~16 processes per
+        // 3s tick (env → sh → ps → cat×N) for what is local filesystem + process-table
+        // work — ~95% of the poll's local CPU was process spawn overhead.
+        if host.transport.isLocal {
+            return probeLocal(entries: entries, hostID: host.id)
+        }
+        // Only ssh hosts reach here (local returned above), so the timeout is the ssh one.
         let argv = host.transport.controlArgv(["/bin/sh", "-c", probeScript])
-        guard let out = try? await ZmxAdapter.run(argv: argv,
-                                                  timeout: host.transport.isLocal ? 3 : 5)
+        guard let out = try? await ZmxAdapter.run(argv: argv, timeout: 5)
         else { return nil }
         // RS (0x1e) cannot appear unescaped in JSON text (RFC 8259 §7), so it's a safe
         // separator even though `name`/`cwd`/`detail` are arbitrary strings.
@@ -69,6 +75,63 @@ enum CCProbe {
             if let r = decode(blob) { dict[r.pid] = r.info }
         }
         return match(entries: entries, hostID: host.id, children: parsePS(ps), cc: cc)
+    }
+
+    // MARK: - Native local probe
+
+    /// `probeScript`, in Swift, for the local host: process table via `sysctl(KERN_PROC_ALL)`,
+    /// session JSONs + heartbeat via FileManager. Same output contract as the script path —
+    /// `nil` on failure (caller keeps last-known), `[:]` on probed-fine-no-matches — and the
+    /// same field sanitization (`decode` → `clean`/`stripControl`). The remote (ssh) path
+    /// keeps the script: there is no way to read a remote process table without running
+    /// *something* over there.
+    static func probeLocal(entries: [ZmxAdapter.ListEntry], hostID: ForkHost.ID) -> [String: Info]? {
+        let fm = FileManager.default
+        let dir = localSessionsDir()
+        // Heartbeat first — same contract as the script's `: >` touch: flips the agent's
+        // "being watched" gate so it writes the `tempo`/`needs` classifier fields.
+        fm.createFile(atPath: dir + "/.fleetview-heartbeat", contents: Data())
+        guard let children = localProcessTree() else { return nil }
+        var cc: [Int32: Info] = [:]
+        for f in (try? fm.contentsOfDirectory(atPath: dir)) ?? []
+        where f.hasSuffix(".json") && (f.first?.isNumber ?? false) {
+            guard let data = fm.contents(atPath: dir + "/" + f),
+                  let r = decode(String(decoding: data, as: UTF8.self)) else { continue }
+            cc[r.pid] = r.info
+        }
+        return match(entries: entries, hostID: hostID, children: children, cc: cc)
+    }
+
+    /// `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions` — same resolution as the script.
+    /// (A zshrc-only CLAUDE_CONFIG_DIR is invisible to a Dock-launched app either way.)
+    private static func localSessionsDir() -> String {
+        let base = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"]
+            ?? FileManager.default.homeDirectoryForCurrentUser.path + "/.claude"
+        return base + "/sessions"
+    }
+
+    /// pid → children map from the local process table. `sysctl(KERN_PROC_ALL)` instead of
+    /// spawning `ps -A`; nil on sysctl failure (caller keeps last-known, same as a failed
+    /// script run).
+    static func localProcessTree() -> [Int32: [Int32]]? {
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
+        var size = 0
+        guard sysctl(&mib, 4, nil, &size, nil, 0) == 0, size > 0 else { return nil }
+        // Headroom: processes can spawn between the size call and the fetch.
+        size += size / 8
+        var buf = [UInt8](repeating: 0, count: size)
+        guard sysctl(&mib, 4, &buf, &size, nil, 0) == 0 else { return nil }
+        let count = size / MemoryLayout<kinfo_proc>.stride
+        var children: [Int32: [Int32]] = [:]
+        buf.withUnsafeBytes { raw in
+            let procs = raw.bindMemory(to: kinfo_proc.self)
+            for i in 0..<min(count, procs.count) {
+                let pid = procs[i].kp_proc.p_pid
+                guard pid > 0 else { continue }
+                children[procs[i].kp_eproc.e_ppid, default: []].append(pid)
+            }
+        }
+        return children
     }
 
     // MARK: - Pure core (unit-tested)

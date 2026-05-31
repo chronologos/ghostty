@@ -36,9 +36,9 @@ final class SessionRegistry: ObservableObject {
     /// Sidebar inline-rename cursor. Controller writes via `promptTabTitle()` / `promptPaneTitle()`
     /// (⌘⇧I / ⌘I); sidebar writes via double-click / context-menu; not persisted.
     @Published private(set) var renaming: RenameTarget?
-    /// Tag-popover cursor — registry-owned (not SidebarView @State) so the controller's
-    /// hover-key monitor can open it. Ephemeral.
-    @Published var taggingPane: (tab: TabModel.ID, key: String)?
+    // (The tag-popover cursor is SidebarView `@State` now — its only readers/writers are
+    // sidebar rows. It lived here for the hover-key monitor, which is gone; registry
+    // residence also meant every popover open/close churned the debounce-save sink.)
     /// MRU of in-use tags (newest first, ≤8). `paneTags.values` is hash-order so deriving
     /// "recent" from it is arbitrary; this is the source of truth for the context-menu shortlist.
     /// Pruned to live `paneTags` on every mutation that can drop the last user of a tag.
@@ -57,6 +57,13 @@ final class SessionRegistry: ObservableObject {
         if panes[ref] != m { panes[ref] = m }; return post
     }
     func dot(ref: SessionRef) -> PaneState? { panes[ref]?.dot }
+    /// Worst-child state for a collapsed tab heading — max-reduce over `dot`. Registry-side
+    /// (not controller) so cold and live tabs read the same way and a nil controller can't
+    /// silently render no rollup. Host-level rollups are a `.max()` over this at the call
+    /// site — the sidebar must reduce over its *filtered* tab set, not all tabs on the host.
+    func rollup(tab: TabModel) -> PaneState? {
+        tab.tree.leafRefs.lazy.compactMap { self.dot(ref: $0) }.max()
+    }
     /// Called when a ref leaves all trees (`removeTab`/`removeHost` — NOT
     /// `setPersistedTree`, which must preserve `blockSig`/`watched` across ⌘W→⌘Z).
     func dropPane(_ ref: SessionRef) { panes.removeValue(forKey: ref) }
@@ -128,6 +135,15 @@ final class SessionRegistry: ObservableObject {
     func tabs(on hostID: ForkHost.ID) -> [TabModel] { tabs.filter { $0.hostID == hostID } }
     var activeTab: TabModel? { activeTabID.flatMap { id in tabs.first { $0.id == id } } }
     var activeHost: ForkHost? { activeTab.flatMap { host(id: $0.hostID) } }
+
+    /// Tabs the sidebar renders for a host in normal (non-focus) mode — and exactly what
+    /// ⌘1-9 indexes there. One implementation shared by `SidebarView.hostSection` and
+    /// `gotoTab` so the visible order and the keyboard order can't drift (focus mode
+    /// already shares `focusTabs` the same way).
+    func hostTabs(on hostID: ForkHost.ID, taggedOnly: Bool) -> [TabModel] {
+        let all = tabs(on: hostID)
+        return taggedOnly ? all.filter(\.hasTag) : all
+    }
 
     /// Effective focus-cutoff in seconds. `> 0` covers unset (UserDefaults returns 0; the
     /// slider only writes 1–64). Shared by `focusTabs` and the sidebar's doze so "asleep"
@@ -436,6 +452,7 @@ final class SessionRegistry: ObservableObject {
             // "the transport itself failed" — `mergeCC` can't tell that apart from "no CC
             // sessions" (both arrive as nil), and only the former should mark the host
             // unreachable.
+            let tickStart = ContinuousClock.now
             await withTaskGroup(of: (ForkHost.ID, [String: CCProbe.Info]?, Bool).self) { group in
                 for h in due {
                     group.addTask {
@@ -454,8 +471,15 @@ final class SessionRegistry: ObservableObject {
             // (the ccBusy wedge) only apply to a stopped poll, and a slow tick still
             // refreshes within 30s of the user coming back. Agents running overnight with
             // the screen locked are otherwise the fork's single biggest CPU/traffic source.
+            //
+            // Deadline cadence, not a flat post-drain sleep: a down ssh host costs its full
+            // 5s connect timeout inside the drain above, and sleeping another 3s after that
+            // pushed the *local* host's next probe to ~8s. The drain time counts against
+            // the interval, so tick cadence = max(interval, slowest host).
             let visible = ForkWindowController.anyVisibleForkWindow
-            try? await Task.sleep(for: .seconds(visible ? 3 : 30))
+            let interval: Duration = .seconds(visible ? 3 : 30)
+            let elapsed = ContinuousClock.now - tickStart
+            if elapsed < interval { try? await Task.sleep(for: interval - elapsed) }
         }
     }
 
@@ -480,9 +504,18 @@ final class SessionRegistry: ObservableObject {
     /// steady-state tick doesn't fire `objectWillChange` (which would churn fork.json via the
     /// debounce-save and re-render the whole sidebar every 3s).
     private func mergeCC(hostID: ForkHost.ID, result: [String: CCProbe.Info]?) {
-        // `ccPoll == nil` ⇒ toggled off mid-tick; `host == nil` ⇒ removed mid-tick. Either
-        // way the in-flight task-group can still drain a result here after the clear.
-        guard ccPoll != nil, host(id: hostID) != nil else { return }
+        // `ccPoll == nil` ⇒ toggled off mid-tick — the in-flight task group can still drain
+        // a result here after `setCCProbeEnabled(false)` cleared everything.
+        guard ccPoll != nil else { return }
+        applyProbeResult(hostID: hostID, result: result)
+    }
+
+    /// `mergeCC` minus the poll-liveness guard — internal so tests can drive it with
+    /// synthetic probe results without starting a real poll loop (the highest-fix-density
+    /// code in the fork had zero direct tests). The host-removed-mid-tick guard stays
+    /// here: that one is data integrity, not poll lifecycle.
+    func applyProbeResult(hostID: ForkHost.ID, result: [String: CCProbe.Info]?) {
+        guard host(id: hostID) != nil else { return }
         // Probe failed (unreachable host / timeout / zero sessions) → keep last-known for
         // `ccLive`/`blocked`, but `ccBusy` is a liveness signal with no other clear path —
         // left set it wedges the rail at a permanent `.working` (same hazard as toggle-off).
@@ -583,6 +616,33 @@ final class SessionRegistry: ObservableObject {
         let alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
         let suffix = String((0..<suffixLen).map { _ in alphabet.randomElement()! })
         return "\(base)-\(suffix)"
+    }
+
+    // MARK: Test support
+
+    /// Full state reset for the test suite — the shared singleton leaks state across test
+    /// cases otherwise: `refs` and the pending exit-stamp have no public clearing path, and
+    /// `ccLive`/`ccSeenDetail` for the local host survive `removeHost`'s local-host guard.
+    /// Never called from production code (live surfaces bound in `refs` would be orphaned).
+    func resetForTesting() {
+        for h in hosts where h.id != ForkHost.local.id { removeHost(h.id) }
+        for t in tabs { removeTab(t.id) }
+        if let i = hosts.firstIndex(where: { $0.id == ForkHost.local.id }) {
+            hosts[i].label = ForkHost.local.label
+            hosts[i].expanded = true
+        }
+        ccPoll?.cancel(); ccPoll = nil
+        activeTabID = nil
+        focusedPaneIndex = nil
+        renaming = nil
+        recentTags = []
+        panes = [:]
+        ccLive = [:]
+        ccUpdatedAt = [:]
+        ccSeenDetail = [:]
+        hostUnreachableSince = [:]
+        refs = [:]
+        lastTouched = nil
     }
 
     /// `autoName()` retried until disjoint from live refs and dormant persisted-tree leaves.

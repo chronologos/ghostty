@@ -63,11 +63,12 @@ struct SplitPickerView: View {
         } else if unreachable && items.isEmpty {
             // A failed query must not read as "no sessions" — the sessions are very likely
             // still there; ⏎ still works (the new pane will surface the ssh error itself).
-            Text("couldn't reach \(host.label) — ⏎ still creates")
+            // Sentence case, matching the other sheets' empty states.
+            Text("Couldn't reach \(host.label) — ⏎ still creates")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity)
         } else if items.isEmpty {
-            Text(name.isEmpty ? "no sessions on \(host.label)" : "no match — ⏎ to create")
+            Text(name.isEmpty ? "No sessions on \(host.label)" : "No match — ⏎ to create")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity)
         } else {
@@ -88,9 +89,9 @@ struct SplitPickerView: View {
         Button { submit(e.name, external: e.external) } label: {
             HStack {
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(e.name).font(.system(size: 12))
+                    Text(e.name).font(.system(size: 12, design: .monospaced))
                     if let title = registry.tabTitle(for: e.name, external: e.external, on: host.id) {
-                        Text(title).font(.system(size: 9)).foregroundStyle(.secondary)
+                        Text(title).font(.system(size: 10)).foregroundStyle(.secondary)
                     }
                 }
                 Spacer()

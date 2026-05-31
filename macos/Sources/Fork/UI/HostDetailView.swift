@@ -60,7 +60,7 @@ struct HostDetailView: View {
             sessionList.frame(maxHeight: .infinity)
 
             if let killError {
-                Text(killError).font(.caption).foregroundStyle(.red).lineLimit(2)
+                Text(killError).font(.caption).foregroundStyle(Theme.error).lineLimit(2)
             }
 
             if host.id != ForkHost.local.id {
@@ -121,7 +121,7 @@ struct HostDetailView: View {
                     await reload()
                 }
             }
-            .buttonStyle(.borderless).foregroundStyle(.red)
+            .buttonStyle(.borderless).foregroundStyle(Theme.error)
         }
     }
 

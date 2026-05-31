@@ -263,11 +263,6 @@ final class ForkWindowController: TerminalController {
         cheatsheetHost?.isHidden = !on
     }
 
-
-    /// Fork-owned panel for `.overlay` hover-commands. Lazy so a user with no overlay
-    /// bindings never instantiates it.
-    private lazy var overlayController = ForkOverlayController(ghostty)
-
     /// `charactersIgnoringModifiers` does not strip Option (it's a character-producing
     /// modifier), so ⌥-digit must be matched by physical keyCode.
     private static let digitKeyCodes: [UInt16: Int] = [
@@ -354,11 +349,11 @@ final class ForkWindowController: TerminalController {
               let host = registry.host(id: ref.hostID) else { return }
         // OSC 7 (real-time, needs shell integration) › CCProbe poll (3s lag, no integration needed).
         let paneCwd = surface.pwd ?? registry.ccLive[ref.hostID]?[ref.key]?.cwd
-        // `.local`/`.overlay` execute on the Mac: a remote pane's cwd is remote-controlled
-        // (OSC 7 can simply claim `localhost`; the CC probe's cwd field isn't validated at
-        // all) and must not steer what a local tool opens or operates on. Remote panes
-        // degrade to nil → `expand` substitutes ".". `.pane` runs on the pane's own host,
-        // where its cwd is legitimate.
+        // `.local` executes on the Mac: a remote pane's cwd is remote-controlled (OSC 7 can
+        // simply claim `localhost`; the CC probe's cwd field isn't validated at all) and
+        // must not steer what a local tool opens or operates on. Remote panes degrade to
+        // nil → `expand` substitutes ".". `.pane` runs on the pane's own host, where its
+        // cwd is legitimate.
         let cwd = (cmd.mode == .pane || host.transport.isLocal) ? paneCwd : nil
         let argv = ZmxAdapter.expand(cmd.cmd, host: host, ref: ref, cwd: cwd)
         switch cmd.mode {
@@ -377,18 +372,6 @@ final class ForkWindowController: TerminalController {
             do { try p.run() } catch {
                 ForkBootstrap.logger.warning(
                     "hover command \(argv.first ?? "?") failed to launch: \(String(describing: error))")
-            }
-        case .overlay:
-            // Ephemeral — run argv directly (no zmx) in a fork-owned quick-terminal panel.
-            // We do NOT touch `AppDelegate.quickController`: its lazy getter's
-            // `windowDidLoad`→`animateIn` creates a throwaway default-shell surface that we'd
-            // immediately swap out, and dealloc'ing that mid-spawn `_exit(1)`s the process in
-            // ReleaseLocal (termio fork race; see PR31 commit msg). `ForkOverlayController`
-            // gates `animateIn` until we've set the tree, so no default surface is ever created.
-            guard let app = ghostty.app else { return }
-            let cfg = ZmxAdapter.ephemeralConfig(host: host, argv: argv, cwd: cwd)
-            DispatchQueue.main.async { [weak self] in
-                self?.overlayController.present(Ghostty.SurfaceView(app, baseConfig: cfg))
             }
         case .pane:
             // External `ref.name` may carry chars outside the validated set; only seed the
@@ -425,8 +408,8 @@ final class ForkWindowController: TerminalController {
     private var progressSubs: [UUID: AnyCancellable] = [:]
     private var settleTimers: [UUID: Timer] = [:]
 
-    func toggleWatch(on target: Ghostty.SurfaceView? = nil) {
-        guard let id = (target ?? focusedSurface)?.id, let ref = registry.refs[id] else { return }
+    func toggleWatch() {
+        guard let id = focusedSurface?.id, let ref = registry.refs[id] else { return }
         registry.apply(ref, .watch(!(registry.panes[ref]?.watched ?? false)))
     }
 
@@ -435,8 +418,12 @@ final class ForkWindowController: TerminalController {
         // surface (undo-stack-retained) would otherwise clear a dup-attached sibling's
         // watch without posting.
         guard let surface = n.object as? Ghostty.SurfaceView,
-              let ref = registry.refs[surface.id], let tab = owningTab(of: surface),
-              registry.apply(ref, .bell) else { return }
+              let ref = registry.refs[surface.id], let tab = owningTab(of: surface) else { return }
+        // Ref-wide active check (same shape as paneDidSettle): a bell in the visible tab
+        // is interaction noise — PaneMachine ignores it entirely, so it can't consume the
+        // watch or swallow a much-later completion banner.
+        let isActive = liveRefs(for: registry.activeTabID ?? .init()).contains(ref)
+        guard registry.apply(ref, .bell(isActive: isActive)) else { return }
         ForkNotify.shared.post(tab: tab.id,
                                title: "\(paneDisplayLabel(tab: tab, surface: surface)) finished",
                                body: "Tab '\(tab.title)'")
@@ -479,11 +466,11 @@ final class ForkWindowController: TerminalController {
         }
         // Dup-attach (PR26): both surfaces fire .settled with their own tab's `isActive`
         // (last-writer-wins on the shared machine). Compute it ref-wide so both calls agree.
-        let isActive = surfaces(for: registry.activeTabID ?? .init())
-            .contains { registry.refs[$0.id] == ref }
+        let isActive = liveRefs(for: registry.activeTabID ?? .init()).contains(ref)
         if registry.apply(ref, .settled(isActive: isActive)) {
+            // Same word as the bell banner — they're the same event to the user.
             ForkNotify.shared.post(tab: tab.id,
-                                   title: "\(paneDisplayLabel(tab: tab, surface: surface)) — done",
+                                   title: "\(paneDisplayLabel(tab: tab, surface: surface)) finished",
                                    body: "Tab '\(tab.title)'")
         }
     }
@@ -509,7 +496,10 @@ final class ForkWindowController: TerminalController {
     private func paneDisplayLabel(tab: TabModel?, surface: Ghostty.SurfaceView) -> String {
         let ref = registry.refs[surface.id]
         let osc = (surface.title.isEmpty || surface.title == "👻") ? nil : surface.title
-        return ref.flatMap { tab?.paneLabels[$0.key] } ?? osc ?? ref?.name ?? "Pane"
+        let raw = ref.flatMap { tab?.paneLabels[$0.key] } ?? osc ?? ref?.name ?? "Pane"
+        // OSC titles and external ref names are remote-controlled, and this string becomes
+        // a UN notification title — strip control chars / cap length at the sink.
+        return stripControl(raw, max: 96)
     }
 
     // MARK: Sidebar visibility
@@ -559,9 +549,10 @@ final class ForkWindowController: TerminalController {
         if d.bool(forKey: SessionRegistry.kFocusMode) {
             tabs = registry.focusTabs(taggedOnly: tagged)
         } else {
+            // Same accessor the sidebar renders from (`hostTabs`) — a filter added to one
+            // side only would silently desync ⌘1-9 from what's on screen.
             let host = registry.activeHost?.id ?? ForkHost.local.id
-            let all = registry.tabs(on: host)
-            tabs = tagged ? all.filter(\.hasTag) : all
+            tabs = registry.hostTabs(on: host, taggedOnly: tagged)
         }
         guard tabs.indices.contains(n - 1) else { return }
         activate(tab: tabs[n - 1].id)
@@ -608,7 +599,7 @@ final class ForkWindowController: TerminalController {
         // state) invisibly behind it — and falling through to super would pop upstream's
         // NSAlert on top of our sheet. Swallow.
         guard sheetPanel == nil else { return }
-        guard !ForkBootstrap.noSidebar, let tab = registry.activeTab else {
+        guard let tab = registry.activeTab else {
             return super.promptTabTitle()
         }
         revealRow(on: tab.hostID)
@@ -619,10 +610,10 @@ final class ForkWindowController: TerminalController {
     /// `SurfaceView.promptTitle()` writes `surface.title`, which is per-instance and lost
     /// on restart; `paneLabels` (keyed by `ref.key`) survives via fork.json.
     func promptPaneTitle() {
-        guard !ForkBootstrap.noSidebar, sheetPanel == nil, let tab = registry.activeTab else { return }
+        guard sheetPanel == nil, let tab = registry.activeTab else { return }
         // `tab.tree` lags `surfaceTree` by ≤80ms (debounced persistActive); `focusedPaneIndex`
         // is from the live tree, so a fresh split would index past the stale `leafRefs`.
-        let refs = Array(surfaceTree).compactMap { registry.refs[$0.id] }
+        let refs = liveRefs(for: tab.id)
         let i = registry.focusedPaneIndex ?? 0
         guard i < refs.count else { return }
         revealRow(on: tab.hostID)
@@ -642,14 +633,13 @@ final class ForkWindowController: TerminalController {
         Array(tabID == registry.activeTabID ? surfaceTree : (liveTabs[tabID] ?? .init()))
     }
 
-    /// Worst-child state for a collapsed header — single ref-keyed source, so cold and
-    /// live tabs read the same way and there's no surfaces(for:) lookup.
-    func rollup(tab: TabModel) -> PaneState? {
-        tab.tree.leafRefs.lazy.compactMap { self.registry.dot(ref: $0) }.max()
-    }
-
-    func rollup(hostID: ForkHost.ID) -> PaneState? {
-        registry.tabs(on: hostID).lazy.compactMap { self.rollup(tab: $0) }.max()
+    /// Refs bound in a tab's live tree, depth-first order. For the active tab this reads
+    /// `surfaceTree` (never the ≤80ms-stale `liveTabs` mirror); empty for never-hydrated
+    /// tabs. The single accessor behind ⌘I indexing, kill paths, and ref-wide
+    /// active-membership checks — five call sites used to hand-roll this map.
+    /// (`rollup` lives on the registry now — it reads persisted refs, not live surfaces.)
+    private func liveRefs(for tabID: TabModel.ID) -> [SessionRef] {
+        surfaces(for: tabID).compactMap { registry.refs[$0.id] }
     }
 
     func gotoHost(index n: Int) {
@@ -726,8 +716,7 @@ final class ForkWindowController: TerminalController {
     /// otherwise list — and kill — the session the user just chose to keep). Falls back to
     /// persisted leafRefs for never-hydrated tabs.
     private func killableRefs(for tab: TabModel) -> [SessionRef] {
-        let tree = tab.id == registry.activeTabID ? surfaceTree : liveTabs[tab.id]
-        let live = tree.map { Array($0).compactMap { registry.refs[$0.id] } } ?? []
+        let live = liveRefs(for: tab.id)
         return Array(Set(live.isEmpty ? tab.tree.leafRefs : live))
     }
 
@@ -770,13 +759,23 @@ final class ForkWindowController: TerminalController {
     /// Fire-and-track kills: a kill that silently didn't run (host briefly unreachable)
     /// leaves the remote session — and any agent inside it — running forever while the tab
     /// is already gone, so failures get a log line instead of vanishing into `try?`.
+    /// One verification `list` after the batch: zmx kill of a *wedged* daemon exits 0
+    /// without killing — exit status alone can't distinguish "killed" from "daemon ignored
+    /// it", only the session's absence from the next list can.
     private func killSessions(_ refs: [SessionRef], on host: ForkHost) {
-        for ref in refs {
-            Task {
+        Task {
+            for ref in refs {
                 do { try await ZmxAdapter.kill(host: host, ref: ref) } catch {
                     ForkBootstrap.logger.error(
-                        "zmx kill \(ref.name, privacy: .public) on \(host.label, privacy: .public) failed: \(String(describing: error), privacy: .public)")
+                        "zmx kill \(stripControl(ref.name, max: 64), privacy: .public) on \(host.label, privacy: .public) failed: \(String(describing: error), privacy: .public)")
                 }
+            }
+            guard let after = await ZmxAdapter.list(host: host) else { return }
+            let alive = Set((after.managed + after.external).map { SessionRef(
+                hostID: host.id, name: $0.name, external: $0.external).key })
+            for ref in refs where alive.contains(ref.key) {
+                ForkBootstrap.logger.error(
+                    "zmx kill \(stripControl(ref.name, max: 64), privacy: .public) on \(host.label, privacy: .public): session still listed after kill (unresponsive daemon?)")
             }
         }
     }
@@ -840,6 +839,11 @@ final class ForkWindowController: TerminalController {
         }
 
         registry.movePanePersisted(from: src, ref: ref, to: dst)
+        // The moved pane just landed on screen (dst is the active tab; surfaceTree was
+        // swapped above) — ack its unread/blocked state the same way `activate(tab:)`
+        // does. Without this a `.waiting`/`.blocked` pane moved into view keeps its stale
+        // dot and badge count until the user switches away and back.
+        if dst == registry.activeTabID { registry.apply(ref, .viewed) }
         undoManager?.removeAllActions(withTarget: self)
         // Close src off LIVE state (prunedSrc), not the persisted tree. Persisted
         // can lag by up to 80ms after a recent split; reading it would auto-close
@@ -1023,15 +1027,6 @@ final class ForkWindowController: TerminalController {
 
         window.tabbingMode = .disallowed
         window.isRestorable = false
-
-        if ForkBootstrap.noSidebar {
-            $surfaceTree
-                .debounce(for: .milliseconds(80), scheduler: DispatchQueue.main)
-                .sink { [weak self] tree in self?.persistActive(tree) }
-                .store(in: &cancellables)
-            installNavMonitor()
-            return
-        }
 
         // Upstream's `BaseTerminalController.terminalViewContainer` is
         // `window?.contentView as? TerminalViewContainer`, and `SurfaceRepresentable`
@@ -1249,10 +1244,6 @@ final class ForkWindowController: TerminalController {
         // guard as `runPaneCommand`).
         let seed = registry.refs[oldView.id].flatMap { $0.isValid ? $0.name : nil }
         let placeholder = registry.uniqueAutoName(derivedFrom: seed)
-        if ForkBootstrap.noPicker {
-            return completeSplit(at: oldView, direction: direction, host: host,
-                                 ref: .init(hostID: host.id, name: placeholder))
-        }
         pendingSplit = (oldView, direction)
         presentSheet(size: .init(width: 280, height: 280)) { [weak self] in
             SplitPickerView(
@@ -1342,38 +1333,6 @@ final class ForkWindowController: TerminalController {
         if id == registry.activeTabID { return surfaceTree }
         if liveTabs[id] == nil { rebuildTree(for: id) }
         return liveTabs[id] ?? .init()
-    }
-}
-
-/// `.overlay` hover-command panel. Subclasses `QuickTerminalController` to inherit the
-/// slide-in panel + auto-close-on-exit, but gates `animateIn` until `ready` so the lazy
-/// `windowDidLoad` (which fires inside `super.init` via the same chain documented in
-/// CLAUDE.md §Gotchas) doesn't create a default-shell surface we'd immediately swap out —
-/// dealloc'ing that mid-spawn `_exit(1)`s the process in optimized builds.
-final class ForkOverlayController: QuickTerminalController {
-    private var ready = false
-    private var exitSub: AnyCancellable?
-
-    convenience init(_ ghostty: Ghostty.App) {
-        self.init(ghostty, position: .center, restorationState: nil)
-    }
-
-    override func animateIn() {
-        guard ready else { return }
-        super.animateIn()
-    }
-
-    /// Show `surface` and slide out when its process exits. `embedded.zig:534` forces
-    /// `wait-after-command = true` whenever `command` is set, so `Surface.zig:1298` returns
-    /// before `self.close()` and QTC's `closeSurface` path never fires. `processExited` is
-    /// computed (not @Published); `childExitedMessage` is the @Published proxy set by
-    /// `showChildExited` (Ghostty.App.swift:1653) on the same path.
-    func present(_ surface: Ghostty.SurfaceView) {
-        exitSub = surface.$childExitedMessage.compactMap { $0 }.first()
-            .sink { [weak self] _ in self?.surfaceTree = .init() }
-        surfaceTree = .init(view: surface)
-        ready = true
-        if !visible { animateIn() }
     }
 }
 #endif
