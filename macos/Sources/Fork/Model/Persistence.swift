@@ -124,13 +124,18 @@ final class ForkPersistence {
             "fork state \(file.lastPathComponent) is \(reason); copied aside to \(dest.lastPathComponent)")
     }
 
-    /// How many `hosts`/`tabs` elements the lenient decoder dropped, judged against the raw
-    /// JSON — the signal that a schema change is silently eating state.
+    /// How many elements the lenient decoder dropped, judged against the raw JSON — the
+    /// signal that a schema change (or hand-edit typo) is silently eating state.
+    /// `hoverCommands` counts too: they're hand-edited with no other source of truth, so a
+    /// dropped one (e.g. an unknown `mode`) is unrecoverable once the autosave runs.
     private func lossyDropCount(in data: Data, decoded: State) -> Int {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return 0 }
         let rawHosts = (obj["hosts"] as? [Any])?.count ?? 0
         let rawTabs = (obj["tabs"] as? [Any])?.count ?? 0
-        return max(0, rawHosts - decoded.hosts.count) + max(0, rawTabs - decoded.tabs.count)
+        let rawHover = (obj["hoverCommands"] as? [String: Any])?.count ?? 0
+        return max(0, rawHosts - decoded.hosts.count)
+            + max(0, rawTabs - decoded.tabs.count)
+            + max(0, rawHover - decoded.hoverCommands.count)
     }
 
     func save(_ state: State?) {
