@@ -72,6 +72,17 @@ final class ForkWindowController: TerminalController {
         closeForkTab(active)
     }
 
+    /// Upstream's close-window undo (`registerUndoForCloseWindow`) restores a plain
+    /// `TerminalController` — no sidebar, no registry bindings — dup-attached to the same
+    /// zmx sessions. Its undo target is `ghostty`, not this controller, so the
+    /// `removeAllActions(withTarget: self)` idiom can't reach it; disable registration
+    /// across the close so ⌘Z after closing the fork window is a no-op instead.
+    override func closeWindowImmediately() {
+        undoManager?.disableUndoRegistration()
+        defer { undoManager?.enableUndoRegistration() }
+        super.closeWindowImmediately()
+    }
+
     // MARK: Detached panes — when a bound surface's child exits, swap in a placeholder
     // that prints "press ⏎ to reattach" and execs `zmx attach` on ⏎ (SPEC §5).
 
@@ -199,6 +210,11 @@ final class ForkWindowController: TerminalController {
         onKill: @escaping () -> Void
     ) {
         guard let window else { onDetach(); return }
+        // A sheet is already up (⌘T/⌘D/Hosts panel, or an earlier close-confirm): a second
+        // beginSheetModal on the same window queues *invisibly* behind it — nothing appears,
+        // then a surprise close-confirm pops after the first sheet ends, where a reflexive ⏎
+        // closes a tab the user never asked about. Refuse instead.
+        guard sheetPanel == nil, window.attachedSheet == nil else { NSSound.beep(); return }
         let alert = NSAlert()
         alert.messageText = messageText
         alert.informativeText = informativeText + "\n\n⏎ Detach · K or ⌘W Kill · Esc Cancel"
@@ -338,7 +354,13 @@ final class ForkWindowController: TerminalController {
         guard let surface = focusedSurface, let ref = registry.refs[surface.id],
               let host = registry.host(id: ref.hostID) else { return }
         // OSC 7 (real-time, needs shell integration) › CCProbe poll (3s lag, no integration needed).
-        let cwd = surface.pwd ?? registry.ccLive[ref.hostID]?[ref.key]?.cwd
+        let paneCwd = surface.pwd ?? registry.ccLive[ref.hostID]?[ref.key]?.cwd
+        // `.local`/`.overlay` execute on the Mac: a remote pane's cwd is remote-controlled
+        // (OSC 7 can simply claim `localhost`; the CC probe's cwd field isn't validated at
+        // all) and must not steer what a local tool opens or operates on. Remote panes
+        // degrade to nil → `expand` substitutes ".". `.pane` runs on the pane's own host,
+        // where its cwd is legitimate.
+        let cwd = (cmd.mode == .pane || host.transport.isLocal) ? paneCwd : nil
         let argv = ZmxAdapter.expand(cmd.cmd, host: host, ref: ref, cwd: cwd)
         switch cmd.mode {
         case .local:
@@ -583,6 +605,10 @@ final class ForkWindowController: TerminalController {
     /// writes `titleOverride` (which we already drive from `syncWindowTitle()`); redirect
     /// to the sidebar's heading inline field instead.
     override func promptTabTitle() {
+        // With a fork sheet up, the inline rename field would appear (and grab the renaming
+        // state) invisibly behind it — and falling through to super would pop upstream's
+        // NSAlert on top of our sheet. Swallow.
+        guard sheetPanel == nil else { return }
         guard !ForkBootstrap.noSidebar, let tab = registry.activeTab else {
             return super.promptTabTitle()
         }
@@ -594,7 +620,7 @@ final class ForkWindowController: TerminalController {
     /// `SurfaceView.promptTitle()` writes `surface.title`, which is per-instance and lost
     /// on restart; `paneLabels` (keyed by `ref.key`) survives via fork.json.
     func promptPaneTitle() {
-        guard !ForkBootstrap.noSidebar, let tab = registry.activeTab else { return }
+        guard !ForkBootstrap.noSidebar, sheetPanel == nil, let tab = registry.activeTab else { return }
         // `tab.tree` lags `surfaceTree` by ≤80ms (debounced persistActive); `focusedPaneIndex`
         // is from the live tree, so a fresh split would index past the stale `leafRefs`.
         let refs = Array(surfaceTree).compactMap { registry.refs[$0.id] }
@@ -722,6 +748,16 @@ final class ForkWindowController: TerminalController {
         }
     }
 
+    /// Any fork window the user can actually *see* right now (not occluded, minimized, or
+    /// behind a locked screen)? Gates the CC poll cadence — status freshness is pointless
+    /// when nothing renders it.
+    static var anyVisibleForkWindow: Bool {
+        NSApp.windows.contains {
+            $0.isVisible && $0.occlusionState.contains(.visible)
+                && $0.windowController is ForkWindowController
+        }
+    }
+
     /// Fire-and-track kills: a kill that silently didn't run (host briefly unreachable)
     /// leaves the remote session — and any agent inside it — running forever while the tab
     /// is already gone, so failures get a log line instead of vanishing into `try?`.
@@ -834,6 +870,9 @@ final class ForkWindowController: TerminalController {
     }
 
     @IBAction override func closeTab(_ sender: Any?) {
+        // Same leak-past-the-sheet path as ⌘D (see newSplit): a menu key equivalent walks
+        // the responder chain past an open panel — don't close tabs invisibly behind it.
+        guard sheetPanel == nil else { return }
         guard let active = registry.activeTabID else { return }
         closeForkTab(active)
     }
