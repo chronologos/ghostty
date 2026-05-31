@@ -92,9 +92,23 @@ final class ForkPersistence {
             // Seed the no-op gate with what's actually on disk so the first debounced save
             // after launch doesn't rotate `.bak` for a byte-identical file.
             if candidate == url { lastWritten = data }
-            return validated(s)
+            // Validation drops (ssh host with an invalid target → that host and every tab on
+            // it; shell-unsafe ref names → nil'd leaves) are the same loss class as decode
+            // drops — the autosave makes them permanent within seconds — but they happen
+            // *after* the decode-level preserve checks above. Copy aside before returning
+            // the reduced state.
+            let v = validated(s)
+            if v.hosts.count < s.hosts.count || v.tabs.count < s.tabs.count
+                || leafCount(v.tabs) < leafCount(s.tabs) {
+                preserve(candidate, reason: "invalid")
+            }
+            return v
         }
         return State()
+    }
+
+    private func leafCount(_ tabs: [TabModel]) -> Int {
+        tabs.reduce(0) { $0 + $1.tree.leafRefs.count }
     }
 
     /// Copy a problematic state file aside (e.g. `fork.json.undecodable`,
