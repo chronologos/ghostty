@@ -1,7 +1,9 @@
 # Ghostty zmx Fork
 
 Left sidebar with host-grouped tabs; every tab/split is a `zmx` session (local or ssh).
-See `do_not_commit/ghostty-fork/SPEC.md` for the full spec.
+Design notes live in `do_not_commit/ghostty-fork/` (gitignored: `backlog.md`,
+`PaneMachine-plan.md`; the original SPEC.md is gone — code comments still cite its
+section numbers as historical anchors).
 
 ## Principles
 
@@ -66,27 +68,38 @@ in fork-check.sh in the same commit*.
 ```
 Fork/
   ForkBootstrap.swift          enabled flag (env GHOSTTY_FORK=1), seam entry points;
-                               exports the login-shell PATH at install, appended after the
-                               inherited PATH (GUI launches get launchd's bare PATH, which
-                               breaks ssh ProxyCommand wrappers resolved by name — e.g.
-                               coder tunnels)
+                               exports the login-shell PATH at install (cached + background
+                               refresh — GUI launches get launchd's bare PATH, which breaks
+                               ssh ProxyCommand wrappers resolved by name)
   Notify.swift                 UN delegate proxy (wraps AppDelegate's); userInfo["forkTab"]
                                → foreground banner + click→activate(tab:); dock badge =
-                               .waiting count
+                               count of (finished-unread OR blocked) && !ccBusy panes
+  SurfaceWiggle.swift          forkWigglePane — ⌘⇧R force-repaint via synthetic SIGWINCH
   Model/
-    Host.swift                 ForkHost, Transport, SSHTarget, SessionRef, TabModel, PersistedTree
+    Host.swift                 ForkHost, Transport, SSHTarget, SessionRef, TabModel,
+                               PersistedTree, PaneTag, HoverCommand, isValidIdent/
+                               isSafeExternalName
     PaneMachine.swift          Per-SessionRef status reducer — event-ordered `.progress`/
-                               `.settled`/`.probe`/`.viewed`/`.watch`/`.bell`/`.detached`
-                               → `.dot` projection + post-banner bool
-    SessionRegistry.swift      @MainActor singleton; @Published hosts/tabs/activeTabID/focusedPaneIndex (refs is plain var)
-    Persistence.swift          fork.json (atomic write + .bak + revalidate-on-load)
+                               `.settled`/`.probe`/`.probeAbsent`/`.probeStopped`/`.viewed`/
+                               `.watch`/`.bell(isActive:)`/`.detached` → `.dot` projection
+                               + post-banner bool
+    SessionRegistry.swift      @MainActor singleton; @Published hosts/tabs/activeTabID/
+                               focusedPaneIndex/renaming/recentTags/panes/ccLive (refs is a
+                               plain var); focusTabs/hostTabs (the ⌘1-9 contract), rollup,
+                               applyProbeResult (mergeCC body), uniqueAutoName
+    Persistence.swift          fork.json (atomic write + .bak + preserve-aside + revalidate-on-load)
   Zmx/
-    ShellQuote.swift           shq() — POSIX single-quote
-    ZmxAdapter.swift           surfaceConfig/list/kill/detachedScript; Transport.wrap/controlArgv
-    CCProbe.swift              zmx pid → ~/.claude/sessions/<pid>.json via ps-tree BFS;
-                               keyed by SessionRef.key; nil-on-failure so poll keeps last-known
+    ShellQuote.swift           shq() — POSIX single-quote; stripControl()
+    ZmxAdapter.swift           surfaceConfig/list/partition/kill/history/detachedScript/
+                               restoreCmd/expand/run; Transport.wrap/controlArgv
+    CCProbe.swift              zmx pid → ~/.claude/sessions/<pid>.json. Local host: native
+                               Swift (sysctl process table + FileManager); ssh hosts: sh
+                               probe script. Keyed by SessionRef.key; nil-on-failure so the
+                               poll keeps last-known. Also `rename` (CC name sync over the
+                               session's control UDS)
   UI/
-    ForkWindowController.swift the controller; tab switching = swap surfaceTree
+    ForkWindowController.swift the controller; tab switching = swap surfaceTree; sheet
+                               presentation; ⌘W Detach/Kill routing; kill verification
     SidebarView.swift          host sections (drag-reorder); per-pane rows show paneLabel ›
                                surface.title › ref.name; optional tab-title heading + collapse
                                chevron; ⌘I/⌘⇧I → inline rename; tag pills; single density (no
@@ -97,17 +110,31 @@ Fork/
                                past focus cutoff; never on unread/blocked rows) + hover-peek
                                age line; focus mode wraps each tab
                                in a ForkCard with a ⌘N + HostDot + host-label caption row
-    TagEditView.swift          right-click "Tag…" popover (text + 8 hue swatches)
-    NewSessionView.swift       ⌘T sheet
-    SplitPickerView.swift      ⌘D picker (new vs attach-existing)
+    OptionGesture.swift        OptionGestureRecognizer — the ⌥-hold / ⌥⌥ recognizer
+                               (extracted ViewModifier; SidebarView binds revealAll/onSweep)
+    Theme.swift                semantic style tokens (clay/blocked/error/hover/…), Pebble,
+                               HandCut, ForkCard
+    TagEditView.swift          tag popover (text + 8 hue swatches); opened from the pane
+                               context menu's Tag submenu ("New Tag…")
+    NewSessionView.swift       full new-session form (sidebar ＋ button): host picker ·
+                               name/cwd/cmd fields · recents list
+    SplitPickerView.swift      compact picker (name or attach-existing): ⌘T, ⌘D split, and
+                               host context-menu "New Session on …"
     SessionMetaLabel.swift     shared row trailer: CC sparkle (busy/blocked/idle) +
                                in-sidebar glyph + client-count + creation age
     HostsView.swift            master-detail Hosts sheet (list + add-host form)
     HostDetailView.swift       detail pane: rename, N×N SlotPicker (10-hue palette,
                                bicolor HostDot), sessions, remove
+    ForkPaletteView.swift      ForkPanePalette (⌘K) + ScrollbackSearchView (⌘⇧K,
+                               history fetched once per sheet then matched client-side)
     CheatsheetView.swift       hold-⌘ shortcut overlay (600ms debounce; flagsChanged monitor)
-    ForkSheetPanel.swift       NSWindow.performKeyEquivalent → ⌘V/C/X/A/Z to firstResponder
+    ForkSheetPanel.swift       NSWindow.performKeyEquivalent → ⌘V/C/X/A/Z/⇧Z to
+                               firstResponder; reused as the borderless ⌘K palette window
 ```
+
+New-session flow (two sheets on purpose): **⌘T** and the host context-menu open the compact
+picker (`SplitPickerView` — quick name-or-attach on one host); the sidebar **＋ button**
+opens the full form (`NewSessionView` — host picker + cwd/command fields).
 
 ## Gotchas (each cost ≥1 verifier round)
 
@@ -123,13 +150,14 @@ Fork/
   handler set its flag but the client loop never woke to check it. Fixed in zmx
   via self-pipe. None of the Swift-side ordering mattered; the prior "fixes"
   here (split-before-endSheet, `refs` un-@Published) were timing coincidences.
-  Debug toggles: `GHOSTTY_FORK_NO_SIDEBAR`, `GHOSTTY_FORK_NO_PICKER`,
-  `GHOSTTY_FORK_NO_ZMX`. `GHOSTTY_FORK_ZMX=/path` overrides zmx resolution.
+  `GHOSTTY_FORK_ZMX=/path` overrides zmx resolution; `GHOSTTY_FORK=0` disables the
+  whole fork (the per-feature `GHOSTTY_FORK_NO_*` bisect toggles were removed).
 - **Sheet ⌘V**: nil-targeted menu actions walk *past* the sheet to
   `mainWindow.firstResponder` (the `SurfaceView`, which has its own `paste:`).
   `ForkSheetPanel.performKeyEquivalent` intercepts before the menu.
-- **`activeTabID` is controller-owned**: registry's `newTab`/`removeTab` mutate the list,
-  never the cursor. Only `ForkWindowController.activate(tab:)` calls `setActive`.
+- **`activeTabID` is controller-owned**: registry's `newTab`/`removeTab` mutate the list
+  and may *nil* the cursor (removing the active tab); only
+  `ForkWindowController.activate(tab:)` ever sets it to a tab.
 - **Undo is window-scoped, tabs aren't**: `BaseTerminalController.replaceSurfaceTree`
   registers `{ target.surfaceTree = oldTree }` with `withTarget: self`. The closure
   captures a *tree*, not a tab id, so ⌘Z after a sidebar tab switch would write the
@@ -152,21 +180,28 @@ Fork/
 
 ## Security boundary
 
-`Transport.wrap` / `controlArgv` are the **only** places strings meet a shell. `SSHTarget`
-and `SessionRef.name` are validated against `^[A-Za-z0-9._-]+$`; `shq` single-quotes argv.
-For ssh, the remote command is double-quoted (`shq(shq(argv))`) and both ssh argv builders
-pass `--` before the destination. Don't build shell strings anywhere else.
-(`ForkBootstrap.loginShellOutput` does run the user's login shell at launch, but only with
-compile-time-literal commands — never pass it anything derived from session, host, or
-remote data.)
+`Transport.wrap` / `controlArgv` are the shell **boundary**. `SSHTarget` and
+`SessionRef.name` are validated against `\A[A-Za-z0-9._-]+\z` (`\A…\z`, not `^…$` — ICU `$`
+matches before a trailing newline); `shq` single-quotes argv. For ssh, the remote command is
+double-quoted (`shq(shq(argv))`) and both ssh argv builders pass `--` before the destination.
+The only other shell-string builders are `ZmxAdapter.detachedScript`/`restoreCmd` and
+`CCProbe.renameScript` — all of which `shq`/`stripControl` every dynamic token. Don't build
+shell strings anywhere else. (`ForkBootstrap.loginShellOutput` does run the user's login
+shell at launch, but only with compile-time-literal commands — never pass it anything
+derived from session, host, or remote data.)
 
 Beyond the shell layer: **external** session names bypass the regex (they come from remote
 `zmx list` verbatim) — `ZmxAdapter.partition` and `Persistence.scrub` drop leading-`-` names
-so they can't become zmx options; `{cwd}` for hover commands must be an absolute path
-(`ZmxAdapter.expand` degrades anything else to `.`) because it originates from OSC 7 / the
-CC probe, both remote-controlled; cached CC names are `stripControl`'d before they reach a
-local pty. On shared-uid hosts the probe still transfers (and heartbeats) every user's CC
-session files — treat `name`/`detail`/`needs` from such hosts as untrusted display text.
+so they can't become zmx options, and partition only trusts the `{hostID}-` wire prefix when
+the stripped name passes the managed charset (a forged prefix on a hostile name stays
+external); `{cwd}` for hover commands must be an absolute path (`ZmxAdapter.expand` degrades
+anything else to `.`) because it originates from OSC 7 / the CC probe, both remote-controlled;
+cached CC names are `stripControl`'d before they reach a local pty, and so are remote-origin
+strings that reach UN notification titles (`paneDisplayLabel`) and `CommandError.stderr`.
+`zmx run()` output accumulation is capped (8 MiB stdout / 256 KiB stderr) so a hostile remote
+can't balloon memory inside the timeout window. On shared-uid hosts the probe still transfers
+(and heartbeats) every user's CC session files — treat `name`/`detail`/`needs` from such
+hosts as untrusted display text.
 
 ## Hover commands
 
@@ -186,9 +221,10 @@ overwrite a live edit. `cmd` is an **argv array** — each element stays one wor
 `Transport.wrap`/`shq` or `Process.arguments`, so an untrusted `{cwd}` stays inert.
 `{cwd}`/`{ref}`/`{host}` substitute **whole tokens only** (`ZmxAdapter.expand`);
 `"-C={cwd}"` passes through verbatim. `{host}` is the ssh `user@host` (or label for
-local), not the internal hash id. `mode` (unknown values drop that one binding):
+local), not the internal hash id. `mode` (unknown values — including the removed
+`overlay` — drop that one binding; the load path preserves the original file aside):
 
-- `pane` — sibling split next to the hovered pane, running `zmx attach <fresh-ref> <cmd…>`
+- `pane` — sibling split next to the *focused* pane, running `zmx attach <fresh-ref> <cmd…>`
   on that pane's host (local or ssh, via `Transport.wrap`). The new session does **not**
   inherit the sibling's directory — pass `{cwd}` via the tool's own flag (`-C`/`-R`/`-p`).
   No-ops on a tab whose `liveTabs` entry hasn't been built yet (cold-restored, never
@@ -196,15 +232,9 @@ local), not the internal hash id. `mode` (unknown values drop that one binding):
 - `local` — fire-and-forget `Process` on the mac via `/usr/bin/env`; PATH is the
   login-shell PATH exported at install (launchd's bare PATH if that probe failed), so
   most tools resolve by name; an absolute path is still the safe choice for anything
-  exotic. `{cwd}` still expands to the *pane's* cwd,
-  which for ssh panes is a remote path that likely doesn't exist locally — only useful
-  with tools that take a remote path on purpose (e.g. `code --remote ssh-{host} {cwd}`).
-- `overlay` — ephemeral surface in a fork-owned `QuickTerminalController` subclass
-  (`ForkOverlayController`, `position: .center`); no zmx wrapper, so the command runs
-  directly and the surface closes on exit. Does *not* touch `AppDelegate.quickController`
-  — the gated `animateIn` override avoids the default-surface-swap race that
-  `_exit(1)`ed optimized builds. Local hosts get `workingDirectory = {cwd}`; ssh still
-  needs the per-tool `-R {cwd}` flag.
+  exotic. For panes on **remote** hosts `{cwd}` degrades to `.` — a remote-controlled cwd
+  must not steer what a local tool opens or operates on; only `pane` mode (or panes on
+  the local host) receives the pane's real cwd.
 
 `{cwd}` resolves `surface.pwd` (OSC 7, needs shell integration in the remote zshrc) ›
 `ccLive[host][ref.key].cwd` (CCProbe poll) › `"."`. Bindings appear in the ⌘K palette
@@ -234,19 +264,17 @@ jj git push --bookmark fork --remote origin   # never push to upstream
 ```
 
 **Post-rebase smoke pass** (fork-check + a green build can still hide quiet behavior breaks —
-these six exercise the upstream contracts the fork leans on hardest):
+these five exercise the upstream contracts the fork leans on hardest):
 1. Switch tabs in the sidebar, then ⌘Z — must NOT swap the previous tab's tree in (undo
    retargeting contract).
 2. Background a pane until it settles, click the notification banner — must focus that tab
    (UN-delegate proxy contract).
 3. Open a new window — sidebar on the left, terminal shifted, no overlap (contentView
    layout-surgery contract; also guards the Liquid-Glass-subview skip).
-4. Run an `overlay`-mode hover command — panel opens, command runs, panel closes on exit
-   (QuickTerminal animateIn / wait-after-command contract).
-5. ⌘W on one pane of a multi-pane tab → per-pane Detach/Kill sheet; ⌘W on the last pane →
+4. ⌘W on one pane of a multi-pane tab → per-pane Detach/Kill sheet; ⌘W on the last pane →
    tab-level sheet (close-routing contract — upstream is actively refactoring its close
    path, and a reroute leaves ⌘W closing the window with no sheet).
-6. Run a long command (or a CC turn) → rail goes working → settles → banner fires → dock
+5. Run a long command (or a CC turn) → rail goes working → settles → banner fires → dock
    badge counts it (progressReport / `progress-style` gate / UN / badge contracts in one
    pass — all of these break silently).
 
@@ -254,18 +282,19 @@ these six exercise the upstream contracts the fork leans on hardest):
 
 - 3rd seam for `keybind = all:cmd+t=new_tab` config edge — leaks through
   `AppDelegate.ghosttyNewTab` since `ForkWindowController is TerminalController`.
-- Host rename in sidebar context menu (registry method exists, no UI).
+- Direct "Rename Host" item in the sidebar host context menu (rename today goes through
+  Manage Host… → label field).
 - `detachedPlaceholders` pruning.
 - `macos-titlebar-style = tabs` config — `tabbingMode = .disallowed` should suppress
   the native tab bar but untested with our sidebar.
-- Scripted splits (`NewTerminalIntent.swift:133`, `ScriptTerminal.swift:105`) hit our
-  `newSplit` override → picker pops + script gets nil. Bypass needed if Shortcuts/
-  AppleScript matters.
-- **Detached-pane list-probe** (SPEC §5) — `detachedScript` reattaches blindly; should
+- Scripted **splits** (`NewTerminalIntent.swift:133`, `ScriptTerminal.swift:121`) hit our
+  `newSplit` override → picker pops + script gets nil. (Scripted new-window/new-tab paths
+  already carry a `NewSessionIntent` through `ForkBootstrap.intercept`.)
+- **Detached-pane list-probe** — `detachedScript` reattaches blindly; should
   `zmx list` first and show "session ended — start fresh?" if absent.
 - ssh attach to a re-keyed host behind a ProxyCommand dies opaque (`UNKNOWN port 65535`)
   at the host-key prompt — consider `-o StrictHostKeyChecking=accept-new` or a clearer
-  error surface in `ZmxAdapter.swift:175`.
+  error surface in the ssh argv builders (`ZmxAdapter.swift` Transport extension).
 - `ReorderDelegate` accepts external `.text` drops: cancelled internal drag leaves
   `dragging` stale (no SwiftUI cancel hook), then dragging text from another app
   onto a row fires a spurious `moveTab`/`moveHost`. Fix needs a private UTType so
@@ -294,33 +323,34 @@ A terminal that runs arbitrary shells will trip every macOS privacy surface. Thr
   a cold launch, and only when zmx isn't in env/PATH or the hardcoded dir list (`static
   let` is swift_once-serialized, so it can't move off main). Set `GHOSTTY_FORK_ZMX=/abs/path`
   to skip the zmx probe.
-- `refs` is never pruned (see undo gotcha) — closed-split entries leak until quit;
-  `isConnected()` may stay green slightly stale. In-memory only, not persisted.
-
-- `returnToDefaultSize` reads `NSSplitView.intrinsicContentSize` in fork mode.
+- `refs` entries for **Detach**-closed panes leak until tab close / quit (Kill and tab/host
+  close do unbind; `persistActive` never prunes — see undo gotcha); `isConnected()` may stay
+  green slightly stale. In-memory only, not persisted.
 - `SessionRegistry.shared` stored-prop init will fail compile under Swift 6 strict concurrency.
 - Command field in NewSessionView splits naively on spaces.
-- ⌘⇧[/⌘⇧] tab nav matches `{`/`}` (US-layout); other layouts won't fire.
+- ⌘⇧[/⌘⇧] tab nav matches `{`/`[` and `}`/`]` via `charactersIgnoringModifiers`.
   Digit shortcuts (⌘1-9, ⌘⌥1-9) are layout-independent via `keyCode`.
-  ⌘[/⌘] left to upstream's `goto_split` (Config.zig:7016).
+  ⌘[/⌘] left to upstream's `goto_split`. ⌘W → per-pane/tab Detach/Kill sheet
+  (second ⌘W or K = Kill, Esc = Cancel). ⌘⇧B toggles the sidebar.
   ⌘⌥A/⌘⌥P (watch / pin) match physical `kVK_ANSI_A`/`_P` (keyCode 0/35);
   AZERTY gets ⌘⌥A on ⌘⌥Q. ⌘⇧R (repaint) is keyCode 15.
-  ⌘K/⌘⇧K shadow upstream's `clear_screen` (Config.zig:6927); rebind via
+  ⌘K/⌘⇧K shadow upstream's `clear_screen`; rebind via
   `keybind = cmd+ctrl+k=clear_screen` if wanted.
-  Hold-⌘ ≥600ms shows `CheatsheetView`; the debounce hides quick chords but
-  ⌘-hold for autorepeat (e.g. ⌘← in a TUI) will pop it after 600ms.
+  Hold-⌘ ≥600ms (with no other key) shows `CheatsheetView`; any keyDown while ⌘ is
+  held — including autorepeat — cancels/hides it.
 - CC probe (sparkle toggle) reads `~/.claude/sessions/` — a zshrc-only
   `CLAUDE_CONFIG_DIR` override is invisible to the Dock-launched app and to
-  `ssh -o BatchMode=yes` (non-login shell). Remote probe assumes POSIX
-  `ps -A -o pid=,ppid=`; BusyBox/Alpine untested. Shared-uid remotes
-  (`deploy@`) ship every user's CC pid-files over the wire — BFS filters the
+  `ssh -o BatchMode=yes` (non-login shell). The **local** host probe is native Swift
+  (sysctl process table + FileManager — no per-tick process spawns); **remote** probes
+  run the POSIX `sh` script (`ps -A -o pid=,ppid=`; BusyBox/Alpine untested). Shared-uid
+  remotes (`deploy@`) ship every user's CC pid-files over the wire — BFS filters the
   *result* to descendants of our zmx sessions, but the raw transfer doesn't.
   The poll stretches from 3s to 30s while no fork window is visible (occluded /
-  minimized / locked screen) — agents running overnight otherwise make the idle
-  poll the fork's biggest CPU and ssh-traffic source.
+  minimized / locked screen), and the inter-tick sleep is deadline-based so one
+  down ssh host (5s timeout) can't push the local host's cadence to ~8s.
   The red `.blocked` indicator depends on classifier fields (`tempo`/`needs`)
   that the agent only writes while it believes it's being watched —
-  `probeScript` touches the heartbeat file every poll to keep that true, but
+  the probe touches the heartbeat file every poll to keep that true, but
   the agent-side feature gate must also be on (silently absent otherwise).
   CC doesn't reliably rewrite `tempo` once you reply; `PaneMachine.apply`
   handles that by event ordering (`.progress` clears `blocked`, only a
@@ -329,8 +359,9 @@ A terminal that runs arbitrary shells will trip every macOS privacy surface. Thr
 - Sidebar mono font reads `window-title-font-family` (not `font-family` — that's a
   `RepeatableString` and `c_get.zig` can't return it without an upstream `cval()`).
   Set `window-title-font-family = <terminal font>` for matched typography.
-- ⌘⇧K scrollback search fetches full `zmx history` per session and matches
-  client-side (keeps user input out of `controlArgv`'s shell). Slow over ssh
-  for large buffers; per-ref 10s timeout means a stalled remote silently drops.
-  Width-capped at 4 concurrent (local-first) so a many-pane query doesn't burst
-  N fresh ssh connections past sshd `MaxStartups`.
+- ⌘⇧K scrollback search fetches `zmx history` **once per sheet** (all sessions,
+  width-capped at 4 concurrent, local-first so a many-pane query doesn't burst
+  N fresh ssh connections past sshd `MaxStartups`) and matches client-side against
+  the cached buffers as you type (keeps user input out of `controlArgv`'s shell).
+  Content written after the sheet opened isn't searched — reopen to refresh.
+  Per-ref 10s timeout means a stalled remote silently drops.

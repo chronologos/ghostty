@@ -25,6 +25,10 @@ enum Theme {
 
     // MARK: Status
     static let blocked = Color.red
+    /// Error text / destructive controls in sheets. Same hue as `blocked` today, but a
+    /// separate role — "this operation failed" vs "this pane needs you" — so retuning one
+    /// can't silently restyle the other.
+    static let error = Color.red
 
     // MARK: Host accent — single fallback
     static func hostAccent(_ h: ForkHost?) -> Color { h?.accent ?? .secondary }
@@ -45,9 +49,6 @@ enum Theme {
     private static func age(_ d: Date?) -> TimeInterval { d.map { Date().timeIntervalSince($0) } ?? .infinity }
     static func spineHeat(_ d: Date?) -> Color {
         ramp(age(d), .secondary, .secondary.opacity(0.6), .secondary.opacity(0.35))
-    }
-    static func ageStyle(_ d: Date?) -> AnyShapeStyle {
-        ramp(age(d), AnyShapeStyle(.primary), AnyShapeStyle(.secondary), AnyShapeStyle(.tertiary))
     }
 
     // MARK: Afterglow / doze — recency without an age column. Discrete buckets (not a
@@ -108,7 +109,13 @@ struct Pebble: InsettableShape {
 extension Pebble {
     /// Tag pebbles are seeded from the tag hue — the swatch picked in TagEditView is the
     /// exact silhouette the sidebar row wears. Keep the hue→seed mapping here only.
-    init(tagHue: Double) { self.init(seed: Int(tagHue * 97)) }
+    /// Hue is decode-clamped (`PaneTag.init(from:)`) but harden here too: `Int(_:Double)`
+    /// traps on NaN/±inf/out-of-range, and a trap here repeats for every tagged row — a
+    /// hand-edited fork.json could brick launch.
+    init(tagHue: Double) {
+        let h = tagHue.isFinite ? min(max(tagHue, 0), 1) : 0
+        self.init(seed: Int(h * 97))
+    }
 }
 
 /// Hand-cut card corners — four slightly different radii (quad curves, a touch softer than

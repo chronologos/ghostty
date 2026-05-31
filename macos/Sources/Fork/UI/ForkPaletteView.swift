@@ -77,6 +77,12 @@ struct ScrollbackSearchView: View {
     @State private var searchTask: Task<Void, Never>?
     @State private var debounce: Task<Void, Never>?
     @FocusState private var fieldFocused: Bool
+    /// History buffers keyed `"{hostID}/{ref.key}"`, fetched once per sheet by `fetchTask`.
+    /// Typing refines the query against these — the old shape re-ran `zmx history` (one
+    /// process, or one ssh connection, per pane) on every 300ms-debounced keystroke.
+    /// Content written after the sheet opened isn't searched; reopen to refresh.
+    @State private var buffers: [String: String] = [:]
+    @State private var fetchTask: Task<Void, Never>?
 
     struct Hit: Identifiable {
         let id = UUID()
@@ -139,7 +145,39 @@ struct ScrollbackSearchView: View {
         .frame(width: 600, height: 420)
         .onAppear { fieldFocused = true }
         .onExitCommand { onDone() }
-        .onDisappear { debounce?.cancel(); searchTask?.cancel() }
+        .onDisappear { debounce?.cancel(); searchTask?.cancel(); fetchTask?.cancel() }
+    }
+
+    /// One shared history fetch per sheet. Re-searches await the same task — it is never
+    /// cancelled by retyping (only by sheet dismissal), so a half-fetched buffer set can't
+    /// masquerade as the full one.
+    private func bufferFetch() -> Task<Void, Never> {
+        if let fetchTask { return fetchTask }
+        // Local first so cheap matches surface while ssh is still in flight; the width cap
+        // is for ssh — `run()` does `Process().run()` before its first suspension, so the
+        // cooperative pool bounds waiting tasks, not subprocess count, and N panes on one
+        // host = N fresh ssh connections (no ControlMaster) → sshd MaxStartups drops.
+        let targets = registry.allPanes
+            .sorted { $0.host.transport.isLocal && !$1.host.transport.isLocal }
+        let t = Task {
+            var i = 0
+            await withTaskGroup(of: (String, String)?.self) { group in
+                func add(_ p: (tab: TabModel, host: ForkHost, index: Int, ref: SessionRef)) {
+                    group.addTask {
+                        guard let buf = try? await ZmxAdapter.history(host: p.host, ref: p.ref)
+                        else { return nil }
+                        return ("\(p.ref.hostID)/\(p.ref.key)", buf)
+                    }
+                }
+                while i < min(4, targets.count) { add(targets[i]); i += 1 }
+                for await result in group {
+                    if let (key, buf) = result { buffers[key] = buf }
+                    if i < targets.count { add(targets[i]); i += 1 }
+                }
+            }
+        }
+        fetchTask = t
+        return t
     }
 
     private func search() {
@@ -150,16 +188,14 @@ struct ScrollbackSearchView: View {
         let q = query
         guard !q.isEmpty else { searching = false; return }
         debounce?.cancel()
-        // Local first so cheap matches surface while ssh is still in flight; the width cap
-        // is for ssh — `run()` does `Process().run()` before its first suspension, so the
-        // cooperative pool bounds waiting tasks, not subprocess count, and N panes on one
-        // host = N fresh ssh connections (no ControlMaster) → sshd MaxStartups drops.
-        let targets = registry.allPanes
-            .sorted { $0.host.transport.isLocal && !$1.host.transport.isLocal }
         searching = true
+        let panes = registry.allPanes
         searchTask = Task {
-            func probe(_ p: (tab: TabModel, host: ForkHost, index: Int, ref: SessionRef)) async -> Hit? {
-                guard let buf = try? await ZmxAdapter.history(host: p.host, ref: p.ref),
+            await bufferFetch().value
+            guard gen == generation, !Task.isCancelled else { return }
+            // Pure client-side match against the cached buffers — no per-keystroke processes.
+            hits = panes.compactMap { p in
+                guard let buf = buffers["\(p.ref.hostID)/\(p.ref.key)"],
                       let line = buf.split(separator: "\n")
                           .last(where: { $0.localizedCaseInsensitiveContains(q) })
                 else { return nil }
@@ -171,16 +207,7 @@ struct ScrollbackSearchView: View {
                     snippet: String(line).trimmingCharacters(in: .whitespaces)
                 )
             }
-            var i = 0
-            await withTaskGroup(of: Hit?.self) { group in
-                while i < min(4, targets.count) { let p = targets[i]; i += 1; group.addTask { await probe(p) } }
-                for await hit in group {
-                    if Task.isCancelled { break }
-                    if let hit { await MainActor.run { if gen == generation { hits.append(hit) } } }
-                    if i < targets.count { let p = targets[i]; i += 1; group.addTask { await probe(p) } }
-                }
-            }
-            await MainActor.run { if gen == generation { searching = false } }
+            searching = false
         }
     }
 }

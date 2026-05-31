@@ -49,7 +49,8 @@ struct SessionMetaLabel: View {
                 Text("ext").foregroundStyle(.secondary)
             }
         }
-        .font(.system(size: 9))
+        // 10pt matches the sidebar's small-text scale (PR48 bumped that +1pt; sheets lagged).
+        .font(.system(size: 10))
     }
 
     private func ccHelp(_ info: CCProbe.Info, busy: Bool) -> String {

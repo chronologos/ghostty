@@ -18,10 +18,9 @@ enum ForkBootstrap {
         #endif
     }()
 
-    /// Debug toggles for bisecting layout/zmx issues.
-    static let noSidebar: Bool = ProcessInfo.processInfo.environment["GHOSTTY_FORK_NO_SIDEBAR"] == "1"
-    static let noZmx: Bool = ProcessInfo.processInfo.environment["GHOSTTY_FORK_NO_ZMX"] == "1"
-    static let noPicker: Bool = ProcessInfo.processInfo.environment["GHOSTTY_FORK_NO_PICKER"] == "1"
+    // (The GHOSTTY_FORK_NO_SIDEBAR / NO_ZMX / NO_PICKER bisect toggles were removed — they
+    // dated from early bring-up; GHOSTTY_FORK=0 disables the whole fork and GHOSTTY_FORK_ZMX
+    // still overrides zmx resolution.)
 
     /// Seam #1 — called from `AppDelegate.applicationWillFinishLaunching` (a near-frozen
     /// upstream function, unlike `applicationDidFinishLaunching` which churns every release
