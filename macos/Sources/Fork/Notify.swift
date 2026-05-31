@@ -15,45 +15,63 @@ final class ForkNotify: NSObject, UNUserNotificationCenterDelegate {
     nonisolated(unsafe) private weak var wrapped: UNUserNotificationCenterDelegate?
     @MainActor private var badgeSub: AnyCancellable?
 
-    /// Seam #1 fires at AppDelegate.swift:215 but upstream sets `center.delegate = self`
-    /// at :289 — defer one tick so we wrap (not get overwritten by) it. Hop to main for
-    /// `SessionRegistry`/`NSApp` too; `ForkBootstrap.install` isn't `@MainActor`.
+    /// Seam #1 fires in `applicationWillFinishLaunching`, but upstream sets
+    /// `center.delegate = self` later, inside `applicationDidFinishLaunching` — the fork
+    /// must wrap that assignment, not get overwritten by it. A bare main-queue dispatch
+    /// from the seam is NOT safe: the run loop can drain the queue *between* will- and
+    /// did-FinishLaunching (Apple Event delivery spins it), which lands the wrap too early
+    /// on a measurable fraction of launches. Anchor on the didFinishLaunching notification
+    /// + one more tick instead — that runs strictly after the whole launch sequence,
+    /// regardless of queue-drain timing. fork-check.sh verifies the static ordering.
+    /// Hop to main for `SessionRegistry`/`NSApp` too; `ForkBootstrap.install` isn't
+    /// `@MainActor`.
     func install() {
-        DispatchQueue.main.async { [self] in
-            MainActor.assumeIsolated {
-                let center = UNUserNotificationCenter.current()
-                wrapped = center.delegate
-                center.delegate = self
-                center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
-                // Not `dot == .waiting`: `dot` demotes to `.blocked` when the probe flags
-                // the pane, which would drop it from the count one probe-tick after it
-                // settled — badge flashes then vanishes while the pane still needs input.
-                // `!ccBusy` is the only `dot`-ism that belongs here (a busy pane renders a
-                // working rail; badging "needs you" at the same time would contradict it).
-                let waiting = { (p: [SessionRef: PaneMachine]) in
-                    p.values.lazy.filter { $0.phase == .waiting && !$0.ccBusy }.count
-                }
-                // Upstream's `setDockBadge` (AppDelegate.swift:745) is the second writer; it's
-                // `private`, so on the 1→0 edge we re-derive its bell label locally instead
-                // of writing nil and clobbering a pending bell.
-                let bellLabel = { () -> String? in
-                    let c = NSApp.windows
-                        .compactMap { $0.windowController as? BaseTerminalController }
-                        .reduce(0) { $0 + ($1.bell ? 1 : 0) }
-                    return c > 0 ? "\(c)" : nil
-                }
-                badgeSub = SessionRegistry.shared.$panes
-                    .map(waiting)
-                    .removeDuplicates()
-                    .sink { NSApp.dockTile.badgeLabel = $0 > 0 ? "\($0)" : bellLabel() }
-                NotificationCenter.default.addObserver(
-                    forName: .terminalWindowBellDidChangeNotification,
-                    object: nil, queue: .main
-                ) { _ in
-                    MainActor.assumeIsolated {
-                        let n = waiting(SessionRegistry.shared.panes)
-                        if n > 0 { NSApp.dockTile.badgeLabel = "\(n)" }
-                    }
+        var token: NSObjectProtocol?
+        token = NotificationCenter.default.addObserver(
+            forName: NSApplication.didFinishLaunchingNotification, object: nil, queue: .main
+        ) { _ in
+            token.map(NotificationCenter.default.removeObserver)
+            // One more tick: observer order within the posting (us vs. the app delegate's
+            // own applicationDidFinishLaunching) is undefined, but a block enqueued *during*
+            // the posting runs after every observer has returned.
+            DispatchQueue.main.async { ForkNotify.shared.wrapUpstreamDelegate() }
+        }
+    }
+
+    private func wrapUpstreamDelegate() {
+        MainActor.assumeIsolated {
+            let center = UNUserNotificationCenter.current()
+            wrapped = center.delegate
+            center.delegate = self
+            center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+            // Not `dot == .waiting`: `dot` demotes to `.blocked` when the probe flags
+            // the pane, which would drop it from the count one probe-tick after it
+            // settled — badge flashes then vanishes while the pane still needs input.
+            // `!ccBusy` is the only `dot`-ism that belongs here (a busy pane renders a
+            // working rail; badging "needs you" at the same time would contradict it).
+            let waiting = { (p: [SessionRef: PaneMachine]) in
+                p.values.lazy.filter { $0.phase == .waiting && !$0.ccBusy }.count
+            }
+            // Upstream's `setDockBadge` (AppDelegate.swift:745) is the second writer; it's
+            // `private`, so on the 1→0 edge we re-derive its bell label locally instead
+            // of writing nil and clobbering a pending bell.
+            let bellLabel = { () -> String? in
+                let c = NSApp.windows
+                    .compactMap { $0.windowController as? BaseTerminalController }
+                    .reduce(0) { $0 + ($1.bell ? 1 : 0) }
+                return c > 0 ? "\(c)" : nil
+            }
+            badgeSub = SessionRegistry.shared.$panes
+                .map(waiting)
+                .removeDuplicates()
+                .sink { NSApp.dockTile.badgeLabel = $0 > 0 ? "\($0)" : bellLabel() }
+            NotificationCenter.default.addObserver(
+                forName: .terminalWindowBellDidChangeNotification,
+                object: nil, queue: .main
+            ) { _ in
+                MainActor.assumeIsolated {
+                    let n = waiting(SessionRegistry.shared.panes)
+                    if n > 0 { NSApp.dockTile.badgeLabel = "\(n)" }
                 }
             }
         }
