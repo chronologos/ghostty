@@ -31,9 +31,8 @@ enum ForkBootstrap {
         // the fork spawns that resolves helpers by *name* — ssh ProxyCommand wrappers in
         // ~/.ssh/config above all — fails with "command not found" unless a ControlMaster
         // socket already happens to exist, which reads as "host unreachable" / instantly-dead
-        // panes on a cold morning. Export the login shell's PATH before the first surface or
-        // control command spawns (and before the zmx probe below, which can then resolve zmx
-        // from PATH instead of falling back to its own login-shell run).
+        // panes on a cold morning. Apply last launch's cached login PATH now (instant, before
+        // the zmx probe below and any surface spawn), then refresh it in the background.
         exportLoginShellPATH()
         // Force `localZmx` resolution now. `static let` is swift_once-serialized — a
         // detached "warm-up" can't beat main to the once-barrier, so we take the hit
@@ -51,7 +50,13 @@ enum ForkBootstrap {
         // means rename/tag/tab-switch made within the last half-second would otherwise be lost.
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
-        ) { _ in MainActor.assumeIsolated { SessionRegistry.shared.saveNow() } }
+        ) { _ in MainActor.assumeIsolated {
+            // ⌘Q never sends windowWillClose (AppKit terminates without closing windows),
+            // so the focused pane's departure must be exit-stamped here — otherwise it
+            // persists with its *arrival* time and reads hours-stale after relaunch.
+            SessionRegistry.shared.flushPaneExit()
+            SessionRegistry.shared.saveNow()
+        } }
     }
 
     /// Inherited entries first — the control plane's `ssh`/`sh`/`nc` keep resolving to the
@@ -67,23 +72,44 @@ enum ForkBootstrap {
             .joined(separator: ":")
     }
 
+    /// UserDefaults key holding the last successful login-shell PATH probe.
+    private static let cachedLoginPATHKey = "forkCachedLoginPATH"
+
+    /// Two-phase: apply the cached PATH synchronously (instant — launch must never block on
+    /// a login shell), then refresh the cache via a background probe with a generous bound.
+    /// The old single-phase design (inline 2s probe) failed both ways on real machines: rc
+    /// inits measured at 2-4s mean it burned its full bound at every launch *and* came back
+    /// empty, silently leaving the export absent — the "cold morning unreachable" failure
+    /// this function exists to prevent.
     private static func exportLoginShellPATH() {
-        guard let login = loginShellPATH(), login.contains("/") else { return }
-        let merged = mergedPATH(login: login,
-                                current: ProcessInfo.processInfo.environment["PATH"] ?? "")
-        setenv("PATH", merged, 1)
-        logger.info("fork PATH: \(merged, privacy: .public)")
+        let launchdPATH = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        if let cached = UserDefaults.standard.string(forKey: cachedLoginPATHKey), cached.contains("/") {
+            setenv("PATH", mergedPATH(login: cached, current: launchdPATH), 1)
+        }
+        DispatchQueue.global(qos: .utility).async {
+            guard let login = loginShellPATH(timeout: 15), login.contains("/") else { return }
+            let merged = mergedPATH(login: login, current: launchdPATH)
+            // setenv on main: children snapshot env at spawn, so anything launched before
+            // the refresh lands just keeps the cached view (good enough — it was last
+            // launch's answer).
+            DispatchQueue.main.async {
+                setenv("PATH", merged, 1)
+                UserDefaults.standard.set(login, forKey: cachedLoginPATHKey)
+                logger.info("fork PATH: \(merged, privacy: .public)")
+            }
+        }
     }
 
     /// Bounded probe of the user's login shell: run `cmd` under `$SHELL -lic`, return raw
     /// stdout once it hits EOF (the child's exit closes it), or nil after `timeout`. `cmd`
     /// must be a compile-time literal — this is deliberately NOT a third place where runtime
-    /// strings meet a shell (CLAUDE.md §Security boundary). Both callers — the PATH export
-    /// above and `ZmxAdapter.localZmx`'s last-resort lookup — run before the first window
-    /// draws, so a hung .zshrc must not wedge launch: stdout drains via a handler (rc chatter
-    /// bigger than the pipe buffer can't deadlock the child into the timeout), the wait is
-    /// bounded, and interactive zsh ignores SIGTERM, so on timeout the probe's process group
-    /// is SIGKILLed and we give up.
+    /// strings meet a shell (CLAUDE.md §Security boundary). Callers: the background PATH
+    /// refresh above (generous bound, off-main) and `ZmxAdapter.localZmx`'s last-resort
+    /// lookup (2s, on main before the first window draws) — for the latter a hung .zshrc
+    /// must not wedge launch: stdout drains via a handler (rc chatter bigger than the pipe
+    /// buffer can't deadlock the child into the timeout), the wait is bounded, and
+    /// interactive zsh ignores SIGTERM, so on timeout the probe's process group is
+    /// SIGKILLed and we give up.
     static func loginShellOutput(_ cmd: String, timeout: TimeInterval = 2) -> String? {
         let p = Process(), pipe = Pipe(), done = DispatchSemaphore(value: 0)
         p.executableURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh")
@@ -114,8 +140,8 @@ enum ForkBootstrap {
 
     /// The marker prefix keeps rc-file chatter (nvm init, direnv, fortune) from being
     /// mistaken for the answer.
-    private static func loginShellPATH() -> String? {
-        loginShellOutput("printf '__FORKPATH__%s\\n' \"$PATH\"")?
+    private static func loginShellPATH(timeout: TimeInterval) -> String? {
+        loginShellOutput("printf '__FORKPATH__%s\\n' \"$PATH\"", timeout: timeout)?
             .split(separator: "\n").last(where: { $0.hasPrefix("__FORKPATH__") })
             .map { String($0.dropFirst("__FORKPATH__".count)) }
     }

@@ -268,12 +268,21 @@ final class SessionRegistry: ObservableObject {
     }
 
     func removeTab(_ id: TabModel.ID) {
-        let dropped = tabs.first { $0.id == id }?.tree.leafRefs ?? []
+        let removed = tabs.first { $0.id == id }
+        let dropped = removed?.tree.leafRefs ?? []
         tabs.removeAll { $0.id == id }
         if activeTabID == id { activeTabID = nil }
         if renaming?.tabID == id { renaming = nil }
         for r in dropped where !refInAnyTree(r) { dropPane(r) }
         pruneRecentTags()
+        // Last tab on a host → the host leaves the poll's `due` set, so nothing left
+        // running can ever clear its unreachable badge; a frozen "Unreachable since…"
+        // would outlive the host coming back.
+        if let hostID = removed?.hostID, !tabs.contains(where: { $0.hostID == hostID }),
+           hostUnreachableSince[hostID] != nil {
+            objectWillChange.send()
+            hostUnreachableSince[hostID] = nil
+        }
     }
 
     func moveTab(_ id: TabModel.ID, before target: TabModel.ID) {
@@ -440,7 +449,13 @@ final class SessionRegistry: ObservableObject {
                 }
             }
             tick &+= 1
-            try? await Task.sleep(for: .seconds(3))
+            // Nobody can see the sidebar (window occluded / minimized / screen locked):
+            // stretch the cadence ~10×. Slow rather than stop — `.probeStopped` semantics
+            // (the ccBusy wedge) only apply to a stopped poll, and a slow tick still
+            // refreshes within 30s of the user coming back. Agents running overnight with
+            // the screen locked are otherwise the fork's single biggest CPU/traffic source.
+            let visible = ForkWindowController.anyVisibleForkWindow
+            try? await Task.sleep(for: .seconds(visible ? 3 : 30))
         }
     }
 
