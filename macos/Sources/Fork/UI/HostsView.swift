@@ -96,7 +96,7 @@ struct HostsView: View {
                 Text("Auto-assigned color (change after adding)")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            if dupe { Text("Already added.").font(.caption).foregroundStyle(.red) }
+            if dupe { Text("Already added.").font(.caption).foregroundStyle(Theme.error) }
             HStack {
                 Spacer()
                 Button("Add", action: add).disabled(target == nil || dupe)
