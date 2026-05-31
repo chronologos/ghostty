@@ -140,13 +140,28 @@ struct SessionRef: Codable, Hashable {
 struct PaneTag: Codable, Hashable {
     var text: String
     var hue: Double
+
+    init(text: String, hue: Double) { self.text = text; self.hue = hue }
+
+    /// fork.json is hand-editable: a non-finite or out-of-range hue would reach
+    /// `Int(hue * 97)` (the Pebble seed) and trap — for every row wearing the tag, on
+    /// every launch, i.e. a launch-loop brick. Clamp at the decode boundary, same policy
+    /// as `ForkHost.accentSlot`.
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        text = try c.decode(String.self, forKey: .text)
+        let h = try c.decode(Double.self, forKey: .hue)
+        hue = h.isFinite ? min(max(h, 0), 1) : 0
+    }
 }
 
 /// User-defined hover-key action (`fork.json` `hoverCommands`). `cmd` is an argv array;
 /// `{cwd}`/`{ref}`/`{host}` placeholders are whole-token-substituted by `ZmxAdapter.expand`
 /// — never string-interpolated into a shell line (CLAUDE.md §Security).
+/// `overlay` mode was removed (PR51) — old entries decode-fail via `Lossy` and are dropped,
+/// with the original fork.json preserved aside by the `lossyDropCount` check.
 struct HoverCommand: Codable, Hashable {
-    enum Mode: String, Codable { case pane, local, overlay }
+    enum Mode: String, Codable { case pane, local }
     var cmd: [String]
     var mode: Mode
 }
@@ -246,18 +261,14 @@ indirect enum PersistedTree: Codable, Hashable {
     /// Append a leaf to the right. Empty → `.leaf(ref)`; non-empty → horizontal split
     /// 50/50 with `self` on the left. Matches the ⌘D `newSplit(direction: .right)` shape
     /// so "move pane into tab" feels like "split off the right".
+    /// (`merging(_:)` was removed — no production caller; `mergeTab` folds merges through
+    /// repeated `movePane`, the same policy note as `SessionRegistry`'s absent
+    /// `mergeTabPersisted`.)
     func appending(leaf ref: SessionRef) -> PersistedTree {
         switch self {
         case .empty: .leaf(ref)
         default: .split(horizontal: true, ratio: 0.5, a: self, b: .leaf(ref))
         }
-    }
-
-    /// Concat `other`'s leaves into `self` via repeated `appending(leaf:)`. Preserves
-    /// `self`'s internal shape; `other`'s shape is flattened. Merging with both shapes
-    /// intact would nest into an unreadable tree — explicit flatten is the lesser evil.
-    func merging(_ other: PersistedTree) -> PersistedTree {
-        other.leafRefs.reduce(self) { $0.appending(leaf: $1) }
     }
 }
 #endif

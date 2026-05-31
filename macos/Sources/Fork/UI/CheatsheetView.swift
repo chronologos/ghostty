@@ -10,7 +10,8 @@ struct CheatsheetView: View {
     private static let rows: [(String, String)] = [
         ("⌘T", "New session"),
         ("⌘D", "Split pane"),
-        ("⌘W", "Close pane"),
+        ("⌘W", "Close pane (Detach / Kill)"),
+        ("⌘W ⌘W", "Kill instead of detach"),
         ("⌘K", "Command palette"),
         ("⌘⇧K", "Scrollback search"),
         ("⌘I / ⌘⇧I", "Rename pane / tab"),
@@ -18,12 +19,13 @@ struct CheatsheetView: View {
         ("⌘1–9", "Jump to tab"),
         ("⌘⌥1–9", "Jump to host"),
         ("⌘[ / ⌘]", "Prev / next split"),
-        ("⌘⌥A", "Watch pane (notify on idle)"),
+        ("⌘⌥A", "Watch pane (notify when finished)"),
         ("⌘⇧R", "Repaint pane"),
         ("⌘⌥P", "Pin / unpin tab"),
         ("⌘⇧B", "Toggle sidebar"),
         ("⌥ hold", "Reveal read CC status text"),
         ("⌥⌥", "Mark all CC status read"),
+        ("Long-press ◎", "Focus cutoff & sort options"),
     ]
 
     var body: some View {

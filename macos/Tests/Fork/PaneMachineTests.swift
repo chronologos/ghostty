@@ -41,10 +41,37 @@ struct PaneMachineTests {
 
     @Test func bellOnlyPostsWhenWatched() {
         var m = PaneMachine()
-        #expect(m.apply(.bell) == false)
+        #expect(m.apply(.bell(isActive: false)) == false)
         m.apply(.watch(true))
-        #expect(m.apply(.bell) == true)
+        #expect(m.apply(.bell(isActive: false)) == true)
         #expect(m.watched == false)
+    }
+
+    /// An *active*-pane bell is interaction noise (readline/vim beeps): it must not post,
+    /// must not consume the ⌘⌥A watch, and must not latch `notified` — otherwise a stray
+    /// beep in the pane you're typing in silently swallows the banner for a completion
+    /// that happens much later in the background.
+    @Test func activeBellIsIgnoredEntirely() {
+        var m = PaneMachine()
+        m.apply(.watch(true))
+        #expect(m.apply(.bell(isActive: true)) == false)
+        #expect(m.watched == true)        // watch survives
+        #expect(m.notified == false)      // no latch
+        // The watched completion still banners later.
+        m.apply(.progress)
+        #expect(m.apply(.settled(isActive: false)) == true)
+    }
+
+    /// The bell-latch trade-off, fixed: a background bell banners and latches (so its own
+    /// 250ms settle doesn't double-post), but `.viewed` still re-arms a later completion.
+    @Test func backgroundBellLatchClearsOnViewed() {
+        var m = PaneMachine()
+        m.apply(.watch(true))
+        #expect(m.apply(.bell(isActive: false)) == true)
+        #expect(m.apply(.settled(isActive: false)) == false)   // same event, gated
+        m.apply(.viewed)
+        m.apply(.progress)
+        #expect(m.apply(.settled(isActive: false)) == true)    // separate, later completion
     }
 
     /// The four-bug class: probe says blocked, OSC `.progress` arrives, probe says blocked
@@ -160,7 +187,7 @@ struct PaneMachineTests {
     @Test func bellThenSettlePostsOnce() {
         var m = PaneMachine()
         m.apply(.watch(true)); m.apply(.progress)
-        #expect(m.apply(.bell) == true)
+        #expect(m.apply(.bell(isActive: false)) == true)
         #expect(m.apply(.settled(isActive: false)) == false)
         #expect(m.dot == .waiting)
     }
@@ -177,8 +204,8 @@ struct PaneMachineTests {
     }
 
     /// `phase==.waiting && ccBusy` must not double-report: the rail (driven by `dot`) says
-    /// working, and the dock badge separately counts `phase == .waiting && !ccBusy` — both
-    /// must agree that a busy pane isn't "needs you".
+    /// working, and the dock badge separately counts `(waiting || blocked) && !ccBusy` —
+    /// both must agree that a busy pane isn't "needs you".
     @Test func dotWaitingExcludesBusy() {
         var m = PaneMachine()
         m.apply(.progress); _ = m.apply(.settled(isActive: false))

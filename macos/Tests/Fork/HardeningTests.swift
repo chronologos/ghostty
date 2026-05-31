@@ -21,6 +21,22 @@ struct ZmxHardeningTests {
         #expect(r.external.map(\.name) == ["other"])   // err= and -Sevil dropped
     }
 
+    @Test func partitionForgedPrefixStaysExternal() {
+        // Anyone on the remote host can name a session `{hostID}-anything` (the hostID is
+        // just a hash of user@host). Only names the fork could have created itself
+        // (managed charset) are trusted as managed; forged names with shell-hostile
+        // characters stay external under their full wire name — they must never become a
+        // non-external SessionRef downstream code assumes is `isValid`.
+        let out = """
+            name=h1-good_name.1\tpid=1\tclients=0\tcreated=1700000000
+            name=h1-evil name; rm -rf\tpid=2\tclients=0\tcreated=1700000000
+            name=h1-spoof$(id)\tpid=3\tclients=0\tcreated=1700000000
+            """
+        let r = ZmxAdapter.partition(out, hostID: "h1")
+        #expect(r.managed.map(\.name) == ["good_name.1"])
+        #expect(r.external.map(\.name) == ["h1-evil name; rm -rf", "h1-spoof$(id)"])
+    }
+
     @Test func expandRequiresAbsoluteCwd() {
         let ref = SessionRef(hostID: "h1", name: "shell-abc")
         // Absolute paths pass through; relative / dash-leading / URL-ish degrade to ".".
@@ -93,6 +109,46 @@ struct PersistenceSafetyTests {
         #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("fork.json.bak").path))
     }
 
+    /// Full-fidelity round trip: every State field, nested splits, per-pane dicts, tags,
+    /// hover commands — field-level equality, not just id/count checks. A Codable key
+    /// dropped from any nested type shows up here.
+    @Test func fullStateRoundTripsLosslessly() {
+        let (p, dir) = tempStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let hostID = "h1"
+        let a = SessionRef(hostID: hostID, name: "left")
+        let b = SessionRef(hostID: hostID, name: "right")
+        let ext = SessionRef(hostID: hostID, name: "watcher", external: true)
+        var tab = TabModel(id: UUID(), hostID: hostID, title: "work",
+                           tree: .split(horizontal: true, ratio: 0.33,
+                                        a: .leaf(a),
+                                        b: .split(horizontal: false, ratio: 0.5,
+                                                  a: .leaf(b), b: .leaf(ext))))
+        tab.lastActive = ["left": Date(timeIntervalSince1970: 1_700_000_000)]
+        tab.paneLabels = ["left": "build", "@watcher": "logs"]
+        tab.paneTags = ["right": PaneTag(text: "prod", hue: 0.7)]
+        tab.ccNames = ["left": "fixing-the-build"]
+        tab.collapsed = true
+        tab.pinned = true
+        tab.dismissedAt = Date(timeIntervalSince1970: 1_700_000_100)
+        var state = ForkPersistence.State()
+        state.hosts = [ForkHost(id: hostID, label: "box",
+                                transport: .ssh(.init(user: "me", host: "box")),
+                                expanded: false, accentSlot: 42),
+                       .local]
+        state.tabs = [tab]
+        state.activeTabID = tab.id
+        state.recentTags = [PaneTag(text: "prod", hue: 0.7), PaneTag(text: "wip", hue: 0.1)]
+        state.hoverCommands = ["g": HoverCommand(cmd: ["lazygit", "-p", "{cwd}"], mode: .pane)]
+        p.save(state)
+        let loaded = ForkPersistence(directory: dir).load()
+        #expect(loaded.hosts == state.hosts)
+        #expect(loaded.tabs == state.tabs)
+        #expect(loaded.activeTabID == state.activeTabID)
+        #expect(loaded.recentTags == state.recentTags)
+        #expect(loaded.hoverCommands == state.hoverCommands)
+    }
+
     @Test func undecodablePrimaryIsPreservedAndBakWins() {
         let (p, dir) = tempStore()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -103,6 +159,24 @@ struct PersistenceSafetyTests {
         let s = p.load()
         #expect(s.hosts.map(\.id) == ["h1"])
         #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("fork.json.undecodable").path))
+    }
+
+    @Test func corruptPrimaryDoesNotRotateOverGoodBak() {
+        let (p, dir) = tempStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let good = #"{"version":1,"hosts":[{"id":"h1","label":"box","transport":{"local":{}}}],"tabs":[]}"#
+        write("{ not json", to: dir)
+        write(good, to: dir, name: "fork.json.bak")
+        let s = p.load()
+        #expect(s.hosts.map(\.id) == ["h1"])      // recovered from .bak
+        // The first save after a .bak recovery must NOT rotate the still-corrupt primary
+        // over the good .bak — if the new write then failed, no good copy would remain.
+        p.save(s)
+        let bak = (try? Data(contentsOf: dir.appendingPathComponent("fork.json.bak")))
+            .map { String(decoding: $0, as: UTF8.self) }
+        #expect(bak == good)
+        // And the primary is valid again after that write.
+        #expect(ForkPersistence(directory: dir).load().hosts.map(\.id) == ["h1"])
     }
 
     @Test func partialDecodeIsCopiedAside() {
