@@ -177,7 +177,7 @@ struct SidebarView: View {
             }
             // Not `iconButton` — macOS `Button` swallows mouseDown so `.onLongPressGesture`
             // on it never fires. Plain Image + tap/long-press composes exclusively.
-            Image(systemName: "scope").font(.system(size: 12))
+            Image(systemName: "scope").font(.system(size: 13))
                 .foregroundStyle(focusMode ? Theme.clay : .secondary)
                 .frame(width: 24, height: 24).contentShape(Rectangle())
                 .onTapGesture {
@@ -208,7 +208,7 @@ struct SidebarView: View {
     private func iconButton(_ icon: String, help: String, tint: Color? = nil,
                             perform: @escaping () -> Void) -> some View {
         Button(action: perform) {
-            Image(systemName: icon).font(.system(size: 12))
+            Image(systemName: icon).font(.system(size: 13))
                 .foregroundStyle(tint ?? .secondary)
                 .frame(width: 24, height: 24)
                 .contentShape(Rectangle())
@@ -231,7 +231,7 @@ struct SidebarView: View {
             if tabs.isEmpty {
                 Label(filterTagged ? "No tagged panes" : "Nothing in the last \(Int(cutoffHours))h",
                       systemImage: filterTagged ? "tag.slash" : "moon.zzz")
-                    .font(mono(11)).foregroundStyle(.secondary)
+                    .font(mono(12)).foregroundStyle(.secondary)
                     .padding(.horizontal, 16).padding(.top, 12)
             } else {
                 ForEach(Array(tabs.enumerated()), id: \.element.id) { i, tab in
@@ -245,11 +245,11 @@ struct SidebarView: View {
                         HStack(spacing: 6) {
                             // No empty pill on rows 10+ — the Spacer handles alignment.
                             if i < 9 { keyHint("⌘\(i + 1)") }
-                            if tab.pinned { pinBadge(size: 7) }
+                            if tab.pinned { pinBadge(size: 8) }
                             Spacer()
                             HostDot(host: host, size: 7)
                             Text(host?.label ?? "—")
-                                .font(mono(9)).foregroundStyle(.secondary).lineLimit(1)
+                                .font(mono(10)).foregroundStyle(.secondary).lineLimit(1)
                         }
                         .contentShape(Rectangle())
                         .contextMenu { tabContextMenu(tab) }
@@ -283,7 +283,7 @@ struct SidebarView: View {
 
     private func keyHint(_ chord: String) -> some View {
         Text(chord)
-            .font(mono(8, .semibold)).foregroundStyle(.secondary)
+            .font(mono(9, .semibold)).foregroundStyle(.secondary)
             .padding(.horizontal, 4).padding(.vertical, 1)
             .background(Theme.chipBg, in: RoundedRectangle(cornerRadius: 3))
     }
@@ -311,7 +311,7 @@ struct SidebarView: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .rotationEffect(.degrees(host.expanded ? 90 : 0))
                     .frame(width: 10)
@@ -319,14 +319,14 @@ struct SidebarView: View {
                     .opacity(connected ? 1 : 0.3)
                     .frame(width: 14)
                 Text(host.label)
-                    .font(mono(12, .medium))
+                    .font(mono(13, .medium))
                     .foregroundStyle(connected ? .primary : .secondary)
                 if let since = registry.hostUnreachableSince[host.id] {
                     // Transport-level cue (zmx list failing), distinct from the dot's
                     // "no live surface" dimming — without it, hours-old CC status on a
                     // dead ssh host reads as live.
                     Image(systemName: "wifi.slash")
-                        .font(.system(size: 8)).foregroundStyle(.secondary)
+                        .font(.system(size: 9)).foregroundStyle(.secondary)
                         .help("Unreachable since \(since.formatted(date: .omitted, time: .shortened)) — CC status may be stale")
                 }
                 Spacer()
@@ -337,7 +337,7 @@ struct SidebarView: View {
                 if let i = registry.hosts.firstIndex(where: { $0.id == host.id }), i < 9 {
                     keyHint("⌘⌥\(i + 1)")
                 }
-                Text("\(tabs.count)").font(mono(10)).foregroundStyle(.secondary)
+                Text("\(tabs.count)").font(mono(11)).foregroundStyle(.secondary)
             }
             .padding(.horizontal, 4).padding(.vertical, 6)
             .contentShape(Rectangle())
@@ -422,24 +422,24 @@ struct SidebarView: View {
         return HStack(spacing: 0) {
             Button(action: toggle) {
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 8, weight: .semibold)).foregroundStyle(.secondary)
+                    .font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
                     .rotationEffect(.degrees(tab.collapsed ? 0 : 90))
                     .frame(width: 14, height: 20, alignment: .leading)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             if renaming {
-                renameField(seed: tab.title, font: mono(10, .semibold))
+                renameField(seed: tab.title, font: mono(11, .semibold))
             } else {
                 Text(tab.title.uppercased())
-                    .font(mono(9, .semibold)).kerning(0.6).lineLimit(1)
+                    .font(mono(10, .semibold)).kerning(0.6).lineLimit(1)
                     .foregroundStyle(accent.opacity(active ? 1 : 0.6))
             }
             Spacer()
             if tab.collapsed {
                 stateDot(controller?.rollup(tab: tab), accent: accent)
                     .padding(.trailing, 6)
-                Text("\(paneCount)").font(mono(9)).foregroundStyle(.tertiary)
+                Text("\(paneCount)").font(mono(10)).foregroundStyle(.tertiary)
             }
         }
         .padding(.top, 4).padding(.trailing, 12).frame(height: 20)
@@ -564,12 +564,12 @@ struct SidebarView: View {
                 .frame(width: 14)
                 VStack(alignment: .leading, spacing: 0) {
                     if renaming {
-                        renameField(seed: userLabel ?? ref.name, font: mono(12))
+                        renameField(seed: userLabel ?? ref.name, font: mono(13))
                     } else if let surface {
                         PaneLabel(surface: surface, userLabel: userLabel, fallback: ref.name,
                                   active: active, suppressSubtitle: showCC, fontFamily: fontFamily)
                     } else {
-                        Text(userLabel ?? ref.name).font(mono(12)).lineLimit(1)
+                        Text(userLabel ?? ref.name).font(mono(13)).lineLimit(1)
                             .foregroundStyle(active ? .primary : .secondary)
                     }
                     if showCC {
@@ -591,7 +591,7 @@ struct SidebarView: View {
                 Spacer()
                 if registry.panes[ref]?.watched == true {
                     Image(systemName: "eye")
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
                         .padding(.trailing, 4)
                         .help("Watching — ⌘⌥A to disarm")
                 }
@@ -603,7 +603,7 @@ struct SidebarView: View {
                             .background(pebble.fill(hovered ? c : .clear))
                             .frame(width: 8, height: 8)
                         if hovered {
-                            Text(tag.text).font(mono(8, .medium))
+                            Text(tag.text).font(mono(9, .medium))
                                 .foregroundStyle(c).fixedSize()
                                 .transition(.opacity.combined(with: .move(edge: .leading)))
                         }
@@ -735,7 +735,7 @@ struct SidebarView: View {
         // `Font.smallCaps()` to use. Color stays with the line (secondary unread / tertiary
         // read or cached) so "dim = read" remains one rule.
         func name(_ n: String) -> Text {
-            Text(n.uppercased()).font(mono(9, .medium)).kerning(0.5)
+            Text(n.uppercased()).font(mono(10, .medium)).kerning(0.5)
         }
         // `cached` is for the CC-exited case only; a running-but-unnamed session must not
         // fall through to the previous session's name in `.secondary` (live) styling.
@@ -767,7 +767,7 @@ struct SidebarView: View {
             // rows as uniform as the old fixed-height slot did.
             // `!revealAll`: ⌥-hold lifts only this clamp — tertiary color and doze stay, so
             // the peek expands the text without re-skinning the sidebar.
-            .font(mono(10)).lineLimit(((read && !revealAll) || live == nil) && attention == nil ? 1 : 3)
+            .font(mono(11)).lineLimit(((read && !revealAll) || live == nil) && attention == nil ? 1 : 3)
             // vertical: true — claim the wrapped height even when the layout pass proposes
             // a tight one (otherwise the text can collapse back to one ellipsized line);
             // horizontal stays flexible so it still wraps to the sidebar width.
@@ -840,10 +840,10 @@ private struct PaneLabel: View {
         let isPathish = t.hasPrefix("/") || t.hasPrefix("~") || t.contains(":/") || t.contains(":~")
         let label = userLabel ?? (t.isEmpty || t == "👻" || isPathish ? fallback : t)
         return VStack(alignment: .leading, spacing: 0) {
-            Text(label).font(forkMono(12, .regular, fontFamily)).lineLimit(1)
+            Text(label).font(forkMono(13, .regular, fontFamily)).lineLimit(1)
                 .foregroundStyle(active ? .primary : .secondary)
             if !suppressSubtitle && label != fallback {
-                Text(fallback).font(forkMono(9, .regular, fontFamily)).lineLimit(1)
+                Text(fallback).font(forkMono(10, .regular, fontFamily)).lineLimit(1)
                     .foregroundStyle(.tertiary)
             }
         }
