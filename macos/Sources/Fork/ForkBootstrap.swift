@@ -23,8 +23,12 @@ enum ForkBootstrap {
     static let noZmx: Bool = ProcessInfo.processInfo.environment["GHOSTTY_FORK_NO_ZMX"] == "1"
     static let noPicker: Bool = ProcessInfo.processInfo.environment["GHOSTTY_FORK_NO_PICKER"] == "1"
 
-    /// Seam #1 — called from `AppDelegate.applicationDidFinishLaunching` after config load.
-    /// PR1: no-op beyond logging. PR2: loads `SessionRegistry` from `fork.json`.
+    /// Seam #1 — called from `AppDelegate.applicationWillFinishLaunching` (a near-frozen
+    /// upstream function, unlike `applicationDidFinishLaunching` which churns every release
+    /// and used to host this seam). Nothing here needs config or windows; `ForkNotify`'s
+    /// delegate wrap is deferred to the main queue, which AppKit doesn't drain until after
+    /// `applicationDidFinishLaunching` returns, so it still lands after upstream's
+    /// `center.delegate = self`.
     static func install(ghostty: Ghostty.App) {
         guard enabled else { return }
         // GUI launches inherit launchd's bare PATH (/usr/bin:/bin:/usr/sbin:/sbin). Anything
