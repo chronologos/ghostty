@@ -200,6 +200,8 @@ class AppDelegate: NSObject,
             // Manual autofill via the `Edit => AutoFill` menu item still work as expected.
             "NSAutoFillHeuristicControllerEnabled": false,
         ])
+
+        ForkBootstrap.install(ghostty: ghostty) // [fork]
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -219,8 +221,6 @@ class AppDelegate: NSObject,
 
         // Initial config loading
         ghosttyConfigDidChange(config: ghostty.config)
-
-        ForkBootstrap.install(ghostty: ghostty) // [fork]
 
         // Start our update checker.
         updateController.startUpdater()

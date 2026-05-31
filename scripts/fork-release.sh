@@ -8,13 +8,19 @@ cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 IDENTITY="${FORK_SIGN_IDENTITY:-ghostty-fork-dev}"
 
-./scripts/fork-check.sh
+# Skip the xcframework freshness check — the zig build right below regenerates it.
+FORK_CHECK_SKIP_XCFW=1 ./scripts/fork-check.sh
 
 echo "→ libghostty (ReleaseFast)"
 PATH="$(pwd)/scripts/shims:$PATH" zig build \
   -Doptimize=ReleaseFast \
   -Demit-xcframework \
   -Demit-macos-app=false
+
+# Freshness stamp for fork-check.sh: which zig-source state this framework was built from.
+# Detects "rebased but never regenerated" — new Swift + old libghostty links and runs, but
+# misbehaves silently.
+git log -1 --format=%H HEAD -- src include > macos/GhosttyKit.xcframework/.fork-zig-sha
 
 out="macos/build/ReleaseLocal/Ghostty.app"
 # Fresh .app dir each build — leftover nested code from a prior build that the

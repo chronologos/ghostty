@@ -54,7 +54,7 @@ Exactly **two** `// [fork]` lines outside `Fork/`:
 
 | File | Seam |
 |---|---|
-| `macos/Sources/App/macOS/AppDelegate.swift` | `ForkBootstrap.install(ghostty:)` |
+| `macos/Sources/App/macOS/AppDelegate.swift` | `ForkBootstrap.install(ghostty:)` — in `applicationWillFinishLaunching` (near-frozen upstream; don't move it back into the churn-heavy `applicationDidFinishLaunching`) |
 | `macos/Sources/Features/Terminal/TerminalController.swift` | `if let c = ForkBootstrap.intercept(...) { return c }` |
 
 `fork-check.sh` enforces this. New behavior goes in `Fork/` via subclassing/overrides — never
@@ -234,15 +234,21 @@ jj git push --bookmark fork --remote origin   # never push to upstream
 ```
 
 **Post-rebase smoke pass** (fork-check + a green build can still hide quiet behavior breaks —
-these four exercise the upstream contracts the fork leans on hardest):
+these six exercise the upstream contracts the fork leans on hardest):
 1. Switch tabs in the sidebar, then ⌘Z — must NOT swap the previous tab's tree in (undo
    retargeting contract).
 2. Background a pane until it settles, click the notification banner — must focus that tab
    (UN-delegate proxy contract).
 3. Open a new window — sidebar on the left, terminal shifted, no overlap (contentView
-   layout-surgery contract).
+   layout-surgery contract; also guards the Liquid-Glass-subview skip).
 4. Run an `overlay`-mode hover command — panel opens, command runs, panel closes on exit
    (QuickTerminal animateIn / wait-after-command contract).
+5. ⌘W on one pane of a multi-pane tab → per-pane Detach/Kill sheet; ⌘W on the last pane →
+   tab-level sheet (close-routing contract — upstream is actively refactoring its close
+   path, and a reroute leaves ⌘W closing the window with no sheet).
+6. Run a long command (or a CC turn) → rail goes working → settles → banner fires → dock
+   badge counts it (progressReport / `progress-style` gate / UN / badge contracts in one
+   pass — all of these break silently).
 
 ## Backlog
 

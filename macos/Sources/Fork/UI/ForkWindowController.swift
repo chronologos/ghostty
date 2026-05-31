@@ -160,8 +160,7 @@ final class ForkWindowController: TerminalController {
         // (`:656-669`) would route this to `closeWindow(nil)`; we route to the sidebar tab.
         if surfaceTree.root == node, let tab = registry.activeTab,
            let host = registry.host(id: tab.hostID) {
-            let live = liveTabs[tab.id]?.compactMap { registry.refs[$0.id] } ?? []
-            let refs = Array(Set(live.isEmpty ? tab.tree.leafRefs : live))
+            let refs = killableRefs(for: tab)
             confirmDetachOrKill(
                 messageText: "Close tab '\(tab.title)'?",
                 informativeText: refs.isEmpty
@@ -721,10 +720,20 @@ final class ForkWindowController: TerminalController {
         }
     }
 
+    /// Refs a Kill on this tab would actually kill, deduped. Live tree first — and for the
+    /// *active* tab that's `surfaceTree`, not `liveTabs`, which lags it by the 80ms
+    /// `persistActive` debounce (a per-pane Detach followed by ⌘W within that window would
+    /// otherwise list — and kill — the session the user just chose to keep). Falls back to
+    /// persisted leafRefs for never-hydrated tabs.
+    private func killableRefs(for tab: TabModel) -> [SessionRef] {
+        let tree = tab.id == registry.activeTabID ? surfaceTree : liveTabs[tab.id]
+        let live = tree.map { Array($0).compactMap { registry.refs[$0.id] } } ?? []
+        return Array(Set(live.isEmpty ? tab.tree.leafRefs : live))
+    }
+
     func confirmKill(_ tab: TabModel) {
         guard let window, let host = registry.host(id: tab.hostID) else { return }
-        let live = liveTabs[tab.id]?.compactMap { registry.refs[$0.id] } ?? []
-        let refs = Array(Set(live.isEmpty ? tab.tree.leafRefs : live))
+        let refs = killableRefs(for: tab)
         guard !refs.isEmpty else { closeForkTab(tab.id); return }
         let alert = NSAlert()
         alert.messageText = "Kill \(refs.count) zmx session\(refs.count == 1 ? "" : "s")?"
@@ -1048,7 +1057,12 @@ final class ForkWindowController: TerminalController {
         // Pin to a constant offset, NOT `sidebar.trailingAnchor`, so SwiftUI re-renders
         // inside the sidebar's NSHostingView can't cascade into terminal autolayout
         // and re-set surface frames mid-SIGWINCH.
-        if let hosting = terminalContent.subviews.first(where: { $0 !== sidebar }) {
+        // Skip the Liquid Glass background view explicitly: today it's created lazily
+        // (after this runs), so "first non-sidebar subview" happens to be the hosting
+        // view — but the moment upstream makes glass creation synchronous, this would
+        // re-pin the *glass* and leave the terminal full-width under the sidebar.
+        let glass = (terminalContent as? TerminalViewContainer)?.glassEffectView
+        if let hosting = terminalContent.subviews.first(where: { $0 !== sidebar && $0 !== glass }) {
             terminalContent.constraints
                 .filter { ($0.firstItem === hosting && $0.firstAttribute == .leading)
                        || ($0.secondItem === hosting && $0.secondAttribute == .leading) }
