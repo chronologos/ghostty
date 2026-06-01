@@ -86,7 +86,8 @@ Fork/
     SessionRegistry.swift      @MainActor singleton; @Published hosts/tabs/activeTabID/
                                focusedPaneIndex/renaming/recentTags/panes/ccLive (refs is a
                                plain var); focusTabs/hostTabs (the ⌘1-9 contract), rollup,
-                               applyProbeResult (mergeCC body), uniqueAutoName
+                               applyProbeResult (mergeCC body), uniqueAutoName, tab visit
+                               history (setActive records; historyStep walks — mouse ⏴/⏵)
     Persistence.swift          fork.json (atomic write + .bak + preserve-aside + revalidate-on-load)
   Zmx/
     ShellQuote.swift           shq() — POSIX single-quote; stripControl()
@@ -99,7 +100,9 @@ Fork/
                                session's control UDS)
   UI/
     ForkWindowController.swift the controller; tab switching = swap surfaceTree; sheet
-                               presentation; ⌘W Detach/Kill routing; kill verification
+                               presentation; ⌘W Detach/Kill routing; kill verification;
+                               sidebar width = drag the right edge (248pt floor, persisted
+                               via UserDefaults ForkSidebarWidth; ⌘⇧B hide/show restores it)
     SidebarView.swift          host sections (drag-reorder); per-pane rows show paneLabel ›
                                surface.title › ref.name; optional tab-title heading + collapse
                                chevron; ⌘I/⌘⇧I → inline rename; tag pills; single density (no
@@ -107,26 +110,36 @@ Fork/
                                lines, read text (exit-stamped ccSeenDetail) demotes to one
                                tertiary line; solo ⌥-hold ≥0.5s reveals all, ⌥⌥ marks all
                                read; recency = afterglow wash (<15m) + doze opacity (>1h /
-                               past focus cutoff; never on unread/blocked rows) + hover-peek
-                               age line; focus mode wraps each tab
+                               past focus cutoff; never on unread/blocked rows) + the peek
+                               ledger's age line; resting the cursor on a row ≥ Theme.peekDelay
+                               exhales it open into the PanePeek ledger (state+age / DIR / ZMX
+                               lines + un-clamped status text — replaced the row tooltip);
+                               focus mode wraps each tab
                                in a ForkCard with a ⌘N + HostDot + host-label caption row
     OptionGesture.swift        OptionGestureRecognizer — the ⌥-hold / ⌥⌥ recognizer
                                (extracted ViewModifier; SidebarView binds revealAll/onSweep)
-    Theme.swift                semantic style tokens (clay/blocked/error/hover/…), Pebble,
-                               HandCut, ForkCard
+    Theme.swift                semantic style tokens (clay/blocked/error/hover/…), peek
+                               tokens (peekRule/peekDelay/exhale/settle), Pebble, HandCut,
+                               ForkCard
     TagEditView.swift          tag popover (text + 8 hue swatches); opened from the pane
                                context menu's Tag submenu ("New Tag…")
     NewSessionView.swift       full new-session form (sidebar ＋ button): host picker ·
                                name/cwd/cmd fields · recents list
     SplitPickerView.swift      compact picker (name or attach-existing): ⌘T, ⌘D split, and
-                               host context-menu "New Session on …"
+                               host context-menu "New Session on …". ⏎ = create/attach;
+                               ⌘⏎ = smart-jump create (shell starts at the zsh-z frecency
+                               match for the typed name, resolved on the session's host)
     SessionMetaLabel.swift     shared row trailer: CC sparkle (busy/blocked/idle) +
                                in-sidebar glyph + client-count + creation age
     HostsView.swift            master-detail Hosts sheet (list + add-host form)
     HostDetailView.swift       detail pane: rename, N×N SlotPicker (10-hue palette,
                                bicolor HostDot), sessions, remove
-    ForkPaletteView.swift      ForkPanePalette (⌘K) + ScrollbackSearchView (⌘⇧K,
-                               history fetched once per sheet then matched client-side)
+    ForkPaletteView.swift      ForkPanePalette (⌘K, rendered by the fork-owned
+                               ForkPaletteCard — fills a window-scaled panel; upstream's
+                               CommandPaletteView caps at 500×~250 so it's not used; match
+                               highlighting still reuses upstream String.matchedIndices) +
+                               ScrollbackSearchView (⌘⇧K, history fetched once per sheet
+                               then matched client-side)
     CheatsheetView.swift       hold-⌘ shortcut overlay (600ms debounce; flagsChanged monitor)
     ForkSheetPanel.swift       NSWindow.performKeyEquivalent → ⌘V/C/X/A/Z/⇧Z to
                                firstResponder; reused as the borderless ⌘K palette window
@@ -184,9 +197,9 @@ opens the full form (`NewSessionView` — host picker + cwd/command fields).
 `SessionRef.name` are validated against `\A[A-Za-z0-9._-]+\z` (`\A…\z`, not `^…$` — ICU `$`
 matches before a trailing newline); `shq` single-quotes argv. For ssh, the remote command is
 double-quoted (`shq(shq(argv))`) and both ssh argv builders pass `--` before the destination.
-The only other shell-string builders are `ZmxAdapter.detachedScript`/`restoreCmd` and
-`CCProbe.renameScript` — all of which `shq`/`stripControl` every dynamic token. Don't build
-shell strings anywhere else. (`ForkBootstrap.loginShellOutput` does run the user's login
+The only other shell-string builders are `ZmxAdapter.detachedScript`/`restoreCmd`/
+`smartJumpCmd` and `CCProbe.renameScript` — all of which charset-validate and/or
+`shq`/`stripControl` every dynamic token. Don't build shell strings anywhere else. (`ForkBootstrap.loginShellOutput` does run the user's login
 shell at launch, but only with compile-time-literal commands — never pass it anything
 derived from session, host, or remote data.)
 
@@ -330,8 +343,25 @@ A terminal that runs arbitrary shells will trip every macOS privacy surface. Thr
 - Command field in NewSessionView splits naively on spaces.
 - ⌘⇧[/⌘⇧] tab nav matches `{`/`[` and `}`/`]` via `charactersIgnoringModifiers`.
   Digit shortcuts (⌘1-9, ⌘⌥1-9) are layout-independent via `keyCode`.
+  All list-relative nav (⌘1-9, ⌘⇧[/⌘⇧], last_tab, move_tab) goes through one
+  `visibleTabs()` accessor matching what the sidebar renders (focus mode + tag
+  filter applied) — never add a nav path that reads `registry.tabs(on:)` raw.
+  move_tab no-ops in focus mode (derived order, nothing to move).
   ⌘[/⌘] left to upstream's `goto_split`. ⌘W → per-pane/tab Detach/Kill sheet
-  (second ⌘W or K = Kill, Esc = Cancel). ⌘⇧B toggles the sidebar.
+  (second ⌘W or K = Kill, Esc = Cancel). ⌘⇧B toggles the sidebar; dragging the
+  sidebar's right edge resizes it (248pt floor, capped at min(560, half the window),
+  persisted).
+  Mouse back/forward walks the tab visit history, window-wide. Two delivery paths,
+  both handled: swipe gestures (deltaX ±1 — what SteerMouse / Logi Options+ / trackpad
+  page-swipes emit; the Safari convention) and raw buttons 3/4 (drivers that pass thumb
+  buttons through untranslated). Trade-off: the pty never sees either form (xterm SGR
+  buttons 8/9), so a TUI that binds them loses; nothing common does. Also in the ⌘K
+  palette as Back/Forward (shown only when a step would actually land somewhere).
+  Swallowed-but-inert while a sheet or the ⌘W alert is up.
+  ⌘⏎ in the session picker = smart-jump create — needs the zsh-z plugin (`zshz`) in
+  the target host's .zshrc. No zshz → starts in the default dir; no zsh at all → the
+  sh wrapper degrades to `${SHELL:-sh} -l`. Disabled when the typed name already
+  exists (zmx attach would reuse that session and discard the jump).
   ⌘⌥A/⌘⌥P (watch / pin) match physical `kVK_ANSI_A`/`_P` (keyCode 0/35);
   AZERTY gets ⌘⌥A on ⌘⌥Q. ⌘⇧R (repaint) is keyCode 15.
   ⌘K/⌘⇧K shadow upstream's `clear_screen`; rebind via

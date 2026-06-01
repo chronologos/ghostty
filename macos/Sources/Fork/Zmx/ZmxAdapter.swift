@@ -69,6 +69,29 @@ enum ZmxAdapter {
         }
     }
 
+    /// "Smart jump" initial command (⌘⏎ in the session picker): start the new session's
+    /// shell in the directory the user's zsh-z frecency database considers the best match
+    /// for `name`. The jump runs *inside* the session, on the session's host — remote
+    /// sessions resolve against the remote host's z database, and there's no pre-creation
+    /// resolution round-trip. No match / plugin absent → the cd silently doesn't happen
+    /// and the shell starts in its default directory.
+    ///
+    /// Shell-string builder rules (CLAUDE.md §Security): `name` must pass the managed
+    /// charset (refuse to build otherwise) AND is `shq`'d — both layers, same as every
+    /// other dynamic token that meets a shell.
+    static func smartJumpCmd(name: String) -> [String]? {
+        guard isValidIdent(name) else { return nil }
+        // `zshz` is a zsh *function* (plugin), not a binary — only an interactive zsh that
+        // sourced the user's .zshrc has it. The inner wrapper cd's via the function, then
+        // execs a clean login shell that inherits the cwd.
+        let jump = "zshz -- \(shq(name)) 2>/dev/null; exec zsh -l"
+        // Outer `sh` guard: a host without zsh must degrade to a normal session in the
+        // default directory (the documented fallback), not a dead pane from a failed exec.
+        // `shq(jump)` nests the already-quoted name correctly (POSIX close-escape-reopen).
+        return ["sh", "-c",
+                "command -v zsh >/dev/null 2>&1 && exec zsh -ilc \(shq(jump)); exec \"${SHELL:-sh}\" -l"]
+    }
+
     /// SurfaceConfiguration whose pty child is `zmx attach <wireName> [cmd...]`, wrapped by transport.
     static func surfaceConfig(
         host: ForkHost,

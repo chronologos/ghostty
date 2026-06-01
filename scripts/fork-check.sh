@@ -26,8 +26,8 @@ struct SurfaceConfiguration	macos/Sources/Ghostty/Surface View/SurfaceView.swift
 var command: String\?	macos/Sources/Ghostty/Surface View/SurfaceView.swift
 var workingDirectory: String\?	macos/Sources/Ghostty/Surface View/SurfaceView.swift
 ghosttyCloseSurface	macos/Sources/Ghostty
-struct CommandPaletteView	macos/Sources/Features/Command Palette
 struct CommandOption	macos/Sources/Features/Command Palette
+func matchedIndices\(for	macos/Sources/Features/Command Palette
 var titleOverride: String\?	macos/Sources/Features/Terminal/BaseTerminalController.swift
 func closeTabImmediately\(	macos/Sources/Features/Terminal/TerminalController.swift
 func closeWindowImmediately\(	macos/Sources/Features/Terminal/TerminalController.swift

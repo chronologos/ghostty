@@ -37,6 +37,110 @@ struct RegistryMoveTests {
         #expect(paneCount(dst) == 2)
     }
 
+    // MARK: - Tab visit history (mouse back/forward)
+
+    /// Mirrors `ForkWindowController.navigateTabHistory`: step the cursor, then activate
+    /// the target — registry tests must model both halves or `historyScan`'s active-tab
+    /// skip makes pure-step sequences look broken.
+    private func nav(_ r: SessionRegistry, _ delta: Int) -> TabModel.ID? {
+        guard let t = r.historyStep(delta) else { return nil }
+        r.setActive(tab: t)
+        return t
+    }
+
+    @Test func history_backForwardWalksVisits() {
+        let r = reset()
+        let a = makeTab(r, names: ["a"]), b = makeTab(r, names: ["b"]), c = makeTab(r, names: ["c"])
+        r.setActive(tab: a); r.setActive(tab: b); r.setActive(tab: c)
+        #expect(nav(r, -1) == b)
+        #expect(nav(r, -1) == a)
+        #expect(nav(r, -1) == nil)                 // start of history — cursor stays
+        #expect(nav(r, 1) == b)
+        #expect(nav(r, 1) == c)
+        #expect(nav(r, 1) == nil)                  // end of history
+    }
+
+    @Test func history_navigationDoesNotRerecord() {
+        let r = reset()
+        let a = makeTab(r, names: ["a"]), b = makeTab(r, names: ["b"])
+        r.setActive(tab: a); r.setActive(tab: b)
+        // Going back (step + re-activate) must not truncate the forward stack.
+        #expect(nav(r, -1) == a)
+        #expect(r.tabHistory == [a, b])
+        #expect(nav(r, 1) == b)
+    }
+
+    @Test func history_freshVisitTruncatesForward() {
+        let r = reset()
+        let a = makeTab(r, names: ["a"]), b = makeTab(r, names: ["b"]), c = makeTab(r, names: ["c"])
+        r.setActive(tab: a); r.setActive(tab: b)
+        _ = nav(r, -1)                             // back to a
+        r.setActive(tab: c)                        // fresh visit from mid-history
+        #expect(r.tabHistory == [a, c])            // b's forward entry truncated (browser semantics)
+        #expect(nav(r, 1) == nil)
+        #expect(nav(r, -1) == a)
+    }
+
+    @Test func history_skipsClosedTabs() {
+        let r = reset()
+        let a = makeTab(r, names: ["a"]), b = makeTab(r, names: ["b"]), c = makeTab(r, names: ["c"])
+        r.setActive(tab: a); r.setActive(tab: b); r.setActive(tab: c)
+        r.removeTab(b)
+        #expect(nav(r, -1) == a)                   // dead entry skipped going back…
+        #expect(nav(r, 1) == c)                    // …and skipped going forward
+    }
+
+    @Test func history_reclickActiveTabIsNoOpAndCapHolds() {
+        let r = reset()
+        let a = makeTab(r, names: ["a"]), b = makeTab(r, names: ["b"])
+        r.setActive(tab: a); r.setActive(tab: b); r.setActive(tab: b)
+        #expect(r.tabHistory == [a, b])            // re-click doesn't duplicate
+        // Cap: the walk is bounded at 64 visits.
+        for i in 0..<70 {
+            let t = makeTab(r, names: ["t\(i)"])
+            r.setActive(tab: t)
+        }
+        #expect(r.tabHistory.count == 64)
+    }
+
+    @Test func history_clickingForwardEntryAdvancesInsteadOfTruncating() {
+        let r = reset()
+        let a = makeTab(r, names: ["a"]), b = makeTab(r, names: ["b"]), c = makeTab(r, names: ["c"])
+        r.setActive(tab: a); r.setActive(tab: b); r.setActive(tab: c)
+        _ = nav(r, -1); _ = nav(r, -1)             // walk back to a
+        // Clicking b in the sidebar (== the next forward entry) advances the cursor — it's
+        // the same timeline, so c's forward entry must survive, not be truncated.
+        r.setActive(tab: b)
+        #expect(r.tabHistory == [a, b, c])
+        #expect(nav(r, 1) == c)
+    }
+
+    @Test func history_tabCloseAutoActivationPreservesForwardStack() {
+        let r = reset()
+        let a = makeTab(r, names: ["a"]), b = makeTab(r, names: ["b"]), c = makeTab(r, names: ["c"])
+        r.setActive(tab: a); r.setActive(tab: b); r.setActive(tab: c)
+        _ = nav(r, -1); _ = nav(r, -1)             // back to a
+        // Close the active tab; the controller auto-activates a sibling (here b — the next
+        // forward entry). The user's remaining forward walk must survive the close.
+        r.removeTab(a)
+        r.setActive(tab: b)
+        #expect(nav(r, 1) == c)
+    }
+
+    @Test func history_noStepOfferedWhenOnlyDeadOrActiveEntriesRemain() {
+        let r = reset()
+        let a = makeTab(r, names: ["a"]), b = makeTab(r, names: ["b"])
+        r.setActive(tab: a); r.setActive(tab: b)
+        _ = nav(r, -1)                             // back to a; history [a, b]
+        r.removeTab(b)
+        // Forward: b is dead. Back: nothing before a. Both must report unavailable — the
+        // ⌘K palette reads canHistoryStep to decide whether to offer the entries at all.
+        #expect(r.canHistoryStep(1) == false)
+        #expect(r.canHistoryStep(-1) == false)
+        #expect(r.historyStep(1) == nil)
+        #expect(r.historyStep(-1) == nil)
+    }
+
     @Test func movePane_migratesState() {
         let r = reset()
         let src = makeTab(r, names: ["a", "b"])
