@@ -72,6 +72,20 @@ enum Theme {
 
     // MARK: Swatch selection ring
     static let ringWidth: CGFloat = 1.5
+
+    // MARK: Hover peek — the in-row expansion that replaced the pane-row tooltip.
+    /// Clay hairline that draws across the top of the peek ledger — the expansion's one
+    /// brand moment; everything else in the ledger stays grayscale.
+    static let peekRule = clay.opacity(0.35)
+    /// The cursor must *rest* on a row this long before it exhales open — casual passes
+    /// and scroll-throughs (rows changing under a still cursor) never trigger it.
+    static let peekDelay: TimeInterval = 0.35
+    /// Row growth when the peek opens — a soft spring with a hint of overshoot, so the
+    /// row reads as exhaling rather than snapping.
+    static let exhale = Animation.spring(response: 0.32, dampingFraction: 0.78)
+    /// Peek close — strictly decaying (no bounce): a row getting out of the way should
+    /// never draw the eye on the way out.
+    static let settle = Animation.easeOut(duration: 0.18)
 }
 
 /// Organic almost-circle — two low-amplitude sine harmonics perturb the radius so each seed

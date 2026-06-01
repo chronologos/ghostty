@@ -309,7 +309,68 @@ final class SessionRegistry: ObservableObject {
         tabs.move(fromOffsets: [from], toOffset: to > from ? to + 1 : to)
     }
 
-    func setActive(tab id: TabModel.ID) { activeTabID = id }
+    func setActive(tab id: TabModel.ID) {
+        activeTabID = id
+        // Record the visit (browser semantics, two refinements):
+        // 1. Skip when the cursor already points at `id` — that's how `historyStep`
+        //    navigations come back through here without truncating their own forward
+        //    stack, and how a re-click on the already-active tab stays a no-op.
+        if tabHistory.indices.contains(tabHistoryCursor), tabHistory[tabHistoryCursor] == id { return }
+        // 2. Visiting the tab that is already the *next forward entry* = stepping forward
+        //    (a sidebar click on it, or a tab-close auto-activation landing there): advance
+        //    the cursor instead of truncating — the forward timeline is unchanged, so
+        //    destroying it would lose history the user can still legitimately walk.
+        if tabHistory.indices.contains(tabHistoryCursor + 1), tabHistory[tabHistoryCursor + 1] == id {
+            tabHistoryCursor += 1
+            return
+        }
+        // Fresh visit: truncate the forward entries, append.
+        tabHistory.removeSubrange((tabHistoryCursor + 1)..<tabHistory.count)
+        tabHistory.append(id)
+        // Bound the walk — 64 visits of history outlasts any back-button mash, and the
+        // array holds only UUIDs.
+        if tabHistory.count > 64 { tabHistory.removeFirst(tabHistory.count - 64) }
+        tabHistoryCursor = tabHistory.count - 1
+    }
+
+    // MARK: Tab visit history (mouse back/forward)
+
+    /// Visit history for back/forward navigation: `setActive` appends, `historyStep` moves
+    /// the cursor without re-recording, and a fresh visit while the cursor is mid-history
+    /// truncates the forward entries — i.e. browser semantics. Ephemeral by design: tab IDs
+    /// persist across relaunch, but replaying last week's click trail as "history" would be
+    /// noise, the same policy as `lastTouched`.
+    private(set) var tabHistory: [TabModel.ID] = []
+    private(set) var tabHistoryCursor = -1
+
+    /// First walkable index in `delta`'s direction: skips tabs that have since been closed
+    /// (not pruned — pruning would need cursor arithmetic in `removeTab`; skipping is
+    /// equivalent and local) AND the currently active tab ("navigating" to where you
+    /// already are would be a silent no-op that burns the rest of the walk — the
+    /// [A, closed-B, A] pattern a tab close leaves behind).
+    private func historyScan(_ delta: Int) -> Int? {
+        var i = tabHistoryCursor + delta
+        while tabHistory.indices.contains(i) {
+            if tabHistory[i] != activeTabID, tabs.contains(where: { $0.id == tabHistory[i] }) {
+                return i
+            }
+            i += delta
+        }
+        return nil
+    }
+
+    /// Whether a back (-1) / forward (+1) step has somewhere real to go. The ⌘K palette
+    /// uses this to decide whether to offer the entries — raw cursor-bounds checks would
+    /// offer steps that land nowhere (dead or already-active entries).
+    func canHistoryStep(_ delta: Int) -> Bool { historyScan(delta) != nil }
+
+    /// Move the visit cursor by `delta` (-1 = back, +1 = forward) and return the tab to
+    /// activate. nil = nothing real in that direction; the cursor doesn't move.
+    func historyStep(_ delta: Int) -> TabModel.ID? {
+        guard let i = historyScan(delta) else { return nil }
+        tabHistoryCursor = i
+        return tabHistory[i]
+    }
 
     func setCollapsed(_ id: TabModel.ID, _ v: Bool) {
         guard let i = tabs.firstIndex(where: { $0.id == id }), tabs[i].collapsed != v else { return }
@@ -643,6 +704,8 @@ final class SessionRegistry: ObservableObject {
         hostUnreachableSince = [:]
         refs = [:]
         lastTouched = nil
+        tabHistory = []
+        tabHistoryCursor = -1
     }
 
     /// `autoName()` retried until disjoint from live refs and dormant persisted-tree leaves.
