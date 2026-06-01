@@ -475,7 +475,7 @@ struct SidebarView: View {
         // tick: glow decay, doze, and the peek age all derive from wall-clock age — without
         // a clock, a row nothing else re-renders (showCC off, no focus changes) would hold
         // a stale glow indefinitely.
-        return Hovering(tick: 60) { hovered in
+        return Hovering(tick: 60) { hovered, peek in
             HStack(spacing: 0) {
                 Group {
                     if let spine {
@@ -489,58 +489,88 @@ struct SidebarView: View {
                     }
                 }
                 .frame(width: 14)
+                // Content column: the original row line + (when peeked) the ledger below it.
+                // Nested inside the spine's HStack so the tree line stretches over the
+                // expanded height — the spine must not gap when a row exhales open — while
+                // the eye/tag pill keep centering on the title block only.
                 VStack(alignment: .leading, spacing: 0) {
-                    if renaming {
-                        renameField(seed: userLabel ?? ref.name, font: mono(13))
-                    } else if let surface {
-                        PaneLabel(surface: surface, userLabel: userLabel, fallback: ref.name,
-                                  active: active, suppressSubtitle: showCC, fontFamily: fontFamily)
-                    } else {
-                        Text(userLabel ?? ref.name).font(mono(13)).lineLimit(1)
-                            .foregroundStyle(active ? .primary : .secondary)
-                    }
-                    if showCC {
-                        // Replaces PaneLabel's zmx-name subtitle (suppressed via `showCC`
-                        // above). Min-height (not fixed) slot: empty `ccLine`s still reserve
-                        // a line so focus-mode reorder doesn't gap rows, but a row with
-                        // unread CC status text may grow to 3 subtitle lines (4 total — the
-                        // wrap cap lives in `ccLine`).
-                        // `cached` only for placeholder rows (no surface yet) — on a hydrated
-                        // pane where CC has exited it'd show the dead session's name as stale.
-                        ccLine(live: live,
-                               cached: surface == nil ? tab.ccNames[ref.key] : nil,
-                               fallback: ref.name,
-                               attention: blockedDetail,
-                               read: read)
-                            .frame(minHeight: 13, alignment: .topLeading)
-                    }
-                }
-                Spacer()
-                if registry.panes[ref]?.watched == true {
-                    Image(systemName: "eye")
-                        .font(.system(size: 11)).foregroundStyle(.secondary)
-                        .padding(.trailing, 4)
-                        .help("Watching — ⌘⌥A to disarm")
-                }
-                if let tag {
-                    let c = Theme.tag(tag.hue)
-                    let pebble = Pebble(tagHue: tag.hue)
-                    HStack(spacing: 4) {
-                        pebble.strokeBorder(c, lineWidth: 1.5)
-                            .background(pebble.fill(hovered ? c : .clear))
-                            .frame(width: 8, height: 8)
-                        if hovered {
-                            Text(tag.text).font(mono(9, .medium))
-                                .foregroundStyle(c).fixedSize()
-                                .transition(.opacity.combined(with: .move(edge: .leading)))
+                    HStack(spacing: 0) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            if renaming {
+                                renameField(seed: userLabel ?? ref.name, font: mono(13))
+                            } else if let surface {
+                                PaneLabel(surface: surface, userLabel: userLabel, fallback: ref.name,
+                                          active: active, suppressSubtitle: showCC, fontFamily: fontFamily)
+                            } else {
+                                Text(userLabel ?? ref.name).font(mono(13)).lineLimit(1)
+                                    .foregroundStyle(active ? .primary : .secondary)
+                            }
+                            if showCC {
+                                // Replaces PaneLabel's zmx-name subtitle (suppressed via `showCC`
+                                // above). Min-height (not fixed) slot: empty `ccLine`s still reserve
+                                // a line so focus-mode reorder doesn't gap rows, but a row with
+                                // unread CC status text may grow to 3 subtitle lines (4 total — the
+                                // wrap cap lives in `ccLine`).
+                                // `cached` only for placeholder rows (no surface yet) — on a hydrated
+                                // pane where CC has exited it'd show the dead session's name as stale.
+                                ccLine(live: live,
+                                       cached: surface == nil ? tab.ccNames[ref.key] : nil,
+                                       fallback: ref.name,
+                                       attention: blockedDetail,
+                                       read: read,
+                                       unclamped: peek)
+                                    .frame(minHeight: 13, alignment: .topLeading)
+                            }
+                        }
+                        Spacer()
+                        if registry.panes[ref]?.watched == true {
+                            Image(systemName: "eye")
+                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                                .padding(.trailing, 4)
+                                .help("Watching — ⌘⌥A to disarm")
+                        }
+                        if let tag {
+                            let c = Theme.tag(tag.hue)
+                            let pebble = Pebble(tagHue: tag.hue)
+                            HStack(spacing: 4) {
+                                pebble.strokeBorder(c, lineWidth: 1.5)
+                                    .background(pebble.fill(hovered ? c : .clear))
+                                    .frame(width: 8, height: 8)
+                                if hovered {
+                                    Text(tag.text).font(mono(9, .medium))
+                                        .foregroundStyle(c).fixedSize()
+                                        .transition(.opacity.combined(with: .move(edge: .leading)))
+                                }
+                            }
+                            .padding(.horizontal, hovered ? 5 : 0).padding(.vertical, hovered ? 2 : 0)
+                            .background(hovered ? c.opacity(0.12) : .clear, in: Capsule())
+                            .rotationEffect(.degrees(hovered ? -2.5 : 0)) // sticker tilt
+                            .animation(.snappy(duration: 0.15), value: hovered)
+                            .help(tag.text)
+                            .padding(.trailing, 6)
                         }
                     }
-                    .padding(.horizontal, hovered ? 5 : 0).padding(.vertical, hovered ? 2 : 0)
-                    .background(hovered ? c.opacity(0.12) : .clear, in: Capsule())
-                    .rotationEffect(.degrees(hovered ? -2.5 : 0)) // sticker tilt
-                    .animation(.snappy(duration: 0.15), value: hovered)
-                    .help(tag.text)
-                    .padding(.trailing, 6)
+                    // Peek ledger — suppressed while renaming (growth under a focused text
+                    // field just shoves it around mid-edit).
+                    if peek, !renaming {
+                        let ages = [
+                            ccStamp().map { "CC turned \($0.shortAge) ago" },
+                            (focused ? nil : tab.lastActive[ref.key]).map { "you were here \($0.shortAge) ago" },
+                        ].compactMap { $0 }
+                        PanePeek(state: dot, accent: accent,
+                                 cwd: live?.cwd,
+                                 // Wire name, not ref.name: managed sessions attach as
+                                 // "{hostID}-{name}" — showing the bare name as the ZMX
+                                 // identity invites a `zmx attach` that silently creates
+                                 // a fresh empty session instead.
+                                 session: ZmxAdapter.wireName(ref),
+                                 host: registry.host(id: tab.hostID)?.label ?? "—",
+                                 age: ages.isEmpty ? nil : ages.joined(separator: " · "),
+                                 ccName: live?.name,
+                                 rawStatus: live?.status,
+                                 fontFamily: fontFamily)
+                            .transition(.opacity)
+                    }
                 }
             }
             // Long-tail recency: untouched-for-an-hour rests, past the focus cutoff sleeps.
@@ -564,24 +594,21 @@ struct SidebarView: View {
             // swapping it for a weaker gray wash.
             .background(Theme.afterglow(tab.lastActive[ref.key]),
                         in: RoundedRectangle(cornerRadius: 5))
-            .overlay(alignment: .trailing) {
-                // Anchored to the row (not the content flow) so it reads as a right border,
-                // not a pill competing with the tag circle for the same slot.
+            // Anchored to the row (not the content flow) so it reads as a right border,
+            // not a pill competing with the tag circle for the same slot. `.topTrailing`
+            // (top-pad 4 + rail height 20 = optically centered in the standard 28pt row)
+            // so the rail stays beside the title line when the peek ledger grows the row —
+            // a state pill floating mid-ledger would read as a bullet point.
+            .overlay(alignment: .topTrailing) {
                 StatusRail(state: dot, accent: accent, blockedDetail: blockedDetail)
+                    .padding(.top, 4)
             }
             .contentShape(Rectangle())
-            // Hover peek — the untruncated version of everything the one-line subtitle
-            // elides (state, the full detail/question, cwd) as a multi-line tooltip on the
-            // whole row. A tooltip rather than a popover/ⓘ button: no extra chrome, can't
-            // steal key status from the terminal, and can't fight the row's hover tracking.
-            // Child `.help`s (rail, tag pill) still win over their own rects.
-            .help([
-                live.map { [$0.name, dot?.help ?? $0.status].compactMap { $0 }.joined(separator: " — ") },
-                live.flatMap { dot == .blocked ? $0.attention : $0.detail },
-                live?.cwd,
-                ccStamp().map { "CC turned \($0.shortAge) ago" }
-                    ?? (focused ? nil : tab.lastActive[ref.key]).map { "you were here \($0.shortAge) ago" },
-            ].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n"))
+            // Hover peek — formerly a multi-line `.help` tooltip here, now the in-row
+            // PanePeek ledger (rest the cursor `Theme.peekDelay` to open). Everything the
+            // one-line subtitle elides — state, the full detail/question, cwd, identity,
+            // age — lives there instead. Child `.help`s (rail, tag pill) still win over
+            // their own rects.
         }
         .onTapGesture { controller?.activate(tab: tab.id, paneIndex: index) }
         .simultaneousGesture(TapGesture(count: 2).onEnded {
@@ -602,6 +629,12 @@ struct SidebarView: View {
                 taggingPane = nil
             }
         }
+        // Identity guard: the enclosing ForEach is offset-keyed (deliberate — see tabRow's
+        // index-match comment), so without this a removed sibling shifts a *different* pane
+        // into this slot and it inherits Hovering's @State (hazard class #2 — the peek
+        // ledger turns that leak into a fully expanded wrong row, not just a faint wash).
+        // Compound offset+ref key stays unique under PR26 duplicate-ref attach.
+        .id("\(index)-\(ref.key)")
     }
 
     @ViewBuilder
@@ -650,7 +683,7 @@ struct SidebarView: View {
     /// `Text` (empty when no label) so the call-site `.frame(minHeight:)` actually reserves
     /// the slot; `EmptyView().frame(...)` is a layout no-op.
     private func ccLine(live: CCProbe.Info?, cached: String?, fallback: String,
-                        attention: String?, read: Bool) -> some View {
+                        attention: String?, read: Bool, unclamped: Bool) -> some View {
         // cwd basename is only useful when more specific than the pane's own name — an
         // unnamed CC at a shared repo root would read identically on every row.
         let cwdLeaf = live?.cwd
@@ -694,15 +727,21 @@ struct SidebarView: View {
             // rows as uniform as the old fixed-height slot did.
             // `!revealAll`: ⌥-hold lifts only this clamp — tertiary color and doze stay, so
             // the peek expands the text without re-skinning the sidebar.
-            .font(mono(11)).lineLimit(((read && !revealAll) || live == nil) && attention == nil ? 1 : 3)
+            // `unclamped` (row peek open): lifts the cap to 8 — enough for any real status
+            // text/question, but bounded so a pathological multi-paragraph probe string
+            // can't spring the row over the whole sidebar (the old floating tooltip had no
+            // layout impact; an in-row expansion does).
+            .font(mono(11))
+            .lineLimit(unclamped ? 8
+                       : ((read && !revealAll) || live == nil) && attention == nil ? 1 : 3)
             // vertical: true — claim the wrapped height even when the layout pass proposes
             // a tight one (otherwise the text can collapse back to one ellipsized line);
             // horizontal stays flexible so it still wraps to the sidebar width.
             .fixedSize(horizontal: false, vertical: true)
             .foregroundStyle(style)
-        // Truncation past the cap is recoverable via the row-level hover peek (paneRow's
-        // `.help`), which supersets this line — no per-Text tooltip here so the two can't
-        // disagree.
+        // Truncation past the cap is recoverable via the row-level hover peek (the PanePeek
+        // ledger, which also un-clamps this line) — no per-Text tooltip here so the two
+        // can't disagree.
     }
 
     // MARK: -
@@ -796,19 +835,155 @@ private struct OverlayScroller: NSViewRepresentable {
     func updateNSView(_: NSView, context: Context) {}
 }
 
-/// Row-local hover scope. Hover changes re-render `content(hovered)` only — not
+/// Row-local hover scope. Hover changes re-render `content(hovered, peek)` only — not
 /// the enclosing `SidebarView.body` — so scrolling past rows doesn't storm the
 /// `ScrollView` diff.
+/// `hovered` is the immediate edge (background wash, tag pill); `peek` arms only after the
+/// cursor has *rested* on the row for `Theme.peekDelay` and drives the row's expansion.
+/// The intent timer restarts on every hover edge, so mouse traversal and scrolling (rows
+/// sliding under a still cursor re-enter hover) never pop rows open in passing.
 /// `tick` also re-evaluates the content on a periodic clock — the row's chrome derives from
 /// wall-clock age (afterglow / doze / peek age) and would otherwise go stale when nothing
 /// else triggers a render.
 private struct Hovering<Content: View>: View {
     @State private var hovered = false
+    @State private var peek = false
+    @State private var intent: Task<Void, Never>?
+    /// AppKit ground truth for "is the mouse actually on this row right now" — rebound by
+    /// `MouseInside` once its NSView mounts. Defaults pessimistic-true (a fresh row whose
+    /// check hasn't bound yet shouldn't lose its first peek).
+    @State private var mouseInside: () -> Bool = { true }
     let tick: TimeInterval
-    @ViewBuilder let content: (Bool) -> Content
+    @ViewBuilder let content: (_ hovered: Bool, _ peek: Bool) -> Content
     var body: some View {
-        TimelineView(.periodic(from: .now, by: tick)) { _ in content(hovered) }
-            .onHover { hovered = $0 }
+        TimelineView(.periodic(from: .now, by: tick)) { _ in content(hovered, peek) }
+            .background(MouseInside { mouseInside = $0 })
+            .onHover { h in
+                hovered = h
+                intent?.cancel()
+                if h {
+                    intent = Task {
+                        try? await Task.sleep(for: .seconds(Theme.peekDelay))
+                        guard !Task.isCancelled else { return }
+                        // Re-check against AppKit before expanding: rows can slide under a
+                        // *stationary* cursor (scroll, focus-mode MRU reorder) and AppKit
+                        // doesn't reliably deliver `.onHover(false)` for view movement —
+                        // never exhale a row the mouse isn't on, and clear its stale wash.
+                        guard mouseInside() else { hovered = false; return }
+                        withAnimation(Theme.exhale) { peek = true }
+                    }
+                } else {
+                    withAnimation(Theme.settle) { peek = false }
+                }
+            }
+            // Rows can diff out mid-hover (tab closed, focus reorder, filter toggle) without
+            // `.onHover(false)` ever firing (hazard: stale hover state) — disarm the timer so
+            // it can't fire into a row that no longer exists.
+            .onDisappear { intent?.cancel() }
+    }
+}
+
+/// Invisible AppKit view that answers "is the mouse inside this row's bounds *right now*?"
+/// — the check `Hovering` runs before expanding. SwiftUI `.onHover` state can go stale when
+/// a row moves under a stationary cursor; `mouseLocationOutsideOfEventStream` can't.
+private struct MouseInside: NSViewRepresentable {
+    let bind: (@escaping () -> Bool) -> Void
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        DispatchQueue.main.async { [weak v] in
+            bind {
+                guard let v, let win = v.window else { return false }
+                return v.bounds.contains(v.convert(win.mouseLocationOutsideOfEventStream, from: nil))
+            }
+        }
+        return v
+    }
+    func updateNSView(_: NSView, context: Context) {}
+}
+
+/// The peek ledger — the in-row expansion that replaced the pane-row tooltip. In-row rather
+/// than a tooltip/popover: no floating chrome, can't steal key status from the terminal, and
+/// the reveal can be staged (rule draws itself, lines cascade in) instead of popping in a
+/// gray box. Content is the WHERE/WHEN half of the row's story — state + age, working dir,
+/// zmx identity; the WHAT (CC's status text / blocked question) is `ccLine` directly above,
+/// which un-clamps its line limit while the peek is open.
+private struct PanePeek: View {
+    let state: PaneState?
+    let accent: Color
+    let cwd: String?
+    /// zmx wire name — what `zmx attach <this>` takes on the host; the one identity that
+    /// never appears in the row once a user label or OSC title covers it.
+    let session: String
+    let host: String
+    let age: String?
+    /// CC session's self-reported name — the row tooltip used to lead with it; without it
+    /// two simultaneously blocked panes with user labels are indistinguishable.
+    let ccName: String?
+    /// Probe's raw status string — the state label when PaneMachine has no dot, so a CC
+    /// mid-operation (e.g. "compacting") doesn't read as IDLE.
+    let rawStatus: String?
+    let fontFamily: String?
+    /// Drives the staged reveal. Flipped once on mount: the peek view is re-inserted on
+    /// every open (so the cascade replays each time) but survives the enclosing row's
+    /// 60s tick re-renders (so it never replays in place).
+    @State private var revealed = false
+
+    private var stateLine: (label: String, tint: Color) {
+        switch state {
+        case .working: ("WORKING", accent)
+        case .blocked: ("NEEDS YOU", Theme.blocked)
+        case .waiting: ("UNREAD", accent)
+        case nil:      (((rawStatus?.isEmpty == false ? rawStatus! : "idle").uppercased(), .secondary))
+        }
+    }
+
+    var body: some View {
+        // WHO + WHEN share the state line: "fix-auth · CC turned 2m ago". Empty-but-non-nil
+        // fields (probe quirk, same as the cwd guard below) must not leave a dangling " · ".
+        let whoWhen = [ccName, age].compactMap { $0 }.filter { !$0.isEmpty }
+            .joined(separator: " · ")
+        VStack(alignment: .leading, spacing: 3) {
+            // The rule draws left→right in clay — the expansion's one signature beat.
+            Rectangle().fill(Theme.peekRule).frame(height: 1)
+                .scaleEffect(x: revealed ? 1 : 0.001, anchor: .leading)
+                .animation(.smooth(duration: 0.3).delay(0.02), value: revealed)
+                .padding(.bottom, 2)
+            line(0, label: stateLine.label, tint: stateLine.tint, value: whoWhen)
+            // Empty-but-non-nil cwd (probe quirk) must not render a dangling DIR label —
+            // the old tooltip's `.filter { !$0.isEmpty }` did this job.
+            if let cwd, !cwd.isEmpty {
+                line(1, label: "DIR", tint: .secondary, value: cwd)
+            }
+            line(cwd?.isEmpty == false ? 2 : 1, label: "ZMX", tint: .secondary,
+                 value: "\(session) @ \(host)")
+        }
+        .padding(.top, 5).padding(.bottom, 6)
+        .onAppear { revealed = true }
+    }
+
+    /// One label/value ledger line. Labels are small caps (same typographic role as the CC
+    /// session name in `ccLine` — identity-ish, not content); values stay secondary so the
+    /// ledger never competes with the unread status text above it.
+    private func line(_ i: Int, label: String, tint: Color, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(label)
+                .font(forkMono(8.5, .semibold, fontFamily)).kerning(0.8)
+                .foregroundStyle(tint)
+                // lineLimit, not wrap: a wide window-title-font face can push "NEEDS YOU"
+                // (or a raw probe status) past the column — truncate, never two-line.
+                .lineLimit(1)
+                .frame(width: 58, alignment: .leading)
+            Text(value)
+                .font(forkMono(10, .regular, fontFamily))
+                .foregroundStyle(.secondary)
+                .lineLimit(1).truncationMode(.middle)
+        }
+        // Cascade: each line fades in and settles down 4pt, 45ms apart — one orchestrated
+        // reveal rather than a block pop. Exit has no per-line animation (the whole peek
+        // fades as one under `Theme.settle`).
+        .opacity(revealed ? 1 : 0)
+        .offset(y: revealed ? 0 : -4)
+        .animation(.smooth(duration: 0.25).delay(0.07 + Double(i) * 0.045), value: revealed)
     }
 }
 
@@ -886,10 +1061,15 @@ private struct Spine: Shape {
     func path(in r: CGRect) -> Path {
         var p = Path()
         let x = r.minX + 4
-        p.move(to: .init(x: x, y: first ? r.midY : r.minY))
-        p.addLine(to: .init(x: x, y: last ? r.midY : r.maxY))
-        p.move(to: .init(x: x, y: r.midY))
-        p.addLine(to: .init(x: r.maxX - 2, y: r.midY))
+        // Branch at the title line's center (half the 28pt min row height), not the rect's
+        // midY: the peek ledger / multi-line CC text grow the row downward, and the branch
+        // must keep pointing at the title rather than slide into the middle of the extra
+        // content. Identical for standard 28pt rows (midY == 14).
+        let y = min(r.midY, 14)
+        p.move(to: .init(x: x, y: first ? y : r.minY))
+        p.addLine(to: .init(x: x, y: last ? y : r.maxY))
+        p.move(to: .init(x: x, y: y))
+        p.addLine(to: .init(x: r.maxX - 2, y: y))
         return p
     }
 }
