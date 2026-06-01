@@ -2,13 +2,16 @@
 import SwiftUI
 
 /// Compact session picker: new (default, ⏎) or attach an existing one on `host`.
-/// Type to filter · ↓/↑ to select · ⏎ attaches selection or creates new.
-/// Used for ⌘D split and the host context-menu "New Session".
+/// Type to filter · ↓/↑ to select · ⏎ attaches selection or creates new ·
+/// ⌘⏎ creates with the shell started at the zsh-z match for the typed name (smart jump).
+/// Used for ⌘T, ⌘D split, and the host context-menu "New Session".
 struct SplitPickerView: View {
     let title: String
     let host: ForkHost
     let placeholder: String
-    let onSubmit: (SessionRef) -> Void
+    /// `smartJump` is only ever true for *new* sessions — attaching an existing one keeps
+    /// whatever cwd it already has.
+    let onSubmit: (SessionRef, _ smartJump: Bool) -> Void
     let onCancel: () -> Void
 
     @EnvironmentObject private var registry: SessionRegistry
@@ -34,7 +37,7 @@ struct SplitPickerView: View {
                 .font(.system(size: 11)).foregroundStyle(.secondary)
             TextField("", text: $name, prompt: Text(placeholder))
                 .textFieldStyle(.roundedBorder)
-                .onSubmit(commit)
+                .onSubmit { commit() }
                 .backport.onKeyPress(.downArrow) { _ in move(1); return .handled }
                 .backport.onKeyPress(.upArrow) { _ in move(-1); return .handled }
                 .onChange(of: name) { _ in sel = nil }
@@ -43,6 +46,20 @@ struct SplitPickerView: View {
             HStack {
                 Button("Cancel") { onCancel() }.keyboardShortcut(.cancelAction)
                 Spacer()
+                if sel == nil {
+                    // ⌘⏎ — create with the shell started at zsh-z's frecency match for the
+                    // typed name (resolved on the session's host). Needs a real typed name
+                    // (z-jumping the random placeholder can't match), and the name must not
+                    // already exist: `zmx attach` would attach to the existing session and
+                    // silently discard the jump command.
+                    let exists = items.contains { $0.name == name }
+                    Button("New @ z") { commit(smartJump: true) }
+                        .keyboardShortcut(.return, modifiers: .command)
+                        .disabled(name.isEmpty || !nameValid || exists)
+                        .help(exists
+                              ? "A session with this name already exists — ⏎ attaches to it"
+                              : "⌘⏎ — create with shell started at the z-jump directory for this name")
+                }
                 Button(sel == nil ? "New" : "Attach") { commit() }
                     .keyboardShortcut(.defaultAction)
                     .disabled(sel == nil && !nameValid)
@@ -118,17 +135,18 @@ struct SplitPickerView: View {
         }
     }
 
-    private func commit() {
+    private func commit(smartJump: Bool = false) {
         if let sel, sel < items.count {
+            // Attaching an existing session: it already has a cwd — smartJump is ignored.
             let it = items[sel]
             submit(it.name, external: it.external)
         } else if nameValid {
-            submit(name.isEmpty ? placeholder : name)
+            submit(name.isEmpty ? placeholder : name, smartJump: smartJump)
         }
     }
 
-    private func submit(_ n: String, external: Bool = false) {
-        onSubmit(SessionRef(hostID: host.id, name: n, external: external))
+    private func submit(_ n: String, external: Bool = false, smartJump: Bool = false) {
+        onSubmit(SessionRef(hostID: host.id, name: n, external: external), smartJump && !external)
     }
 }
 #endif

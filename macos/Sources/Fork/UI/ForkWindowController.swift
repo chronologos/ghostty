@@ -270,8 +270,45 @@ final class ForkWindowController: TerminalController {
     ]
 
     private func installNavMonitor() {
-        navMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] ev in
-            guard let self, ev.window === self.window, self.sheetPanel == nil else { return ev }
+        navMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.keyDown, .otherMouseDown, .otherMouseUp, .otherMouseDragged, .swipe]
+        ) { [weak self] ev in
+            guard let self, ev.window === self.window else { return ev }
+            // Mouse back/forward → tab visit history, window-wide (sidebar or terminal area
+            // alike, matching browser behavior). Two delivery paths, because mouse drivers
+            // differ in what the thumb buttons actually emit:
+            //
+            // 1. SWIPE gestures (deltaX +1 = back, -1 = forward — the Safari/WebKit
+            //    convention). This is what SteerMouse / Logi Options+ / the system's
+            //    "swipe between pages" translate thumb buttons into, and what trackpad
+            //    page-swipes deliver. Vertical swipes pass through.
+            // 2. Raw buttons 3/4 (.otherMouse*) for mice whose driver passes them through
+            //    untranslated. ALL button-3/4 event types are swallowed, not just the down:
+            //    a consumed press with a passed-through release would deliver an orphaned
+            //    SGR button-8/9 *release* to whatever pane is under the cursor after the
+            //    tab switch — clearing its selection and feeding a TUI a button it never
+            //    saw pressed. Button 2 (middle-click paste) passes through untouched.
+            //
+            // Both paths are swallowed-but-inert while a fork sheet or the ⌘W alert
+            // (`window.attachedSheet`) is up — navigating under a modal would swap the
+            // content its confirmation text refers to.
+            let modalUp = self.sheetPanel != nil || self.window?.attachedSheet != nil
+            if ev.type == .swipe {
+                guard ev.deltaX != 0 else { return ev }
+                if !modalUp { self.navigateTabHistory(ev.deltaX > 0 ? -1 : +1) }
+                return nil
+            }
+            if ev.type != .keyDown {
+                switch ev.buttonNumber {
+                case 3, 4:
+                    if ev.type == .otherMouseDown, !modalUp {
+                        self.navigateTabHistory(ev.buttonNumber == 3 ? -1 : +1)
+                    }
+                    return nil
+                default: return ev
+                }
+            }
+            guard self.sheetPanel == nil else { return ev }
             // Any keystroke = chord completed (or non-⌘ typing) → hide/cancel cheatsheet.
             self.setCheatsheet(false)
             let mods = ev.modifierFlags.intersection([.command, .shift, .option, .control])
@@ -502,20 +539,39 @@ final class ForkWindowController: TerminalController {
         return stripControl(raw, max: 96)
     }
 
-    // MARK: Sidebar visibility
+    // MARK: Sidebar visibility & width
 
-    private static let sidebarWidth: CGFloat = 248
+    /// Floor width — the classic fixed sidebar width. Drag the sidebar's right edge to
+    /// widen (up to `sidebarMaxWidth` or half the window, whichever is smaller); the
+    /// chosen width persists across launches and is what hide/show toggles back to.
+    private static let sidebarMinWidth: CGFloat = 248
+    private static let sidebarMaxWidth: CGFloat = 560
+    private static let sidebarWidthKey = "ForkSidebarWidth"
+    /// Persisted user width, clamped to [floor, max] AND the current window's half-width
+    /// (a 560pt sidebar saved on a desktop display must not eat 70% of a laptop window
+    /// at restore). The window cap never undercuts the floor — on a degenerate <496pt
+    /// window the classic fixed width wins, same as it always did.
+    private var sidebarWidth: CGFloat {
+        let v = CGFloat(UserDefaults.standard.double(forKey: Self.sidebarWidthKey))
+        guard v > 0 else { return Self.sidebarMinWidth }
+        let cap = max(Self.sidebarMinWidth, (window?.frame.width ?? Self.sidebarMaxWidth * 2) / 2)
+        return min(max(v, Self.sidebarMinWidth), Self.sidebarMaxWidth, cap)
+    }
     private weak var sidebarHost: NSView?
     private weak var sidebarReveal: NSButton?
+    private weak var sidebarHandle: NSView?
     private var sidebarWidthConstraint: NSLayoutConstraint?
     private var terminalLeadingConstraint: NSLayoutConstraint?
 
     func toggleSidebar() {
         guard let sidebarHost, let sidebarWidthConstraint, let terminalLeadingConstraint else { return }
         let hide = sidebarWidthConstraint.constant > 0
-        let w: CGFloat = hide ? 0 : Self.sidebarWidth
+        let w: CGFloat = hide ? 0 : sidebarWidth
         if !hide { sidebarHost.isHidden = false }
         sidebarReveal?.isHidden = !hide
+        // Hide the resize handle immediately on collapse (it must not stay grabbable over
+        // the terminal's left edge); reappears with the sidebar.
+        sidebarHandle?.isHidden = hide
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.18
             ctx.allowsImplicitAnimation = true
@@ -528,39 +584,78 @@ final class ForkWindowController: TerminalController {
         }
     }
 
+    /// Applies a proposed sidebar width (from the drag handle) to all three dependent
+    /// constraints. Live drags don't persist (`commit: false`); mouse-up does.
+    private func setSidebarWidth(_ proposed: CGFloat, commit: Bool) {
+        let cap = min(Self.sidebarMaxWidth, (window?.frame.width ?? 1200) / 2)
+        let w = min(max(proposed, Self.sidebarMinWidth), cap)
+        sidebarWidthConstraint?.constant = w
+        terminalLeadingConstraint?.constant = w
+        cheatsheetCenterX?.constant = w / 2
+        if commit { UserDefaults.standard.set(Double(w), forKey: Self.sidebarWidthKey) }
+    }
+
     @objc private func revealSidebar(_ sender: Any?) { toggleSidebar() }
+
+    /// The tab list the sidebar is currently rendering — the single contract for every
+    /// list-relative navigation (⌘1-9, ⌘⇧[/⌘⇧], last_tab, move_tab). One accessor so a
+    /// filter added to one side can't silently desync keyboard order from screen order
+    /// (the original bug: only gotoTab was upgraded to the filtered accessors; stepTab/
+    /// last_tab/move_tab kept cycling through tabs hidden by focus mode / the tag filter).
+    private func visibleTabs() -> [TabModel] {
+        let d = UserDefaults.standard
+        let tagged = d.bool(forKey: SessionRegistry.kFilterTagged)
+        if d.bool(forKey: SessionRegistry.kFocusMode) {
+            return registry.focusTabs(taggedOnly: tagged)
+        }
+        let host = registry.activeHost?.id ?? ForkHost.local.id
+        return registry.hostTabs(on: host, taggedOnly: tagged)
+    }
 
     private func stepTab(_ delta: Int) {
         guard let active = registry.activeTab else { return }
-        let siblings = registry.tabs(on: active.hostID)
-        guard let i = siblings.firstIndex(where: { $0.id == active.id }) else { return }
-        let n = siblings.count
-        activate(tab: siblings[((i + delta) % n + n) % n].id)
+        let tabs = visibleTabs()
+        guard let i = tabs.firstIndex(where: { $0.id == active.id }) else {
+            // Active tab itself is filtered out (activated via ⌘K/history while the tag
+            // filter hides it) — step onto the visible list instead of cycling a ghost.
+            if let first = tabs.first { activate(tab: first.id) }
+            return
+        }
+        let n = tabs.count
+        activate(tab: tabs[((i + delta) % n + n) % n].id)
     }
 
     /// ⌘N indexes whatever the sidebar is currently rendering: per-host order in normal
     /// mode, the cross-host pinned-then-MRU list in focus mode. The two @AppStorage keys
     /// live in `SidebarView`; reading UserDefaults directly avoids threading view state
     /// back through the controller for a one-shot key handler.
+    /// Mouse back/forward (and the ⌘K palette entries) — browser-style navigation through
+    /// the tab visit history. The registry moves its cursor first; `activate` → `setActive`
+    /// then sees the cursor already pointing at the target and doesn't re-record, so a
+    /// back-step can't truncate its own forward stack.
+    func navigateTabHistory(_ delta: Int) {
+        guard let target = registry.historyStep(delta) else { return }
+        activate(tab: target)
+    }
+
     func gotoTab(index n: Int) {
-        let d = UserDefaults.standard
-        let tagged = d.bool(forKey: SessionRegistry.kFilterTagged)
-        let tabs: [TabModel]
-        if d.bool(forKey: SessionRegistry.kFocusMode) {
-            tabs = registry.focusTabs(taggedOnly: tagged)
-        } else {
-            // Same accessor the sidebar renders from (`hostTabs`) — a filter added to one
-            // side only would silently desync ⌘1-9 from what's on screen.
-            let host = registry.activeHost?.id ?? ForkHost.local.id
-            tabs = registry.hostTabs(on: host, taggedOnly: tagged)
-        }
+        let tabs = visibleTabs()
         guard tabs.indices.contains(n - 1) else { return }
         activate(tab: tabs[n - 1].id)
     }
 
     private func moveActiveTab(by amount: Int) {
         guard amount != 0, let active = registry.activeTab else { return }
-        let siblings = registry.tabs(on: active.hostID)
+        // Focus mode's list is derived (pinned›MRU or host-grouped recency) — there is no
+        // stored order to move within; reordering the invisible per-host list from there
+        // would shuffle rows the user can't see. No-op, like the sidebar's drag-reorder.
+        let d = UserDefaults.standard
+        guard !d.bool(forKey: SessionRegistry.kFocusMode) else { return }
+        // Filtered siblings: `moveTab` lands after-target moving down / before-target
+        // moving up, so targeting the *visible* neighbor hops any hidden tabs between —
+        // the reorder you see is the reorder you get.
+        let siblings = registry.hostTabs(on: active.hostID,
+                                         taggedOnly: d.bool(forKey: SessionRegistry.kFilterTagged))
         guard let i = siblings.firstIndex(where: { $0.id == active.id }) else { return }
         let j = max(0, min(siblings.count - 1, i + amount))
         guard j != i else { return }
@@ -578,8 +673,7 @@ final class ForkWindowController: TerminalController {
         case "previous_tab": stepTab(-1)
         case "next_tab": stepTab(1)
         case "last_tab":
-            let host = registry.activeHost?.id ?? ForkHost.local.id
-            if let last = registry.tabs(on: host).last { activate(tab: last.id) }
+            if let last = visibleTabs().last { activate(tab: last.id) }
         case "goto_tab":
             if parts.count == 2, let n = Int(parts[1]) { gotoTab(index: n) }
         case "move_tab":
@@ -901,7 +995,7 @@ final class ForkWindowController: TerminalController {
         }
     }
 
-    /// Compact picker (same as ⌘D split) for the host context-menu — name or attach,
+    /// Compact picker (same as ⌘D split) for ⌘T and the host context-menu — name or attach,
     /// no cwd/cmd fields. Use `showNewSessionSheet` for the full form.
     func showSessionPicker(on host: ForkHost) {
         let placeholder = registry.uniqueAutoName()
@@ -909,9 +1003,12 @@ final class ForkWindowController: TerminalController {
             SplitPickerView(
                 title: "New session on \(host.label)",
                 host: host, placeholder: placeholder,
-                onSubmit: { ref in
-                    self?.newForkTab(intent: .init(hostID: ref.hostID, name: ref.name,
-                                                   external: ref.external))
+                onSubmit: { ref, smartJump in
+                    self?.newForkTab(intent: .init(
+                        hostID: ref.hostID, name: ref.name,
+                        // ⌘⏎: the session's shell starts at the zsh-z match for its name.
+                        cmd: smartJump ? ZmxAdapter.smartJumpCmd(name: ref.name) : nil,
+                        external: ref.external))
                     self?.endSheet()
                 },
                 onCancel: { self?.endSheet() })
@@ -927,12 +1024,21 @@ final class ForkWindowController: TerminalController {
     }
 
     func showPanePalette() {
-        // `CommandPaletteView` is a self-chromed card (material bg + rounded stroke +
-        // .shadow(32) + .padding()) meant to float over `TerminalView`. macOS sheets
-        // wrap content in a system `NSVisualEffectView` that `backgroundColor = .clear`
-        // can't suppress, so present as a borderless child window instead. 620×460
-        // leaves ~60pt clear margin so the card's shadow doesn't clip at the panel edge.
-        presentSheet(size: .init(width: 620, height: 460), bare: true) { [weak self] in
+        // `ForkPaletteCard` is a self-chromed card (material bg + HandCut stroke + shadow)
+        // that fills the panel, so the panel's size IS the palette's size: scale it with
+        // the window (~45% wide / ~60% tall, clamped to stay usable on small windows and
+        // readable on huge ones). Upstream's `CommandPaletteView` is deliberately not used
+        // here — it hard-caps at 500pt wide with a 200pt option table (~4 rows) no matter
+        // what frame it's given.
+        // Presented as a borderless child window, not a sheet: macOS sheets wrap content
+        // in a system `NSVisualEffectView` that `backgroundColor = .clear` can't suppress.
+        // The min(…, win - 24) outer clamp keeps the borderless child window inside its
+        // parent on tiny windows — a floating overhang past the window edge reads as a
+        // detached alien panel (and steals clicks from whatever's behind).
+        let win = window?.frame.size ?? .init(width: 1280, height: 800)
+        let size = CGSize(width: min(max(560, win.width * 0.45), 880, win.width - 24),
+                          height: min(max(420, win.height * 0.60), 980, win.height - 24))
+        presentSheet(size: size, bare: true) { [weak self] in
             ForkPanePalette(controller: self, onDone: { self?.endSheet() })
         }
     }
@@ -1040,7 +1146,7 @@ final class ForkWindowController: TerminalController {
         sidebar.translatesAutoresizingMaskIntoConstraints = false
         terminalContent.addSubview(sidebar)
         sidebarHost = sidebar
-        sidebarWidthConstraint = sidebar.widthAnchor.constraint(equalToConstant: Self.sidebarWidth)
+        sidebarWidthConstraint = sidebar.widthAnchor.constraint(equalToConstant: sidebarWidth)
         NSLayoutConstraint.activate([
             sidebar.leadingAnchor.constraint(equalTo: terminalContent.leadingAnchor),
             sidebar.topAnchor.constraint(equalTo: terminalContent.topAnchor),
@@ -1063,7 +1169,7 @@ final class ForkWindowController: TerminalController {
                        || ($0.secondItem === hosting && $0.secondAttribute == .leading) }
                 .forEach { $0.isActive = false }
             terminalLeadingConstraint = hosting.leadingAnchor.constraint(
-                equalTo: terminalContent.leadingAnchor, constant: Self.sidebarWidth)
+                equalTo: terminalContent.leadingAnchor, constant: sidebarWidth)
             terminalLeadingConstraint!.isActive = true
         }
 
@@ -1073,7 +1179,7 @@ final class ForkWindowController: TerminalController {
         terminalContent.addSubview(cheatsheet)
         cheatsheetHost = cheatsheet
         cheatsheetCenterX = cheatsheet.centerXAnchor.constraint(
-            equalTo: terminalContent.centerXAnchor, constant: Self.sidebarWidth / 2)
+            equalTo: terminalContent.centerXAnchor, constant: sidebarWidth / 2)
         NSLayoutConstraint.activate([
             cheatsheetCenterX!,
             cheatsheet.centerYAnchor.constraint(equalTo: terminalContent.centerYAnchor),
@@ -1090,6 +1196,30 @@ final class ForkWindowController: TerminalController {
             reveal.topAnchor.constraint(equalTo: terminalContent.topAnchor, constant: 8),
         ])
         sidebarReveal = reveal
+
+        // Sidebar resize handle — an invisible strip on the sidebar/terminal boundary;
+        // drag to widen the sidebar (floor = the classic 248pt). AppKit, not a SwiftUI
+        // gesture: the strip must span the NSHostingView/terminal seam, and constraint
+        // edits must not route through SwiftUI re-renders (see the leading-constraint
+        // comment above). Added last so it sits above both views — which also means it
+        // *steals* clicks from what it covers: biased 2pt-sidebar/5pt-terminal because
+        // the sidebar edge has clickable chrome (rows, StatusRail, overlay scroller)
+        // while the terminal's first half-column is only text selection.
+        let handle = SidebarResizeHandle()
+        handle.translatesAutoresizingMaskIntoConstraints = false
+        handle.startWidth = { [weak self] in
+            self?.sidebarWidthConstraint?.constant ?? Self.sidebarMinWidth
+        }
+        handle.onDrag = { [weak self] w in self?.setSidebarWidth(w, commit: false) }
+        handle.onCommit = { [weak self] w in self?.setSidebarWidth(w, commit: true) }
+        terminalContent.addSubview(handle)
+        NSLayoutConstraint.activate([
+            handle.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -2),
+            handle.widthAnchor.constraint(equalToConstant: 7),
+            handle.topAnchor.constraint(equalTo: terminalContent.topAnchor),
+            handle.bottomAnchor.constraint(equalTo: terminalContent.bottomAnchor),
+        ])
+        sidebarHandle = handle
 
         $surfaceTree
             .debounce(for: .milliseconds(80), scheduler: DispatchQueue.main)
@@ -1131,6 +1261,12 @@ final class ForkWindowController: TerminalController {
             // Upstream's undo closures capture a *tree*, not a tab. Clear on every real
             // switch — including `current == nil`, which closeForkTab/removeHost produce.
             undoManager?.removeAllActions(withTarget: self)
+            registry.setActive(tab: id)
+        } else if registry.tabHistory.isEmpty {
+            // Relaunch path: the disk-restored active tab IS `current`, so the setActive
+            // above never runs — seed the visit history with it, or the first back press
+            // after every launch is a dead no-op (the tab the user "came from" wouldn't
+            // exist as an anchor).
             registry.setActive(tab: id)
         }
         // Relaunch arrives with `current == id` (registry loads activeTabID from disk) but
@@ -1249,10 +1385,12 @@ final class ForkWindowController: TerminalController {
             SplitPickerView(
                 title: "Split on \(host.label)",
                 host: host, placeholder: placeholder,
-                onSubmit: { ref in
+                onSubmit: { ref, smartJump in
                     guard let self, let p = self.pendingSplit else { return }
                     self.pendingSplit = nil
-                    _ = self.completeSplit(at: p.at, direction: p.dir, host: host, ref: ref)
+                    _ = self.completeSplit(
+                        at: p.at, direction: p.dir, host: host, ref: ref,
+                        initialCmd: smartJump ? ZmxAdapter.smartJumpCmd(name: ref.name) : nil)
                     self.endSheet()
                 },
                 onCancel: { self?.pendingSplit = nil; self?.endSheet() })
@@ -1333,6 +1471,60 @@ final class ForkWindowController: TerminalController {
         if id == registry.activeTabID { return surfaceTree }
         if liveTabs[id] == nil { rebuildTree(for: id) }
         return liveTabs[id] ?? .init()
+    }
+}
+
+/// Invisible vertical strip on the sidebar's trailing edge — drag to resize the sidebar.
+/// Plain NSResponder mouse tracking (no NSGestureRecognizer): the drag must keep working
+/// when the cursor leaves the strip mid-drag, which mouseDragged gives for free
+/// (events keep routing to the mouseDown view until mouseUp).
+private final class SidebarResizeHandle: NSView {
+    /// Reads the constraint's current constant at drag start (not a cached width — the
+    /// user may have toggled the sidebar or resized since the handle was created).
+    var startWidth: () -> CGFloat = { 0 }
+    var onDrag: ((CGFloat) -> Void)?
+    var onCommit: ((CGFloat) -> Void)?
+    private var anchorX: CGFloat = 0
+    private var baseWidth: CGFloat = 0
+    private var cursorPushed = false
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .resizeLeftRight)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        anchorX = event.locationInWindow.x
+        baseWidth = startWidth()
+        // Pin the cursor for the whole drag — the pointer leaves the strip immediately
+        // and would otherwise flip back to an arrow/I-beam over the terminal.
+        NSCursor.resizeLeftRight.push()
+        cursorPushed = true
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        // ⌘⇧B mid-drag hides the handle while the drag session keeps routing events here;
+        // writing widths into the collapse animation would re-expand a hiding sidebar.
+        guard !isHiddenOrHasHiddenAncestor else { return }
+        onDrag?(baseWidth + (event.locationInWindow.x - anchorX))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        popCursorIfNeeded()
+        guard !isHiddenOrHasHiddenAncestor else { return }
+        onCommit?(baseWidth + (event.locationInWindow.x - anchorX))
+    }
+
+    /// The window can close mid-drag (mouseUp never arrives) — a leaked push leaves the
+    /// ⇔ cursor stuck app-wide.
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil { popCursorIfNeeded() }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    private func popCursorIfNeeded() {
+        guard cursorPushed else { return }
+        NSCursor.pop()
+        cursorPushed = false
     }
 }
 #endif

@@ -21,6 +21,24 @@ struct ZmxHardeningTests {
         #expect(r.external.map(\.name) == ["other"])   // err= and -Sevil dropped
     }
 
+    @Test func smartJumpCmdShape() {
+        // Golden: validated name → sh wrapper that (a) degrades to a plain login shell on
+        // hosts without zsh — not a dead pane from a failed exec, (b) otherwise runs the
+        // zshz jump in an interactive zsh and execs a clean login shell. The nested shq
+        // (a quoted name inside an shq'd script) is the load-bearing part.
+        let inner = "zshz -- 'ghostty' 2>/dev/null; exec zsh -l"
+        #expect(ZmxAdapter.smartJumpCmd(name: "ghostty") == [
+            "sh", "-c",
+            "command -v zsh >/dev/null 2>&1 && exec zsh -ilc \(shq(inner)); exec \"${SHELL:-sh}\" -l",
+        ])
+        // Charset gate: anything outside the managed charset refuses to build at all —
+        // this is a shell-string builder, both layers (validation + quoting) required.
+        #expect(ZmxAdapter.smartJumpCmd(name: "a;rm -rf /") == nil)
+        #expect(ZmxAdapter.smartJumpCmd(name: "$(id)") == nil)
+        #expect(ZmxAdapter.smartJumpCmd(name: "a b") == nil)
+        #expect(ZmxAdapter.smartJumpCmd(name: "") == nil)
+    }
+
     @Test func partitionForgedPrefixStaysExternal() {
         // Anyone on the remote host can name a session `{hostID}-anything` (the hostID is
         // just a hash of user@host). Only names the fork could have created itself
