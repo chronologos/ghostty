@@ -23,9 +23,13 @@ struct CheatsheetView: View {
         ("⌘⇧R", "Repaint pane"),
         ("⌘⌥P", "Pin / unpin tab"),
         ("⌘⇧B", "Toggle sidebar"),
+        ("Drag sidebar edge", "Resize sidebar"),
         ("⌥ hold", "Reveal read CC status text"),
         ("⌥⌥", "Mark all CC status read"),
+        ("Hover pane ⅓s", "Peek — status · dir · zmx name · age"),
         ("Long-press ◎", "Focus cutoff & sort options"),
+        ("Mouse ⏴ ⏵", "Back / forward in tab history"),
+        ("⌘⏎ in picker", "New session at z-jump dir"),
     ]
 
     var body: some View {
