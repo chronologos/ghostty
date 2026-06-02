@@ -12,6 +12,7 @@ struct CheatsheetView: View {
         ("⌘D", "Split pane"),
         ("⌘W", "Close pane (Detach / Kill)"),
         ("⌘W ⌘W", "Kill instead of detach"),
+        ("⌘⇧T", "New session (full form, any host)"),
         ("⌘K", "Command palette"),
         ("⌘⇧K", "Scrollback search"),
         ("⌘I / ⌘⇧I", "Rename pane / tab"),
