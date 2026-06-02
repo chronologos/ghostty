@@ -337,6 +337,12 @@ final class ForkWindowController: TerminalController {
             // ⌘⇧R — repaint focused surface (SurfaceWiggle). keyCode 15.
             if mods == [.command, .shift], ev.keyCode == 15,
                let s = self.focusedSurface { forkWigglePane(s); return nil }
+            // ⌘⇧T — full new-session form (host picker + cwd/cmd), the sheet behind the
+            // sidebar ＋ button; ⌘T stays the compact picker. keyCode 17 = kVK_ANSI_T.
+            // Shadows upstream's `undo` alias (Config.zig:6934) — ⌘Z remains undo.
+            if mods == [.command, .shift], ev.keyCode == 17 {
+                self.showNewSessionSheet(); return nil
+            }
             // ⌘K / ⌘⇧K — pane palette / scrollback search. keyCode 40 = kVK_ANSI_K.
             // Shadows upstream's `clear_screen` (Config.zig:6927).
             if ev.keyCode == 40 {
