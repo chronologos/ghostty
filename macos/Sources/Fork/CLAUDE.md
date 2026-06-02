@@ -146,8 +146,9 @@ Fork/
 ```
 
 New-session flow (two sheets on purpose): **⌘T** and the host context-menu open the compact
-picker (`SplitPickerView` — quick name-or-attach on one host); the sidebar **＋ button**
-opens the full form (`NewSessionView` — host picker + cwd/command fields).
+picker (`SplitPickerView` — quick name-or-attach on one host); the sidebar **＋ button** and
+**⌘⇧T** open the full form (`NewSessionView` — host picker + cwd/command fields). ⌘⇧T
+shadows upstream's `undo` alias (Config.zig:6934); ⌘Z remains undo.
 
 ## Gotchas (each cost ≥1 verifier round)
 
