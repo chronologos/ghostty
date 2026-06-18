@@ -9,147 +9,315 @@ struct NewSessionIntent {
     var external: Bool = false
 }
 
-/// ⌘T sheet: host picker · form · recents (SPEC §9).
+/// Two-stage new-session palette (⌘T / ⌘⇧T / sidebar ＋ / ⌘D / host context-menu).
+///
+/// Stage 1 — host: type to filter, ↓/↑ to move, ⏎ or Tab commits and advances.
+/// Stage 2 — session: type a name (or filter existing), ↓/↑ selects an existing
+/// session, ⏎ attaches the selection or creates new, ⇧⏎ creates with the shell
+/// started at the zsh-z frecency match for the typed name (smart jump). ⌫ on an
+/// empty field steps back to the host stage.
+///
+/// `locked` skips stage 1 entirely — used for ⌘D (split = current pane's host)
+/// and the host-row context menu where the host is already decided.
 struct NewSessionView: View {
     @EnvironmentObject private var registry: SessionRegistry
 
-    @State private var hostID: ForkHost.ID
-    @State private var name: String = ""
-    @State private var cwd: String = ""
-    @State private var command: String = ""
-    @State private var recents: ZmxAdapter.ListResult?
-    @State private var placeholder: String = ""
+    private enum Stage { case host, session }
 
-    private var nameValid: Bool {
-        name.isEmpty || SessionRef(hostID: hostID, name: name).isValid
-    }
-
-    let onSubmit: (NewSessionIntent) -> Void
+    let title: String?
+    let locked: Bool
+    let placeholder: String
+    let onSubmit: (SessionRef, _ smartJump: Bool) -> Void
     let onCancel: () -> Void
 
+    @State private var stage: Stage
+    @State private var host: ForkHost
+    @State private var query: String = ""
+    @State private var sel: Int = 0
+    @State private var recents: ZmxAdapter.ListResult?
     @State private var unreachable = false
+    /// Bumped on every advance — `.task(id:)` keys on this (not `host.id`) so backing
+    /// out and re-advancing to the same host retries the fetch.
+    @State private var fetchToken: Int = 0
+    @FocusState private var focused: Bool
 
-    init(defaultHostID: ForkHost.ID,
-         onSubmit: @escaping (NewSessionIntent) -> Void,
+    init(title: String? = nil,
+         host: ForkHost,
+         locked: Bool = false,
+         placeholder: String,
+         onSubmit: @escaping (SessionRef, Bool) -> Void,
          onCancel: @escaping () -> Void) {
-        self._hostID = State(initialValue: defaultHostID)
+        self.title = title
+        self.locked = locked
+        self.placeholder = placeholder
         self.onSubmit = onSubmit
         self.onCancel = onCancel
+        self._host = State(initialValue: host)
+        self._stage = State(initialValue: locked ? .session : .host)
     }
 
+    // MARK: filtering
+
+    private var hosts: [ForkHost] {
+        guard !query.isEmpty else { return registry.hosts }
+        return registry.hosts.filter { $0.label.localizedCaseInsensitiveContains(query) }
+    }
+
+    private var sessions: [ZmxAdapter.ListEntry] {
+        guard let r = recents else { return [] }
+        let all = r.managed + r.external
+        guard !query.isEmpty else { return all }
+        return all.filter { $0.name.localizedCaseInsensitiveContains(query) }
+    }
+
+    private var nameValid: Bool {
+        query.isEmpty || SessionRef(hostID: host.id, name: query).isValid
+    }
+
+    /// ⇧⏎ needs a real typed name (z-jumping the random placeholder can't match), the
+    /// name must not already exist — `zmx attach` would attach and discard the jump —
+    /// and no existing row may be selected (commit() would attach it instead).
+    private var canSmartJump: Bool {
+        stage == .session && sel == 0 && !query.isEmpty && nameValid
+            && !sessions.contains { $0.name == query }
+    }
+
+    // MARK: body
+
     var body: some View {
-        HStack(alignment: .top, spacing: 0) {
-            hostList.frame(width: 160)
-            Divider()
-            form.frame(width: 280)
-            Divider()
-            recentsList.frame(width: 200)
+        VStack(alignment: .leading, spacing: 0) {
+            if let title {
+                Text(title).font(.system(size: 11)).foregroundStyle(.secondary)
+                    .padding(.bottom, 8)
+            }
+            field
+            Theme.peekRule.frame(height: 1).padding(.vertical, 10)
+            list.frame(maxHeight: .infinity)
+            footer.padding(.top, 10)
         }
-        .frame(height: 320)
-        .onAppear { placeholder = registry.uniqueAutoName() }
-        .task(id: hostID) {
-            recents = nil
-            unreachable = false
-            guard let h = registry.host(id: hostID) else { return }
-            let r = await ZmxAdapter.list(host: h)
+        .padding(14)
+        .frame(width: 400, height: 300)
+        .onAppear {
+            // Pre-select the default host so a bare ⏎ advances to it.
+            if stage == .host, let i = hosts.firstIndex(where: { $0.id == host.id }) { sel = i }
+            // @FocusState set synchronously in onAppear doesn't take — same defer as
+            // ForkPaletteCard.
+            DispatchQueue.main.async { focused = true }
+        }
+        .task(id: fetchToken) {
+            guard stage == .session else { return }  // no eager prefetch from the host stage
+            let r = await ZmxAdapter.list(host: host)
             guard !Task.isCancelled else { return }
             unreachable = (r == nil)
             recents = r ?? .init()
         }
     }
 
-    private var hostList: some View {
-        List(registry.hosts, selection: Binding(get: { hostID }, set: { hostID = $0 ?? hostID })) { h in
-            HStack {
-                HostDot(host: h, size: 8).opacity(registry.isConnected(h.id) ? 1 : 0.3)
-                Text(h.label)
-            }
-            .tag(h.id)
-        }
-        .listStyle(.sidebar)
-    }
+    // MARK: field
 
-    private var form: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            field("Name", $name, prompt: placeholder)
-            field("Working directory (local only)", $cwd, prompt: "~")
-            field("Command", $command, prompt: "optional")
-            Spacer()
-            HStack {
-                Button("Cancel") { onCancel() }.keyboardShortcut(.cancelAction)
-                Spacer()
-                Button("Connect") { submit(name: name.isEmpty ? placeholder : name) }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!nameValid)
-            }
-        }
-        .padding()
-    }
-
-    private func field(_ label: String, _ binding: Binding<String>, prompt: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label).font(.system(size: 11)).foregroundStyle(.secondary)
-            TextField("", text: binding, prompt: Text(prompt))
-                .textFieldStyle(.roundedBorder)
-        }
-    }
-
-    @ViewBuilder private var recentsList: some View {
-        if let recents {
-            List {
-                if !recents.managed.isEmpty {
-                    Section("Recent") {
-                        ForEach(recents.managed, id: \.name) { recentRow($0) }
+    private var field: some View {
+        HStack(spacing: 8) {
+            if stage == .session {
+                // Host chip — the committed stage-1 choice. Tappable (back to host pick)
+                // unless host-locked.
+                HStack(spacing: 5) {
+                    HostDot(host: host, size: 8)
+                    Text(host.label).font(.system(size: 12))
+                    if !locked {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.tertiary)
                     }
                 }
-                if !recents.external.isEmpty {
-                    Section("Other zmx sessions") {
-                        ForEach(recents.external, id: \.name) { recentRow($0) }
-                    }
-                }
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(Theme.chipBg, in: Capsule())
+                .onTapGesture { if !locked { back() } }
+                .transition(.opacity.combined(with: .move(edge: .leading)))
             }
-            .overlay {
-                if recents.managed.isEmpty && recents.external.isEmpty {
-                    // "Couldn't reach" ≠ "No sessions" — a failed query must not imply the
-                    // host is empty.
-                    Text(unreachable ? "Couldn't reach this host" : "No sessions")
-                        .foregroundStyle(.secondary)
+            TextField("", text: $query,
+                      prompt: Text(stage == .host ? "host" : placeholder))
+                .textFieldStyle(.plain)
+                .font(.system(size: 14, design: stage == .session ? .monospaced : .default))
+                .focused($focused)
+                // Plain ⏎ via onSubmit (works on macOS 13, where backport.onKeyPress is a
+                // no-op); ⇧⏎ / Tab / ⌫ / arrows are 14+ niceties that degrade gracefully.
+                .onSubmit { commit(false) }
+                .backport.onKeyPress(.return) { mods in
+                    guard mods.contains(.shift) else { return .ignored }
+                    commit(true); return .handled
                 }
-            }
-        } else {
-            ProgressView().controlSize(.small)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .backport.onKeyPress(.tab) { _ in
+                    guard stage == .host, sel < hosts.count else { return .ignored }
+                    advance(to: hosts[sel]); return .handled
+                }
+                .backport.onKeyPress(.delete) { _ in
+                    guard stage == .session, query.isEmpty, !locked else { return .ignored }
+                    back(); return .handled
+                }
+                .backport.onKeyPress(.downArrow) { _ in move(1); return .handled }
+                .backport.onKeyPress(.upArrow) { _ in move(-1); return .handled }
+                .onExitCommand(perform: onCancel)
+                .onChange(of: query) { _ in sel = 0 }
         }
+        .animation(Theme.settle, value: stage)
     }
 
-    private func recentRow(_ e: ZmxAdapter.ListEntry) -> some View {
-        Button { submit(name: e.name, external: e.external) } label: {
-            HStack {
-                VStack(alignment: .leading, spacing: 0) {
-                    // Session names render mono-12 in every sheet (SplitPicker / HostDetail /
-                    // here) — they're zmx identifiers, not prose.
-                    Text(e.name).font(.system(size: 12, design: .monospaced))
-                    if let title = registry.tabTitle(for: e.name, external: e.external, on: hostID) {
-                        Text(title).font(.system(size: 10)).foregroundStyle(.secondary)
+    // MARK: list
+
+    @ViewBuilder private var list: some View {
+        // Row identity MUST be the stable entity (host.id / ListEntry), never the
+        // enumerated offset — an offset-keyed `.id(i)` survives a filter unchanged,
+        // so SwiftUI keeps the row alive with its *old* content while the underlying
+        // hosts[i] has shifted.
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    switch stage {
+                    case .host:
+                        ForEach(Array(hosts.enumerated()), id: \.element.id) { i, h in
+                            row(selected: i == sel, action: { advance(to: h) }) {
+                                HostDot(host: h, size: 8)
+                                    .opacity(registry.isConnected(h.id) ? 1 : 0.35)
+                                Text(h.label).font(.system(size: 13))
+                            }
+                        }
+                    case .session:
+                        ForEach(Array(sessions.enumerated()), id: \.element) { i, e in
+                            row(selected: i + 1 == sel,
+                                action: { submit(e.name, external: e.external) }) {
+                                VStack(alignment: .leading, spacing: 0) {
+                                    Text(e.name).font(.system(size: 12, design: .monospaced))
+                                    if let t = registry.tabTitle(for: e.name, external: e.external, on: host.id) {
+                                        Text(t).font(.system(size: 10)).foregroundStyle(.secondary)
+                                    }
+                                }
+                                Spacer()
+                                SessionMetaLabel(
+                                    entry: e,
+                                    inSidebar: registry.isInSidebar(e.name, external: e.external, on: host.id),
+                                    ccInfo: registry.ccInfo(for: e, on: host.id))
+                            }
+                        }
                     }
                 }
-                Spacer()
-                SessionMetaLabel(entry: e,
-                                 inSidebar: registry.isInSidebar(e.name, external: e.external, on: hostID),
-                                 ccInfo: registry.ccInfo(for: e, on: hostID))
             }
+            .onChange(of: sel) { s in
+                switch stage {
+                case .host where s < hosts.count:
+                    proxy.scrollTo(hosts[s].id)
+                case .session where s > 0 && s - 1 < sessions.count:
+                    proxy.scrollTo(sessions[s - 1])
+                default: break
+                }
+            }
+        }
+        .overlay { emptyState }
+    }
+
+    private func row<C: View>(selected: Bool, action: @escaping () -> Void,
+                              @ViewBuilder _ content: () -> C) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) { content() }
+                .padding(.horizontal, 8).padding(.vertical, 5)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(selected ? Theme.selectedRow : .clear,
+                            in: RoundedRectangle(cornerRadius: 5))
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
 
-    private func submit(name: String?, external: Bool = false) {
-        let cmdArr = command.isEmpty ? nil : command.split(separator: " ").map(String.init)
-        onSubmit(.init(
-            hostID: hostID,
-            name: name,
-            cwd: cwd.isEmpty ? nil : cwd,
-            cmd: cmdArr,
-            external: external))
+    @ViewBuilder private var emptyState: some View {
+        if stage == .host, hosts.isEmpty {
+            Text("No host matches").font(.system(size: 11)).foregroundStyle(.secondary)
+        } else if stage == .session, sessions.isEmpty, recents != nil {
+            // "Couldn't reach" ≠ "No sessions" — a failed query must not imply the host is
+            // empty; ⏎ still works (the new pane will surface the ssh error itself).
+            Text(unreachable ? "Couldn't reach \(host.label) — ⏎ still creates"
+                 : query.isEmpty ? "No sessions on \(host.label)"
+                 : "No match — ⏎ creates")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+        } else if stage == .session, recents == nil {
+            ProgressView().controlSize(.small)
+        }
+    }
+
+    // MARK: footer
+
+    private var footer: some View {
+        HStack(spacing: 12) {
+            switch stage {
+            case .host:
+                hint("⏎", "select")
+                hint("tab", "select")
+            case .session:
+                hint("⏎", sel > 0 ? "attach" : "create")
+                    .opacity(sel > 0 || nameValid ? 1 : 0.35)
+                hint("⇧⏎", "create @ z").opacity(canSmartJump ? 1 : 0.35)
+                    .help(canSmartJump
+                          ? "Create with the shell started at the z-jump directory for this name"
+                          : "Needs a new, valid name (and no row selected)")
+                if !locked { hint("⌫", "host") }
+            }
+            Spacer()
+            hint("esc", "cancel")
+        }
+        .font(.system(size: 10)).foregroundStyle(.secondary)
+    }
+
+    private func hint(_ key: String, _ label: String) -> some View {
+        HStack(spacing: 4) {
+            Text(key).padding(.horizontal, 4).padding(.vertical, 1)
+                .background(Theme.chipBg, in: RoundedRectangle(cornerRadius: 3))
+            Text(label)
+        }
+    }
+
+    // MARK: actions
+
+    private func move(_ d: Int) {
+        let n = stage == .host ? hosts.count
+                               : sessions.count + 1  // slot 0 = "create new"
+        guard n > 0 else { return }
+        sel = max(0, min(n - 1, sel + d))
+    }
+
+    private func commit(_ shift: Bool) {
+        switch stage {
+        case .host:
+            if sel < hosts.count { advance(to: hosts[sel]) }
+        case .session:
+            if sel > 0, sel - 1 < sessions.count {
+                let e = sessions[sel - 1]
+                submit(e.name, external: e.external)
+            } else if shift, canSmartJump {
+                submit(query, smartJump: true)
+            } else if nameValid {
+                submit(query.isEmpty ? placeholder : query)
+            }
+        }
+    }
+
+    private func advance(to h: ForkHost) {
+        host = h
+        query = ""
+        sel = 0
+        recents = nil
+        unreachable = false
+        stage = .session
+        fetchToken += 1
+    }
+
+    private func back() {
+        query = ""
+        stage = .host
+        // sel left to onChange(of: query) → 0; restoring to the prior host's index
+        // would be clobbered by that handler when query was non-empty.
+    }
+
+    private func submit(_ name: String, external: Bool = false, smartJump: Bool = false) {
+        onSubmit(SessionRef(hostID: host.id, name: name, external: external),
+                 smartJump && !external)
     }
 }
 #endif

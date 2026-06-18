@@ -337,11 +337,11 @@ final class ForkWindowController: TerminalController {
             // ⌘⇧R — repaint focused surface (SurfaceWiggle). keyCode 15.
             if mods == [.command, .shift], ev.keyCode == 15,
                let s = self.focusedSurface { forkWigglePane(s); return nil }
-            // ⌘⇧T — full new-session form (host picker + cwd/cmd), the sheet behind the
-            // sidebar ＋ button; ⌘T stays the compact picker. keyCode 17 = kVK_ANSI_T.
+            // ⌘⇧T — same two-stage session palette as ⌘T (the old full form's cwd/cmd
+            // fields are gone, so it's now just an alias). keyCode 17 = kVK_ANSI_T.
             // Shadows upstream's `undo` alias (Config.zig:6934) — ⌘Z remains undo.
             if mods == [.command, .shift], ev.keyCode == 17 {
-                self.showNewSessionSheet(); return nil
+                self.showSessionPicker(); return nil
             }
             // ⌘K / ⌘⇧K — pane palette / scrollback search. keyCode 40 = kVK_ANSI_K.
             // Shadows upstream's `clear_screen` (Config.zig:6927).
@@ -979,7 +979,7 @@ final class ForkWindowController: TerminalController {
     // MARK: ⌘T / ⌘W — replace upstream's native-NSWindow-tab actions with sidebar tabs.
 
     @IBAction override func newTab(_ sender: Any?) {
-        showSessionPicker(on: registry.activeHost ?? .local)
+        showSessionPicker()
     }
 
     @IBAction override func closeTab(_ sender: Any?) {
@@ -993,26 +993,19 @@ final class ForkWindowController: TerminalController {
     private var sheetPanel: NSWindow?
     private var sheetResignSub: Any?
 
-    func showNewSessionSheet() {
-        presentSheet(size: .init(width: 640, height: 320)) { [weak self] in
-            NewSessionView(defaultHostID: self?.registry.activeHost?.id ?? ForkHost.local.id,
-                           onSubmit: { intent in self?.newForkTab(intent: intent); self?.endSheet() },
-                           onCancel: { self?.endSheet() })
-        }
-    }
-
-    /// Compact picker (same as ⌘D split) for ⌘T and the host context-menu — name or attach,
-    /// no cwd/cmd fields. Use `showNewSessionSheet` for the full form.
-    func showSessionPicker(on host: ForkHost) {
+    /// Two-stage new-session palette. ⌘T / ⌘⇧T / sidebar ＋ open it unlocked (host
+    /// filterable, defaults to the active host); the host-row context menu opens it
+    /// `locked` so stage 1 is skipped. ⌘D builds its own (locked, split-submit) instance.
+    func showSessionPicker(lockedTo host: ForkHost? = nil) {
+        let h = host ?? registry.activeHost ?? .local
         let placeholder = registry.uniqueAutoName()
-        presentSheet(size: .init(width: 280, height: 280)) { [weak self] in
-            SplitPickerView(
-                title: "New session on \(host.label)",
-                host: host, placeholder: placeholder,
+        presentSheet(size: .init(width: 400, height: 300)) { [weak self] in
+            NewSessionView(
+                host: h, locked: host != nil, placeholder: placeholder,
                 onSubmit: { ref, smartJump in
                     self?.newForkTab(intent: .init(
                         hostID: ref.hostID, name: ref.name,
-                        // ⌘⏎: the session's shell starts at the zsh-z match for its name.
+                        // ⇧⏎: the session's shell starts at the zsh-z match for its name.
                         cmd: smartJump ? ZmxAdapter.smartJumpCmd(name: ref.name) : nil,
                         external: ref.external))
                     self?.endSheet()
@@ -1387,10 +1380,10 @@ final class ForkWindowController: TerminalController {
         let seed = registry.refs[oldView.id].flatMap { $0.isValid ? $0.name : nil }
         let placeholder = registry.uniqueAutoName(derivedFrom: seed)
         pendingSplit = (oldView, direction)
-        presentSheet(size: .init(width: 280, height: 280)) { [weak self] in
-            SplitPickerView(
+        presentSheet(size: .init(width: 400, height: 300)) { [weak self] in
+            NewSessionView(
                 title: "Split on \(host.label)",
-                host: host, placeholder: placeholder,
+                host: host, locked: true, placeholder: placeholder,
                 onSubmit: { ref, smartJump in
                     guard let self, let p = self.pendingSplit else { return }
                     self.pendingSplit = nil
