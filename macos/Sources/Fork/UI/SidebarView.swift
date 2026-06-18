@@ -76,7 +76,7 @@ struct SidebarView: View {
 
     private var header: some View {
         HStack(spacing: 4) {
-            iconButton("plus", help: "New tab") { controller?.showNewSessionSheet() }
+            iconButton("plus", help: "New tab") { controller?.showSessionPicker() }
             iconButton("server.rack", help: "Hosts") { controller?.showHostsSheet() }
             iconButton("sidebar.left", help: "Hide sidebar") { controller?.toggleSidebar() }
             iconButton(filterTagged ? "tag.fill" : "tag",
@@ -280,7 +280,7 @@ struct SidebarView: View {
             target: host.id, dragging: $draggingHost, move: registry.moveHost))
         .contextMenu {
             Button("New Session on \(host.label)…") {
-                controller?.showSessionPicker(on: host)
+                controller?.showSessionPicker(lockedTo: host)
             }
             Button("Manage Host…") { controller?.showHostsSheet(select: host.id) }
             if host.id != ForkHost.local.id {
