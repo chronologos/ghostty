@@ -123,12 +123,12 @@ Fork/
                                ForkCard
     TagEditView.swift          tag popover (text + 8 hue swatches); opened from the pane
                                context menu's Tag submenu ("New Tag…")
-    NewSessionView.swift       full new-session form (sidebar ＋ button): host picker ·
-                               name/cwd/cmd fields · recents list
-    SplitPickerView.swift      compact picker (name or attach-existing): ⌘T, ⌘D split, and
-                               host context-menu "New Session on …". ⏎ = create/attach;
-                               ⌘⏎ = smart-jump create (shell starts at the zsh-z frecency
-                               match for the typed name, resolved on the session's host)
+    NewSessionView.swift       two-stage new-session palette (⌘T / ⌘⇧T / sidebar ＋ /
+                               host context-menu / ⌘D split): type-filter host → ⏎/Tab →
+                               name (or ↓ to pick existing). ⏎ create/attach;
+                               ⇧⏎ smart-jump create (shell starts at the zsh-z frecency
+                               match for the typed name, resolved on the session's host);
+                               ⌫ on empty name steps back to host pick
     SessionMetaLabel.swift     shared row trailer: CC sparkle (busy/blocked/idle) +
                                in-sidebar glyph + client-count + creation age
     HostsView.swift            master-detail Hosts sheet (list + add-host form)
@@ -145,9 +145,9 @@ Fork/
                                firstResponder; reused as the borderless ⌘K palette window
 ```
 
-New-session flow (two sheets on purpose): **⌘T** and the host context-menu open the compact
-picker (`SplitPickerView` — quick name-or-attach on one host); the sidebar **＋ button** and
-**⌘⇧T** open the full form (`NewSessionView` — host picker + cwd/command fields). ⌘⇧T
+New-session flow: one two-stage palette (`NewSessionView`) for every entry point. ⌘T /
+⌘⇧T / sidebar ＋ open it at the host stage (active host pre-selected); ⌘D and the
+host context-menu open it host-locked, skipping straight to the name stage. ⌘⇧T
 shadows upstream's `undo` alias (Config.zig:6934); ⌘Z remains undo.
 
 ## Gotchas (each cost ≥1 verifier round)
@@ -341,7 +341,6 @@ A terminal that runs arbitrary shells will trip every macOS privacy surface. Thr
   close do unbind; `persistActive` never prunes — see undo gotcha); `isConnected()` may stay
   green slightly stale. In-memory only, not persisted.
 - `SessionRegistry.shared` stored-prop init will fail compile under Swift 6 strict concurrency.
-- Command field in NewSessionView splits naively on spaces.
 - ⌘⇧[/⌘⇧] tab nav matches `{`/`[` and `}`/`]` via `charactersIgnoringModifiers`.
   Digit shortcuts (⌘1-9, ⌘⌥1-9) are layout-independent via `keyCode`.
   All list-relative nav (⌘1-9, ⌘⇧[/⌘⇧], last_tab, move_tab) goes through one
@@ -359,7 +358,7 @@ A terminal that runs arbitrary shells will trip every macOS privacy surface. Thr
   buttons 8/9), so a TUI that binds them loses; nothing common does. Also in the ⌘K
   palette as Back/Forward (shown only when a step would actually land somewhere).
   Swallowed-but-inert while a sheet or the ⌘W alert is up.
-  ⌘⏎ in the session picker = smart-jump create — needs the zsh-z plugin (`zshz`) in
+  ⇧⏎ in the session picker = smart-jump create — needs the zsh-z plugin (`zshz`) in
   the target host's .zshrc. No zshz → starts in the default dir; no zsh at all → the
   sh wrapper degrades to `${SHELL:-sh} -l`. Disabled when the typed name already
   exists (zmx attach would reuse that session and discard the jump).

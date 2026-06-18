@@ -30,7 +30,7 @@ struct CheatsheetView: View {
         ("Hover pane ⅓s", "Peek — status · dir · zmx name · age"),
         ("Long-press ◎", "Focus cutoff & sort options"),
         ("Mouse ⏴ ⏵", "Back / forward in tab history"),
-        ("⌘⏎ in picker", "New session at z-jump dir"),
+        ("⇧⏎ in picker", "New session at z-jump dir"),
     ]
 
     var body: some View {
