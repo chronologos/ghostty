@@ -74,7 +74,9 @@ Fork/
   Notify.swift                 UN delegate proxy (wraps AppDelegate's); userInfo["forkTab"]
                                → foreground banner + click→activate(tab:); dock badge =
                                count of (finished-unread OR blocked) && !ccBusy panes
-  SurfaceWiggle.swift          forkWigglePane — ⌘⇧R force-repaint via synthetic SIGWINCH
+  SurfaceWiggle.swift          forkWigglePane — ⌘⇧R force-repaint via synthetic SIGWINCH;
+                               also injects a Space+Backspace nudge when (and only when)
+                               the CC probe sees a session in that pane
   Model/
     Host.swift                 ForkHost, Transport, SSHTarget, SessionRef, TabModel,
                                PersistedTree, PaneTag, HoverCommand, isValidIdent/

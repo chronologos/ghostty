@@ -23,10 +23,29 @@ import GhosttyKit
 /// Main-thread only (callers and the asyncAfter queue are both main).
 private var wiggling = Set<ObjectIdentifier>()
 
+@MainActor
 func forkWigglePane(_ view: Ghostty.SurfaceView) {
     guard let s = view.surface else { return }
     let key = ObjectIdentifier(view)
     guard wiggling.insert(key).inserted else { return }
+    // Space + Backspace nudge — a no-op edit that forces a line-editing prompt to
+    // re-render when SIGWINCH alone doesn't. Gated on the CC probe having seen a
+    // session in this pane: elsewhere Space is often a *command* (htop tags, fzf
+    // toggles, less pages) that Backspace won't undo, so an unconditional nudge
+    // would silently mutate state in non-prompt TUIs. Goes through `sendKeyEvent`
+    // (not `sendText`) so libghostty applies the negotiated keyboard protocol —
+    // press+release pairs because under kitty report-event-types a bare press
+    // reads as a held key.
+    if let ref = SessionRegistry.shared.refs[view.id],
+       SessionRegistry.shared.ccLive[ref.hostID]?[ref.key] != nil,
+       let m = view.surfaceModel {
+        for k in [Ghostty.Input.Key.space, .backspace] {
+            m.sendKeyEvent(.init(key: k, action: .press,
+                                 text: k == .space ? " " : nil,
+                                 unshiftedCodepoint: k == .space ? 0x20 : 0))
+            m.sendKeyEvent(.init(key: k, action: .release))
+        }
+    }
     let o = ghostty_surface_size(s)
     let w = o.width_px, h = o.height_px, bump = h + o.cell_height_px
     for (ms, height) in [(0, bump), (200, h), (250, bump), (450, h)] {

@@ -76,9 +76,10 @@ struct NewSessionView: View {
 
     /// ⇧⏎ needs a real typed name (z-jumping the random placeholder can't match), the
     /// name must not already exist — `zmx attach` would attach and discard the jump —
-    /// and no existing row may be selected (commit() would attach it instead).
+    /// no existing row may be selected (commit() would attach it instead), and the
+    /// session list must have loaded (the exists-check below is vacuous against `[]`).
     private var canSmartJump: Bool {
-        stage == .session && sel == 0 && !query.isEmpty && nameValid
+        stage == .session && sel == 0 && recents != nil && !query.isEmpty && nameValid
             && !sessions.contains { $0.name == query }
     }
 
@@ -290,8 +291,10 @@ struct NewSessionView: View {
             if sel > 0, sel - 1 < sessions.count {
                 let e = sessions[sel - 1]
                 submit(e.name, external: e.external)
-            } else if shift, canSmartJump {
-                submit(query, smartJump: true)
+            } else if shift {
+                // ⇧⏎ that can't z-jump must NOT fall through to plain create — that's
+                // exactly the silent attach-and-discard the guard exists to prevent.
+                if canSmartJump { submit(query, smartJump: true) } else { NSSound.beep() }
             } else if nameValid {
                 submit(query.isEmpty ? placeholder : query)
             }
@@ -310,9 +313,8 @@ struct NewSessionView: View {
 
     private func back() {
         query = ""
+        sel = 0
         stage = .host
-        // sel left to onChange(of: query) → 0; restoring to the prior host's index
-        // would be clobbered by that handler when query was non-empty.
     }
 
     private func submit(_ name: String, external: Bool = false, smartJump: Bool = false) {
