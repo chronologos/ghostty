@@ -130,7 +130,9 @@ Fork/
                                name (or ↓ to pick existing). ⏎ create/attach;
                                ⇧⏎ smart-jump create (shell starts at the zsh-z frecency
                                match for the typed name, resolved on the session's host);
-                               ⌫ on empty name steps back to host pick
+                               ⌫ on empty name steps back to host pick. Stage/sel/query
+                               state lives in `NewSessionMachine` (unit-tested) so the
+                               sel-reset invariants don't depend on view-side onChange
     SessionMetaLabel.swift     shared row trailer: CC sparkle (busy/blocked/idle) +
                                in-sidebar glyph + client-count + creation age
     HostsView.swift            master-detail Hosts sheet (list + add-host form)
