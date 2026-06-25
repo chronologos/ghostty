@@ -9,11 +9,18 @@ struct NewSessionIntent {
     var external: Bool = false
 }
 
-/// Pure two-stage state for the new-session palette — extracted so the
-/// `advance`/`back`/`move` invariants are unit-testable
-/// (`NewSessionMachineTests`) instead of only reachable by driving the sheet.
-struct NewSessionMachine: Equatable {
+/// Reducer for the two-stage new-session palette. Owns *all* state — including
+/// the fetched session list — so `advance` resets everything atomically and
+/// `commit`/`canSmartJump` are testable (`NewSessionMachineTests`).
+struct NewSessionMachine {
     enum Stage: Hashable { case host, session }
+
+    enum Action: Equatable {
+        case attach(name: String, external: Bool)
+        case create(name: String, smartJump: Bool)
+        case beep
+        case none
+    }
 
     private(set) var stage: Stage
     private(set) var host: ForkHost
@@ -22,27 +29,54 @@ struct NewSessionMachine: Equatable {
     /// `sel` resets. No view-side `onChange` coupling.
     var query = "" { didSet { sel = 0 } }
     private(set) var sel = 0
+    private(set) var recents: ZmxAdapter.ListResult?
+    private(set) var unreachable = false
     let locked: Bool
+    let placeholder: String
 
-    init(host: ForkHost, locked: Bool) {
+    init(host: ForkHost, locked: Bool, placeholder: String) {
         self.host = host
         self.locked = locked
+        self.placeholder = placeholder
         stage = locked ? .session : .host
+    }
+
+    // MARK: derived
+
+    func hosts(in all: [ForkHost]) -> [ForkHost] {
+        query.isEmpty ? all : all.filter { $0.label.localizedCaseInsensitiveContains(query) }
+    }
+
+    var sessions: [ZmxAdapter.ListEntry] {
+        guard let r = recents else { return [] }
+        let all = r.managed + r.external
+        return query.isEmpty ? all : all.filter { $0.name.localizedCaseInsensitiveContains(query) }
     }
 
     var nameValid: Bool {
         query.isEmpty || SessionRef(hostID: host.id, name: query).isValid
     }
 
+    /// ⇧⏎ needs a real typed name (z-jumping the random placeholder can't match), the
+    /// name must not already exist — `zmx attach` would attach and discard the jump —
+    /// no existing row may be selected (commit() would attach it instead), and the
+    /// session list must have loaded (the exists-check below is vacuous against `[]`).
+    var canSmartJump: Bool {
+        stage == .session && sel == 0 && recents != nil && !query.isEmpty && nameValid
+            && !sessions.contains { $0.name == query }
+    }
+
+    // MARK: events
+
     /// `count` = filtered list length; `.session` adds the "create new" slot 0.
-    mutating func move(_ d: Int, count: Int) {
-        let n = stage == .host ? count : count + 1
+    mutating func move(_ d: Int, in allHosts: [ForkHost]) {
+        let n = stage == .host ? hosts(in: allHosts).count : sessions.count + 1
         guard n > 0 else { return }
         sel = max(0, min(n - 1, sel + d))
     }
 
     mutating func advance(to h: ForkHost) {
-        host = h; query = ""; stage = .session
+        host = h; query = ""; recents = nil; unreachable = false; stage = .session
     }
 
     mutating func back() {
@@ -50,8 +84,32 @@ struct NewSessionMachine: Equatable {
         query = ""; stage = .host
     }
 
-    mutating func preselect(hostIndex i: Int) {
-        if stage == .host { sel = i }
+    mutating func preselect(in all: [ForkHost]) {
+        if stage == .host, let i = all.firstIndex(where: { $0.id == host.id }) { sel = i }
+    }
+
+    /// View calls after the async `zmx list` resolves; `nil` = host unreachable.
+    mutating func setRecents(_ r: ZmxAdapter.ListResult?) {
+        unreachable = (r == nil)
+        recents = r ?? .init()
+    }
+
+    /// Mutating: at `.host` it advances internally and returns `.none`.
+    mutating func commit(shift: Bool, in allHosts: [ForkHost]) -> Action {
+        switch stage {
+        case .host:
+            let h = hosts(in: allHosts)
+            if sel < h.count { advance(to: h[sel]) }
+            return .none
+        case .session:
+            if sel > 0, sel - 1 < sessions.count {
+                let e = sessions[sel - 1]
+                return .attach(name: e.name, external: e.external)
+            }
+            if shift { return canSmartJump ? .create(name: query, smartJump: true) : .beep }
+            return nameValid ? .create(name: query.isEmpty ? placeholder : query, smartJump: false)
+                             : .none
+        }
     }
 }
 
@@ -69,13 +127,10 @@ struct NewSessionView: View {
     @EnvironmentObject private var registry: SessionRegistry
 
     let title: String?
-    let placeholder: String
     let onSubmit: (SessionRef, _ smartJump: Bool) -> Void
     let onCancel: () -> Void
 
     @State private var m: NewSessionMachine
-    @State private var recents: ZmxAdapter.ListResult?
-    @State private var unreachable = false
     @FocusState private var focused: Bool
 
     init(title: String? = nil,
@@ -85,34 +140,12 @@ struct NewSessionView: View {
          onSubmit: @escaping (SessionRef, Bool) -> Void,
          onCancel: @escaping () -> Void) {
         self.title = title
-        self.placeholder = placeholder
         self.onSubmit = onSubmit
         self.onCancel = onCancel
-        self._m = State(initialValue: .init(host: host, locked: locked))
+        self._m = State(initialValue: .init(host: host, locked: locked, placeholder: placeholder))
     }
 
-    // MARK: filtering
-
-    private var hosts: [ForkHost] {
-        guard !m.query.isEmpty else { return registry.hosts }
-        return registry.hosts.filter { $0.label.localizedCaseInsensitiveContains(m.query) }
-    }
-
-    private var sessions: [ZmxAdapter.ListEntry] {
-        guard let r = recents else { return [] }
-        let all = r.managed + r.external
-        guard !m.query.isEmpty else { return all }
-        return all.filter { $0.name.localizedCaseInsensitiveContains(m.query) }
-    }
-
-    /// ⇧⏎ needs a real typed name (z-jumping the random placeholder can't match), the
-    /// name must not already exist — `zmx attach` would attach and discard the jump —
-    /// no existing row may be selected (commit() would attach it instead), and the
-    /// session list must have loaded (the exists-check below is vacuous against `[]`).
-    private var canSmartJump: Bool {
-        m.stage == .session && m.sel == 0 && recents != nil && !m.query.isEmpty
-            && m.nameValid && !sessions.contains { $0.name == m.query }
-    }
+    private var hosts: [ForkHost] { m.hosts(in: registry.hosts) }
 
     // MARK: body
 
@@ -138,8 +171,7 @@ struct NewSessionView: View {
             Button("Commit") { commit(false) }.keyboardShortcut(.defaultAction)
         }.disabled(focused).hidden())
         .onAppear {
-            // Pre-select the default host so a bare ⏎ advances to it.
-            if let i = hosts.firstIndex(where: { $0.id == m.host.id }) { m.preselect(hostIndex: i) }
+            m.preselect(in: registry.hosts)
             // @FocusState set synchronously in onAppear doesn't take — same defer as
             // ForkPaletteCard.
             DispatchQueue.main.async { focused = true }
@@ -150,8 +182,7 @@ struct NewSessionView: View {
             guard m.stage == .session else { return }
             let r = await ZmxAdapter.list(host: m.host)
             guard !Task.isCancelled else { return }
-            unreachable = (r == nil)
-            recents = r ?? .init()
+            m.setRecents(r)
         }
     }
 
@@ -177,7 +208,7 @@ struct NewSessionView: View {
                 .transition(.opacity.combined(with: .move(edge: .leading)))
             }
             TextField("", text: $m.query,
-                      prompt: Text(m.stage == .host ? "host" : placeholder))
+                      prompt: Text(m.stage == .host ? "host" : m.placeholder))
                 .textFieldStyle(.plain)
                 .font(.system(size: 14, design: m.stage == .session ? .monospaced : .default))
                 .focused($focused)
@@ -190,21 +221,19 @@ struct NewSessionView: View {
                     commit(true); return .handled
                 }
                 .backport.onKeyPress(.tab) { _ in
-                    guard m.stage == .host, m.sel < hosts.count else { return .ignored }
-                    advance(to: hosts[m.sel]); return .handled
+                    guard m.stage == .host else { return .ignored }
+                    commit(false); return .handled
                 }
                 .backport.onKeyPress(.delete) { _ in
                     guard m.stage == .session, m.query.isEmpty, !m.locked else { return .ignored }
                     m.back(); return .handled
                 }
-                .backport.onKeyPress(.downArrow) { _ in m.move(1, count: count); return .handled }
-                .backport.onKeyPress(.upArrow) { _ in m.move(-1, count: count); return .handled }
+                .backport.onKeyPress(.downArrow) { _ in m.move(1, in: registry.hosts); return .handled }
+                .backport.onKeyPress(.upArrow) { _ in m.move(-1, in: registry.hosts); return .handled }
                 .onExitCommand(perform: onCancel)
         }
         .animation(Theme.settle, value: m.stage)
     }
-
-    private var count: Int { m.stage == .host ? hosts.count : sessions.count }
 
     // MARK: list
 
@@ -219,14 +248,14 @@ struct NewSessionView: View {
                     switch m.stage {
                     case .host:
                         ForEach(Array(hosts.enumerated()), id: \.element.id) { i, h in
-                            row(selected: i == m.sel, action: { advance(to: h) }) {
+                            row(selected: i == m.sel, action: { m.advance(to: h) }) {
                                 HostDot(host: h, size: 8)
                                     .opacity(registry.isConnected(h.id) ? 1 : 0.35)
                                 Text(h.label).font(.system(size: 13))
                             }
                         }
                     case .session:
-                        ForEach(Array(sessions.enumerated()), id: \.element) { i, e in
+                        ForEach(Array(m.sessions.enumerated()), id: \.element) { i, e in
                             row(selected: i + 1 == m.sel,
                                 action: { submit(e.name, external: e.external) }) {
                                 VStack(alignment: .leading, spacing: 0) {
@@ -249,8 +278,8 @@ struct NewSessionView: View {
                 switch m.stage {
                 case .host where s < hosts.count:
                     proxy.scrollTo(hosts[s].id)
-                case .session where s > 0 && s - 1 < sessions.count:
-                    proxy.scrollTo(sessions[s - 1])
+                case .session where s > 0 && s - 1 < m.sessions.count:
+                    proxy.scrollTo(m.sessions[s - 1])
                 default: break
                 }
             }
@@ -274,14 +303,14 @@ struct NewSessionView: View {
     @ViewBuilder private var emptyState: some View {
         if m.stage == .host, hosts.isEmpty {
             Text("No host matches").font(.system(size: 11)).foregroundStyle(.secondary)
-        } else if m.stage == .session, sessions.isEmpty, recents != nil {
+        } else if m.stage == .session, m.sessions.isEmpty, m.recents != nil {
             // "Couldn't reach" ≠ "No sessions" — a failed query must not imply the host is
             // empty; ⏎ still works (the new pane will surface the ssh error itself).
-            Text(unreachable ? "Couldn't reach \(m.host.label) — ⏎ still creates"
+            Text(m.unreachable ? "Couldn't reach \(m.host.label) — ⏎ still creates"
                  : m.query.isEmpty ? "No sessions on \(m.host.label)"
                  : "No match — ⏎ creates")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
-        } else if m.stage == .session, recents == nil {
+        } else if m.stage == .session, m.recents == nil {
             ProgressView().controlSize(.small)
         }
     }
@@ -303,8 +332,8 @@ struct NewSessionView: View {
                 Button { commit(true) } label: { hint("⇧⏎", "create @ z") }
                     .buttonStyle(.plain)
                     .keyboardShortcut(.return, modifiers: .shift)
-                    .opacity(canSmartJump ? 1 : 0.35)
-                    .help(canSmartJump
+                    .opacity(m.canSmartJump ? 1 : 0.35)
+                    .help(m.canSmartJump
                           ? "Create with the shell started at the z-jump directory for this name"
                           : "Needs a new, valid name (and no row selected)")
                 if !m.locked { hint("⌫", "host") }
@@ -325,27 +354,12 @@ struct NewSessionView: View {
 
     // MARK: actions
 
-    private func advance(to h: ForkHost) {
-        recents = nil
-        unreachable = false
-        m.advance(to: h)
-    }
-
     private func commit(_ shift: Bool) {
-        switch m.stage {
-        case .host:
-            if m.sel < hosts.count { advance(to: hosts[m.sel]) }
-        case .session:
-            if m.sel > 0, m.sel - 1 < sessions.count {
-                let e = sessions[m.sel - 1]
-                submit(e.name, external: e.external)
-            } else if shift {
-                // ⇧⏎ that can't z-jump must NOT fall through to plain create — that's
-                // exactly the silent attach-and-discard the guard exists to prevent.
-                if canSmartJump { submit(m.query, smartJump: true) } else { NSSound.beep() }
-            } else if m.nameValid {
-                submit(m.query.isEmpty ? placeholder : m.query)
-            }
+        switch m.commit(shift: shift, in: registry.hosts) {
+        case .attach(let name, let ext): submit(name, external: ext)
+        case .create(let name, let sj): submit(name, smartJump: sj)
+        case .beep: NSSound.beep()
+        case .none: break
         }
     }
 
