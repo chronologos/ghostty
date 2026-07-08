@@ -34,6 +34,18 @@ struct NewSessionMachineTests {
         #expect(m.sel == 0)
     }
 
+    /// macOS TextField re-writes its binding (unchanged) when the field editor
+    /// commits on ⏎, *before* .onSubmit fires. That must not zero an arrow-key
+    /// selection.
+    @Test func sameValueQueryWriteDoesNotResetSel() {
+        var m = machine()
+        m.move(1, in: all)
+        #expect(m.sel == 1)
+        m.query = ""
+        #expect(m.sel == 1)
+        #expect(m.commit(shift: false, in: all) == .none && m.host == remote)
+    }
+
     @Test func backResetsSel_evenWhenQueryAlreadyEmpty() {
         var m = machine()
         m.advance(to: remote)
