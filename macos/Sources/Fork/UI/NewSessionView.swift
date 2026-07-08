@@ -24,10 +24,12 @@ struct NewSessionMachine {
 
     private(set) var stage: Stage
     private(set) var host: ForkHost
-    /// `didSet` fires on *every* assignment — including `query = ""` from
-    /// `advance`/`back` when it was already empty — so this is the single place
-    /// `sel` resets. No view-side `onChange` coupling.
-    var query = "" { didSet { sel = 0 } }
+    /// `sel` resets only when the query *changes* — a macOS `TextField` re-writes
+    /// its binding with the unchanged text when the field editor commits on ⏎, so
+    /// an unguarded `didSet` here zeroed `sel` between arrow-key selection and
+    /// `.onSubmit` (⏎ always picked host 0). Stage transitions reset `sel`
+    /// explicitly in `advance`/`back`. No view-side `onChange` coupling.
+    var query = "" { didSet { if query != oldValue { sel = 0 } } }
     private(set) var sel = 0
     private(set) var recents: ZmxAdapter.ListResult?
     private(set) var unreachable = false
@@ -76,12 +78,12 @@ struct NewSessionMachine {
     }
 
     mutating func advance(to h: ForkHost) {
-        host = h; query = ""; recents = nil; unreachable = false; stage = .session
+        host = h; query = ""; sel = 0; recents = nil; unreachable = false; stage = .session
     }
 
     mutating func back() {
         guard !locked else { return }
-        query = ""; stage = .host
+        query = ""; sel = 0; stage = .host
     }
 
     mutating func preselect(in all: [ForkHost]) {
