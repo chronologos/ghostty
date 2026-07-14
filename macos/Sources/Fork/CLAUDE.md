@@ -120,7 +120,12 @@ Fork/
                                in a ForkCard with a ⌘N + HostDot + host-label caption row
     OptionGesture.swift        OptionGestureRecognizer — the ⌥-hold / ⌥⌥ recognizer
                                (extracted ViewModifier; SidebarView binds revealAll/onSweep)
-    Theme.swift                semantic style tokens (clay/blocked/error/hover/…), peek
+    ForkTheme.swift            ForkTokens (terminal `foreground`/`background` → text +
+                               chrome) + the `\.forkTokens` env key + ForkThemed, the one
+                               place ForkTheme is observed. `resolve` declines a theme when
+                               Increase Contrast is on or the bg's polarity fights the
+                               window appearance the material is drawn from
+    Theme.swift                theme-*independent* tokens (clay/blocked/error/…), peek
                                tokens (peekRule/peekDelay/exhale/settle), Pebble, HandCut,
                                ForkCard
     TagEditView.swift          tag popover (text + 8 hue swatches); opened from the pane

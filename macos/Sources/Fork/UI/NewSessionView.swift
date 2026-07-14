@@ -126,6 +126,8 @@ struct NewSessionMachine {
 /// `locked` skips stage 1 entirely — used for ⌘D (split = current pane's host)
 /// and the host-row context menu where the host is already decided.
 struct NewSessionView: View {
+    @Environment(\.forkTokens) private var tokens
+
     @EnvironmentObject private var registry: SessionRegistry
 
     let title: String?
@@ -154,7 +156,7 @@ struct NewSessionView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let title {
-                Text(title).font(.system(size: 11)).foregroundStyle(.secondary)
+                Text(title).font(.system(size: 11)).foregroundStyle(tokens.textSecondary)
                     .padding(.bottom, 8)
             }
             field
@@ -201,11 +203,11 @@ struct NewSessionView: View {
                     if !m.locked {
                         Image(systemName: "chevron.right")
                             .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(tokens.textTertiary)
                     }
                 }
                 .padding(.horizontal, 8).padding(.vertical, 4)
-                .background(Theme.chipBg, in: Capsule())
+                .background(tokens.chipBg, in: Capsule())
                 .onTapGesture { m.back() }
                 .transition(.opacity.combined(with: .move(edge: .leading)))
             }
@@ -263,7 +265,7 @@ struct NewSessionView: View {
                                 VStack(alignment: .leading, spacing: 0) {
                                     Text(e.name).font(.system(size: 12, design: .monospaced))
                                     if let t = registry.tabTitle(for: e.name, external: e.external, on: m.host.id) {
-                                        Text(t).font(.system(size: 10)).foregroundStyle(.secondary)
+                                        Text(t).font(.system(size: 10)).foregroundStyle(tokens.textSecondary)
                                     }
                                 }
                                 Spacer()
@@ -295,7 +297,7 @@ struct NewSessionView: View {
             HStack(spacing: 8) { content() }
                 .padding(.horizontal, 8).padding(.vertical, 5)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(selected ? Theme.selectedRow : .clear,
+                .background(selected ? tokens.selectedRow : .clear,
                             in: RoundedRectangle(cornerRadius: 5))
                 .contentShape(Rectangle())
         }
@@ -304,14 +306,14 @@ struct NewSessionView: View {
 
     @ViewBuilder private var emptyState: some View {
         if m.stage == .host, hosts.isEmpty {
-            Text("No host matches").font(.system(size: 11)).foregroundStyle(.secondary)
+            Text("No host matches").font(.system(size: 11)).foregroundStyle(tokens.textSecondary)
         } else if m.stage == .session, m.sessions.isEmpty, m.recents != nil {
             // "Couldn't reach" ≠ "No sessions" — a failed query must not imply the host is
             // empty; ⏎ still works (the new pane will surface the ssh error itself).
             Text(m.unreachable ? "Couldn't reach \(m.host.label) — ⏎ still creates"
                  : m.query.isEmpty ? "No sessions on \(m.host.label)"
                  : "No match — ⏎ creates")
-                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .font(.system(size: 11)).foregroundStyle(tokens.textSecondary)
         } else if m.stage == .session, m.recents == nil {
             ProgressView().controlSize(.small)
         }
@@ -343,13 +345,13 @@ struct NewSessionView: View {
             Spacer()
             hint("esc", "cancel")
         }
-        .font(.system(size: 10)).foregroundStyle(.secondary)
+        .font(.system(size: 10)).foregroundStyle(tokens.textSecondary)
     }
 
     private func hint(_ key: String, _ label: String) -> some View {
         HStack(spacing: 4) {
             Text(key).padding(.horizontal, 4).padding(.vertical, 1)
-                .background(Theme.chipBg, in: RoundedRectangle(cornerRadius: 3))
+                .background(tokens.chipBg, in: RoundedRectangle(cornerRadius: 3))
             Text(label)
         }
     }

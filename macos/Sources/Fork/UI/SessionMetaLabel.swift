@@ -8,6 +8,8 @@ import SwiftUI
 /// two signals so "0 people + old age" stops looking like "safe to kill". The age is the
 /// session's *creation* age (`zmx list` has no activity field).
 struct SessionMetaLabel: View {
+    @Environment(\.forkTokens) private var tokens
+
     let entry: ZmxAdapter.ListEntry
     /// Session is already open as a pane in the sidebar (even a cold placeholder).
     var inSidebar: Bool = false
@@ -24,29 +26,29 @@ struct SessionMetaLabel: View {
                 Image(systemName: "sparkles")
                     .font(.system(size: 8))
                     .foregroundStyle(busy ? Theme.clay
-                                     : ccInfo.isBlocked ? Theme.blocked : Color.secondary)
+                                     : ccInfo.isBlocked ? Theme.blocked : tokens.textSecondary)
                     .opacity(busy || ccInfo.isBlocked ? 1 : 0.6)
                     .help(ccHelp(ccInfo, busy: busy))
             }
             if inSidebar {
                 Image(systemName: "sidebar.left")
                     .font(.system(size: 8))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(tokens.textSecondary)
                     .help("Already open as a pane in the sidebar")
             }
             HStack(spacing: 2) {
                 Image(systemName: "person.fill").font(.system(size: 8))
                 Text("\(entry.clients)")
             }
-            .foregroundStyle(entry.clients > 0 ? Theme.clay : Color.secondary)
+            .foregroundStyle(entry.clients > 0 ? Theme.clay : tokens.textSecondary)
             .help(entry.clients == 1 ? "1 attached client" : "\(entry.clients) attached clients")
-            Text("·").foregroundStyle(.secondary)
+            Text("·").foregroundStyle(tokens.textSecondary)
             // Creation age in plain secondary, not the recency ramp — an old-but-busy
             // session must not render faded as if abandoned.
-            Text("\(entry.created.shortAge) old").foregroundStyle(.secondary)
+            Text("\(entry.created.shortAge) old").foregroundStyle(tokens.textSecondary)
                 .help("Created \(entry.created.shortAge) ago")
             if entry.external {
-                Text("ext").foregroundStyle(.secondary)
+                Text("ext").foregroundStyle(tokens.textSecondary)
             }
         }
         // 10pt matches the sidebar's small-text scale (PR48 bumped that +1pt; sheets lagged).

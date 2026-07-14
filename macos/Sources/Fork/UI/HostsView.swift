@@ -5,6 +5,8 @@ import SwiftUI
 /// right (`HostDetailView` for an existing host, the new-host form otherwise). Replaces
 /// `NewHostView` + the right-click-only "Manage Host…" entry point.
 struct HostsView: View {
+    @Environment(\.forkTokens) private var tokens
+
     enum Sel: Hashable { case host(ForkHost.ID), new }
 
     @EnvironmentObject private var registry: SessionRegistry
@@ -94,7 +96,7 @@ struct HostsView: View {
             HStack(spacing: 10) {
                 HostDot(slot: previewSlot, size: 18)
                 Text("Auto-assigned color (change after adding)")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(tokens.textSecondary)
             }
             if dupe { Text("Already added.").font(.caption).foregroundStyle(Theme.error) }
             HStack {

@@ -5,6 +5,8 @@ import GhosttyKit
 
 /// Left sidebar: hosts as collapsible sections, tabs as rows (SPEC §9).
 struct SidebarView: View {
+    @Environment(\.forkTokens) private var tokens
+
     weak var controller: ForkWindowController?
     @EnvironmentObject private var registry: SessionRegistry
     @State private var renameText: String = ""
@@ -87,7 +89,7 @@ struct SidebarView: View {
             // Not `iconButton` — macOS `Button` swallows mouseDown so `.onLongPressGesture`
             // on it never fires. Plain Image + tap/long-press composes exclusively.
             Image(systemName: "scope").font(.system(size: 13))
-                .foregroundStyle(focusMode ? Theme.clay : .secondary)
+                .foregroundStyle(focusMode ? Theme.clay : tokens.textSecondary)
                 .frame(width: 24, height: 24).contentShape(Rectangle())
                 .onTapGesture {
                     withAnimation(.snappy(duration: 0.12)) { focusMode.toggle() }
@@ -120,7 +122,7 @@ struct SidebarView: View {
                             perform: @escaping () -> Void) -> some View {
         Button(action: perform) {
             Image(systemName: icon).font(.system(size: 13))
-                .foregroundStyle(tint ?? .secondary)
+                .foregroundStyle(tint ?? tokens.textSecondary)
                 .frame(width: 24, height: 24)
                 .contentShape(Rectangle())
         }
@@ -142,7 +144,7 @@ struct SidebarView: View {
             if tabs.isEmpty {
                 Label(filterTagged ? "No tagged panes" : "Nothing in the last \(Int(cutoffHours))h",
                       systemImage: filterTagged ? "tag.slash" : "moon.zzz")
-                    .font(mono(12)).foregroundStyle(.secondary)
+                    .font(mono(12)).foregroundStyle(tokens.textSecondary)
                     .padding(.horizontal, 16).padding(.top, 12)
             } else {
                 ForEach(Array(tabs.enumerated()), id: \.element.id) { i, tab in
@@ -160,7 +162,7 @@ struct SidebarView: View {
                             Spacer()
                             HostDot(host: host, size: 7)
                             Text(host?.label ?? "—")
-                                .font(mono(10)).foregroundStyle(.secondary).lineLimit(1)
+                                .font(mono(10)).foregroundStyle(tokens.textSecondary).lineLimit(1)
                         }
                         .contentShape(Rectangle())
                         .contextMenu { tabContextMenu(tab) }
@@ -198,9 +200,9 @@ struct SidebarView: View {
 
     private func keyHint(_ chord: String) -> some View {
         Text(chord)
-            .font(mono(9, .semibold)).foregroundStyle(.secondary)
+            .font(mono(9, .semibold)).foregroundStyle(tokens.textSecondary)
             .padding(.horizontal, 4).padding(.vertical, 1)
-            .background(Theme.chipBg, in: RoundedRectangle(cornerRadius: 3))
+            .background(tokens.chipBg, in: RoundedRectangle(cornerRadius: 3))
     }
 
     // MARK: Host section
@@ -220,7 +222,7 @@ struct SidebarView: View {
                     // Expanded host, zero tabs: without this the chevron rotates and nothing
                     // appears — the section reads as broken rather than empty.
                     Text("No sessions — right-click the host to create one")
-                        .font(mono(10)).foregroundStyle(.tertiary)
+                        .font(mono(10)).foregroundStyle(tokens.textTertiary)
                         .padding(.horizontal, 26).padding(.vertical, 2)
                 }
             }
@@ -235,7 +237,7 @@ struct SidebarView: View {
             HStack(spacing: 8) {
                 Image(systemName: "chevron.right")
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(tokens.textSecondary)
                     .rotationEffect(.degrees(host.expanded ? 90 : 0))
                     .frame(width: 10)
                 HostDot(host: host, size: 10)
@@ -243,13 +245,13 @@ struct SidebarView: View {
                     .frame(width: 14)
                 Text(host.label)
                     .font(mono(13, .medium))
-                    .foregroundStyle(connected ? .primary : .secondary)
+                    .foregroundStyle(connected ? tokens.text : tokens.textSecondary)
                 if let since = registry.hostUnreachableSince[host.id] {
                     // Transport-level cue (zmx list failing), distinct from the dot's
                     // "no live surface" dimming — without it, hours-old CC status on a
                     // dead ssh host reads as live.
                     Image(systemName: "wifi.slash")
-                        .font(.system(size: 9)).foregroundStyle(.secondary)
+                        .font(.system(size: 9)).foregroundStyle(tokens.textSecondary)
                         .help("Unreachable since \(since.formatted(date: .omitted, time: .shortened)) — CC status may be stale")
                 }
                 Spacer()
@@ -264,7 +266,7 @@ struct SidebarView: View {
                 if let i = registry.hosts.firstIndex(where: { $0.id == host.id }), i < 9 {
                     keyHint("⌘⌥\(i + 1)")
                 }
-                Text("\(tabs.count)").font(mono(11)).foregroundStyle(.secondary)
+                Text("\(tabs.count)").font(mono(11)).foregroundStyle(tokens.textSecondary)
             }
             .padding(.horizontal, 4).padding(.vertical, 6)
             .contentShape(Rectangle())
@@ -298,7 +300,7 @@ struct SidebarView: View {
         VStack(alignment: .leading, spacing: 2) {
             ForEach(tabs) { tab in tabRow(tab) }
         }
-        .modifier(ForkCard(fill: Theme.hostCardBg, hPad: 8))
+        .modifier(ForkCard(fill: tokens.hostCardBg, hPad: 8))
         .transition(.opacity)
     }
 
@@ -340,7 +342,7 @@ struct SidebarView: View {
 
     private func tabHeading(_ tab: TabModel, renaming: Bool, active: Bool,
                             paneCount: Int) -> some View {
-        let accent = Theme.hostAccent(registry.host(id: tab.hostID))
+        let accent = tokens.hostAccent(registry.host(id: tab.hostID))
         let toggle = {
             withAnimation(.snappy(duration: 0.15)) {
                 registry.setCollapsed(tab.id, !tab.collapsed)
@@ -349,7 +351,7 @@ struct SidebarView: View {
         return HStack(spacing: 0) {
             Button(action: toggle) {
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
+                    .font(.system(size: 9, weight: .semibold)).foregroundStyle(tokens.textSecondary)
                     .rotationEffect(.degrees(tab.collapsed ? 0 : 90))
                     .frame(width: 14, height: 20, alignment: .leading)
                     .contentShape(Rectangle())
@@ -366,7 +368,7 @@ struct SidebarView: View {
             if tab.collapsed {
                 stateDot(registry.rollup(tab: tab), accent: accent)
                     .padding(.trailing, 6)
-                Text("\(paneCount)").font(mono(10)).foregroundStyle(.tertiary)
+                Text("\(paneCount)").font(mono(10)).foregroundStyle(tokens.textTertiary)
             }
         }
         .padding(.top, 4).padding(.trailing, 12).frame(height: 20)
@@ -442,7 +444,7 @@ struct SidebarView: View {
         let tag = tab.paneTags[ref.key]
         let renaming = registry.renaming == .pane(tab.id, name: ref.key)
         let live = showCC ? registry.ccLive[tab.hostID]?[ref.key] : nil
-        let accent = Theme.hostAccent(registry.host(id: tab.hostID))
+        let accent = tokens.hostAccent(registry.host(id: tab.hostID))
         let dot = registry.dot(ref: ref)
         // Rail-tooltip + red-subtitle text: "what is it waiting for" is the triage answer
         // for a blocked pane. Scoped to .blocked — a stale `needs` on a working pane reads
@@ -482,8 +484,8 @@ struct SidebarView: View {
                         // Hovering's 60s tick is the clock here too (spineHeat buckets at
                         // 5m/1h, so minute granularity is plenty).
                         Spine(first: spine.first, last: spine.last)
-                            .stroke(active ? Theme.spineHeat(tab.lastActive.values.max())
-                                           : Theme.spineHeat(nil), lineWidth: 1)
+                            .stroke(active ? tokens.spineHeat(tab.lastActive.values.max())
+                                           : tokens.spineHeat(nil), lineWidth: 1)
                     } else {
                         Color.clear
                     }
@@ -503,7 +505,7 @@ struct SidebarView: View {
                                           active: active, suppressSubtitle: showCC, fontFamily: fontFamily)
                             } else {
                                 Text(userLabel ?? ref.name).font(mono(13)).lineLimit(1)
-                                    .foregroundStyle(active ? .primary : .secondary)
+                                    .foregroundStyle(active ? tokens.text : tokens.textSecondary)
                             }
                             if showCC {
                                 // Replaces PaneLabel's zmx-name subtitle (suppressed via `showCC`
@@ -525,7 +527,7 @@ struct SidebarView: View {
                         Spacer()
                         if registry.panes[ref]?.watched == true {
                             Image(systemName: "eye")
-                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                                .font(.system(size: 11)).foregroundStyle(tokens.textSecondary)
                                 .padding(.trailing, 4)
                                 .help("Watching — ⌘⌥A to disarm")
                         }
@@ -588,7 +590,7 @@ struct SidebarView: View {
                                   cutoff: SessionRegistry.focusCutoffSeconds(hours: cutoffHours)))
             .padding(.trailing, 12).frame(minHeight: 28)
             .background(
-                focused ? Theme.selectedRow : hovered ? Theme.hover : .clear,
+                focused ? tokens.selectedRow : hovered ? tokens.hover : .clear,
                 in: RoundedRectangle(cornerRadius: 5))
             // Separate layer so hover/selection ADD to a fresh row's glow instead of
             // swapping it for a weaker gray wash.
@@ -664,13 +666,13 @@ struct SidebarView: View {
     /// Pinned-tab badge — tilted like an actual push-pin.
     private func pinBadge(size: CGFloat) -> some View {
         Image(systemName: "pin.fill")
-            .font(.system(size: size)).foregroundStyle(.secondary)
+            .font(.system(size: size)).foregroundStyle(tokens.textSecondary)
             .rotationEffect(.degrees(-18))
     }
 
     /// CC subtitle — status lives in the right-edge rail; recency is the row's afterglow /
     /// doze and the hover peek's age line.
-    /// Blocked: the question CC is asking, in bright `.primary` (the red lives in the
+    /// Blocked: the question CC is asking, in bright `tokens.text` (the red lives in the
     /// rail). Otherwise `name · detail` is a live
     /// activity feed (what the session is, what it's doing / last did), falling back to
     /// cwd basename, then the cached last-seen name for placeholder rows. Unread text is
@@ -698,7 +700,7 @@ struct SidebarView: View {
             Text(n.uppercased()).font(mono(10, .medium)).kerning(0.5)
         }
         // `cached` is for the CC-exited case only; a running-but-unnamed session must not
-        // fall through to the previous session's name in `.secondary` (live) styling.
+        // fall through to the previous session's name in `tokens.textSecondary` (live) styling.
         let label: Text
         if let attention {
             label = Text(attention)
@@ -714,11 +716,11 @@ struct SidebarView: View {
         }
         // The question renders bright, not red: with several agents blocked at once a
         // 3-line red paragraph per row reads as a wall of alarm. Red stays on the
-        // StatusRail bar; the question earns attention by being the only `.primary`
+        // StatusRail bar; the question earns attention by being the only `tokens.text`
         // subtitle text in the sidebar.
-        let style: AnyShapeStyle = attention != nil ? AnyShapeStyle(.primary)
-            : (read || live == nil) ? AnyShapeStyle(.tertiary)
-            : AnyShapeStyle(.secondary)
+        let style: AnyShapeStyle = attention != nil ? AnyShapeStyle(tokens.text)
+            : (read || live == nil) ? AnyShapeStyle(tokens.textTertiary)
+            : AnyShapeStyle(tokens.textSecondary)
         return label
             // `attention == nil`: the read-state belongs to the detail text only — a blocked
             // question must keep its 3 lines even when the unrelated detail counts as read
@@ -791,6 +793,8 @@ struct SidebarView: View {
 /// `surface.title` is `@Published`; observing it here means only the label re-renders
 /// when the shell sends OSC 0/2 — not the whole sidebar.
 private struct PaneLabel: View {
+    @Environment(\.forkTokens) private var tokens
+
     @ObservedObject var surface: Ghostty.SurfaceView
     let userLabel: String?
     let fallback: String
@@ -807,10 +811,10 @@ private struct PaneLabel: View {
         let label = userLabel ?? (t.isEmpty || t == "👻" || isPathish ? fallback : t)
         return VStack(alignment: .leading, spacing: 0) {
             Text(label).font(forkMono(13, .regular, fontFamily)).lineLimit(1)
-                .foregroundStyle(active ? .primary : .secondary)
+                .foregroundStyle(active ? tokens.text : tokens.textSecondary)
             if !suppressSubtitle && label != fallback {
                 Text(fallback).font(forkMono(10, .regular, fontFamily)).lineLimit(1)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(tokens.textTertiary)
             }
         }
     }
@@ -908,6 +912,8 @@ private struct MouseInside: NSViewRepresentable {
 /// zmx identity; the WHAT (CC's status text / blocked question) is `ccLine` directly above,
 /// which un-clamps its line limit while the peek is open.
 private struct PanePeek: View {
+    @Environment(\.forkTokens) private var tokens
+
     let state: PaneState?
     let accent: Color
     let cwd: String?
@@ -933,7 +939,7 @@ private struct PanePeek: View {
         case .working: ("WORKING", accent)
         case .blocked: ("NEEDS YOU", Theme.blocked)
         case .waiting: ("UNREAD", accent)
-        case nil:      (((rawStatus?.isEmpty == false ? rawStatus! : "idle").uppercased(), .secondary))
+        case nil:      (((rawStatus?.isEmpty == false ? rawStatus! : "idle").uppercased(), tokens.textSecondary))
         }
     }
 
@@ -952,9 +958,9 @@ private struct PanePeek: View {
             // Empty-but-non-nil cwd (probe quirk) must not render a dangling DIR label —
             // the old tooltip's `.filter { !$0.isEmpty }` did this job.
             if let cwd, !cwd.isEmpty {
-                line(1, label: "DIR", tint: .secondary, value: cwd)
+                line(1, label: "DIR", tint: tokens.textSecondary, value: cwd)
             }
-            line(cwd?.isEmpty == false ? 2 : 1, label: "ZMX", tint: .secondary,
+            line(cwd?.isEmpty == false ? 2 : 1, label: "ZMX", tint: tokens.textSecondary,
                  value: "\(session) @ \(host)")
         }
         .padding(.top, 5).padding(.bottom, 6)
@@ -975,7 +981,7 @@ private struct PanePeek: View {
                 .frame(width: 58, alignment: .leading)
             Text(value)
                 .font(forkMono(10, .regular, fontFamily))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(tokens.textSecondary)
                 .lineLimit(1).truncationMode(.middle)
         }
         // Cascade: each line fades in and settles down 4pt, 45ms apart — one orchestrated
@@ -1046,10 +1052,11 @@ private struct Pulsing<Content: View>: View {
 }
 
 private struct HoverHighlight: ViewModifier {
+    @Environment(\.forkTokens) private var tokens
     @State private var hovered = false
     func body(content: Content) -> some View {
         content
-            .background(hovered ? Theme.hover : .clear,
+            .background(hovered ? tokens.hover : .clear,
                         in: RoundedRectangle(cornerRadius: 5))
             .onHover { hovered = $0 }
     }
@@ -1124,6 +1131,8 @@ extension ForkHost {
 /// also seeds `Pebble`, so each host's dot has its own slightly-irregular silhouette —
 /// shape becomes a second recognition cue alongside the color pair.
 struct HostDot: View {
+    @Environment(\.forkTokens) private var tokens
+
     let slot: Int
     var size: CGFloat = 10
 
@@ -1138,7 +1147,7 @@ struct HostDot: View {
     var body: some View {
         let (a, b) = ForkHost.pair(slot)
         Self.outline(slot: slot)
-            .fill(slot < 0 ? AnyShapeStyle(Color.secondary) : AnyShapeStyle(LinearGradient(
+            .fill(slot < 0 ? AnyShapeStyle(tokens.textSecondary) : AnyShapeStyle(LinearGradient(
                 stops: [.init(color: ForkHost.color(a), location: 0.5),
                         .init(color: ForkHost.color(b), location: 0.5)],
                 startPoint: .leading, endPoint: .trailing)))
