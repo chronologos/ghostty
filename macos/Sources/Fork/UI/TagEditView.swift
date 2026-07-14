@@ -2,6 +2,8 @@
 import SwiftUI
 
 struct TagEditView: View {
+    @Environment(\.forkTokens) private var tokens
+
     @State var text: String
     @State var hue: Double
     let onCommit: (PaneTag?) -> Void
@@ -27,7 +29,7 @@ struct TagEditView: View {
                     pebble
                         .fill(Theme.tag(h))
                         .frame(width: 18, height: 18)
-                        .overlay(pebble.strokeBorder(.primary, lineWidth: hue == h ? Theme.ringWidth : 0))
+                        .overlay(pebble.strokeBorder(tokens.text, lineWidth: hue == h ? Theme.ringWidth : 0))
                         .onTapGesture { hue = h }
                 }
             }

@@ -1,27 +1,23 @@
 #if os(macOS)
+import AppKit
 import SwiftUI
 
-/// Semantic style tokens — each *role* resolves to one value so call sites can't drift.
+/// Constant style tokens — each *role* resolves to one value so call sites can't drift.
+///
+/// Everything here is theme-*independent*. The terminal-derived half of the palette lives in
+/// ``ForkTokens`` and arrives through `\.forkTokens`; it is deliberately unreachable from
+/// here, so a view can't read a themed color without declaring the dependency that
+/// invalidates it.
 enum Theme {
     /// Fork brand accent — warm terracotta. The ONLY "active/on" tint; system
     /// `Color.accentColor` is *not* used (it's user-theme blue and clashes).
+    ///
+    /// Deliberately NOT theme-derived. The obvious source would be `palette[1]`, which in the
+    /// author's theme happens to be this exact value — but slot 1 is semantically *red*, so on
+    /// a stock theme the accent would land on red and collapse into ``blocked``. The honest
+    /// source is `cursor-color`, which can't be read without an upstream Zig `cval()` (see
+    /// ``Ghostty/Config/forkColor(_:)``). Until then this stays a brand constant.
     static let clay = Color(red: 0xD9/255, green: 0x77/255, blue: 0x57/255)
-
-    // MARK: Chrome (all `primary.opacity(x)` literals collapse to these four)
-    static let hover      = Color.primary.opacity(0.06)
-    static let chipBg     = Color.primary.opacity(0.08)
-    static let cardBorder = Color.secondary.opacity(0.15)
-    static let selectedRow = adaptive(light: NSColor(clay).withAlphaComponent(0.20),
-                                      dark: NSColor(clay).withAlphaComponent(0.14))
-    static let hostCardBg  = adaptive(light: .controlBackgroundColor.withAlphaComponent(0.6),
-                                      dark: .black.withAlphaComponent(0.18))
-
-    /// Self-adapting `Color` so callers don't need `@Environment(\.colorScheme)`.
-    private static func adaptive(light: NSColor, dark: NSColor) -> Color {
-        Color(nsColor: NSColor(name: nil) {
-            $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
-        })
-    }
 
     // MARK: Status
     static let blocked = Color.red
@@ -30,33 +26,13 @@ enum Theme {
     /// can't silently restyle the other.
     static let error = Color.red
 
-    // MARK: Host accent — single fallback
-    static func hostAccent(_ h: ForkHost?) -> Color { h?.accent ?? .secondary }
-
-    // MARK: Tags — one scheme-adaptive formula
-    static func tag(_ hue: Double) -> Color {
-        adaptive(light: NSColor(hue: hue, saturation: 0.6, brightness: 0.45, alpha: 1),
-                 dark:  NSColor(hue: hue, saturation: 0.6, brightness: 0.55, alpha: 1))
-    }
-
-    // MARK: Spine heat / age — both share the same recency→opacity ramp. `Date?` overloads
-    // so call sites don't repeat the `Date().timeIntervalSince` shim.
-    private static func ramp<T>(_ age: TimeInterval,
-                                _ v: @autoclosure () -> T, _ v1: @autoclosure () -> T,
-                                _ v2: @autoclosure () -> T) -> T {
-        age < 300 ? v() : age < 3600 ? v1() : v2()
-    }
-    private static func age(_ d: Date?) -> TimeInterval { d.map { Date().timeIntervalSince($0) } ?? .infinity }
-    static func spineHeat(_ d: Date?) -> Color {
-        ramp(age(d), .secondary, .secondary.opacity(0.6), .secondary.opacity(0.35))
-    }
-
     // MARK: Afterglow / doze — recency without an age column. Discrete buckets (not a
     // continuous fade) for the same reason Pebble is seeded: rows redraw on every probe
     // tick, and a creeping value reads as activity.
+    private static func age(_ d: Date?) -> TimeInterval { d.map { Date().timeIntervalSince($0) } ?? .infinity }
     /// Short-term trail on the row background — "where was I just now". Tighter breakpoints
-    /// than `ramp` (5m/15m, not 5m/1h): after an hour this is history, not a trail. Sits
-    /// below `selectedRow` (clay 0.20/0.14) so selection still reads as the strongest wash.
+    /// than `ForkTokens.spineHeat` (5m/15m, not 5m/1h): after an hour this is history, not a
+    /// trail. Sits below `selectedRow` (clay 0.20/0.14) so selection stays the strongest wash.
     static func afterglow(_ d: Date?) -> Color {
         let a = age(d)
         return a < 300 ? clay.opacity(0.09) : a < 900 ? clay.opacity(0.045) : .clear
@@ -68,6 +44,25 @@ enum Theme {
         guard let d else { return 1 }
         let a = age(d)
         return a < 3600 ? 1 : a < cutoff ? 0.82 : 0.55
+    }
+
+    // MARK: Tags — one appearance-adaptive formula
+    /// Tag pill tint. Nothing here is terminal-derived: the hue is the user's pick and only
+    /// the brightness bends, with the *appearance* — so this lives on `Theme`, and a tag
+    /// swatch takes no `\.forkTokens` dependency.
+    static func tag(_ hue: Double) -> Color {
+        appearanceAdaptive(light: NSColor(hue: hue, saturation: 0.6, brightness: 0.45, alpha: 1),
+                           dark: NSColor(hue: hue, saturation: 0.6, brightness: 0.55, alpha: 1))
+    }
+
+    /// Self-adapting `Color` so callers don't need `@Environment(\.colorScheme)` — it resolves
+    /// against the view's own `NSAppearance` at render time. The right tool for any role whose
+    /// value isn't derived from the terminal; a terminal-derived one belongs in ``ForkTokens``,
+    /// where the polarity is already decided.
+    static func appearanceAdaptive(light: NSColor, dark: NSColor) -> Color {
+        Color(nsColor: NSColor(name: nil) {
+            $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+        })
     }
 
     // MARK: Swatch selection ring
@@ -154,6 +149,7 @@ struct HandCut: Shape {
 
 /// Shared card chrome (focus-mode tab cards, host-section cards).
 struct ForkCard: ViewModifier {
+    @Environment(\.forkTokens) private var tokens
     var fill: Color? = nil
     var hPad: CGFloat = 6
     func body(content: Content) -> some View {
@@ -161,7 +157,7 @@ struct ForkCard: ViewModifier {
             .padding(6)
             .background(fill ?? .clear, in: HandCut())
             .overlay(HandCut()
-                .stroke(Theme.cardBorder, lineWidth: 0.5))
+                .stroke(tokens.cardBorder, lineWidth: 0.5))
             .padding(.horizontal, hPad)
     }
 }
