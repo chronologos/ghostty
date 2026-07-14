@@ -121,7 +121,10 @@ Fork/
     OptionGesture.swift        OptionGestureRecognizer — the ⌥-hold / ⌥⌥ recognizer
                                (extracted ViewModifier; SidebarView binds revealAll/onSweep)
     ForkTheme.swift            ForkTokens (terminal `foreground`/`background` → text +
-                               chrome) + the `\.forkTokens` env key + ForkThemed, the one
+                               chrome; ANSI `palette` → the host-dot/tab-accent ramp, by
+                               nearest hue so a slot keeps its color, or the wheel if the
+                               theme can't make a legible one) + the `\.forkTokens` env key
+                               + ForkThemed, the one
                                place ForkTheme is observed. `resolve` declines a theme when
                                Increase Contrast is on or the bg's polarity fights the
                                window appearance the material is drawn from
@@ -141,7 +144,7 @@ Fork/
     SessionMetaLabel.swift     shared row trailer: CC sparkle (busy/blocked/idle) +
                                in-sidebar glyph + client-count + creation age
     HostsView.swift            master-detail Hosts sheet (list + add-host form)
-    HostDetailView.swift       detail pane: rename, N×N SlotPicker (10-hue palette,
+    HostDetailView.swift       detail pane: rename, N×N SlotPicker (10-slot theme-derived ramp,
                                bicolor HostDot), sessions, remove
     ForkPaletteView.swift      ForkPanePalette (⌘K, rendered by the fork-owned
                                ForkPaletteCard — fills a window-scaled panel; upstream's
