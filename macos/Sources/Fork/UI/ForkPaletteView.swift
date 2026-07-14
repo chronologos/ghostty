@@ -20,6 +20,7 @@ private extension SessionRegistry {
 /// `String.matchedIndices(for:)` so filter behavior (substring + initials) stays
 /// identical to the terminal palette's.
 struct ForkPanePalette: View {
+    @Environment(\.forkTokens) private var tokens
     weak var controller: ForkWindowController?
     let onDone: () -> Void
     @EnvironmentObject private var registry: SessionRegistry
@@ -73,7 +74,7 @@ struct ForkPanePalette: View {
             CommandOption(
                 title: p.tab.paneLabels[p.ref.key] ?? p.ref.name,
                 subtitle: "\(p.tab.title) · \(p.host.label)",
-                leadingColor: p.host.accent,
+                leadingColor: tokens.hostAccent(p.host),
                 badge: p.tab.paneTags[p.ref.key]?.text
             ) { [weak controller, id = p.tab.id, i = p.index] in
                 controller?.activate(tab: id, paneIndex: i)
