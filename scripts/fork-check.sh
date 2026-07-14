@@ -36,6 +36,7 @@ var progressReport	macos/Sources/Ghostty/Surface View/OSSurfaceView.swift
 var bell: Bool	macos/Sources/Features/Terminal/BaseTerminalController.swift
 var glassEffectView	macos/Sources/Features/Terminal/TerminalViewContainer.swift
 class TerminalViewContainer	macos/Sources/Features/Terminal/TerminalViewContainer.swift
+private\(set\) var config: ghostty_config_t\?	macos/Sources/Ghostty/Ghostty.Config.swift
 EOF
 )
 
