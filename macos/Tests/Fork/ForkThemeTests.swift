@@ -111,6 +111,146 @@ struct ForkThemeTests {
         }
     }
 
+    // MARK: Host ramp
+
+    /// A realistic ANSI palette: 6 chromatic hues, each with a distinct bright variant.
+    private var themePalette: [NSColor] {
+        ["#3a3937", "#d97757", "#92a874", "#dba84e", "#6a9bcc", "#b394cc", "#5e9e8f", "#b0aea5",
+         "#5c5a55", "#e8956f", "#a8bf88", "#edc06a", "#85b3de", "#c9ade0", "#76b8a7", "#faf9f5"]
+            .map(Self.hex)
+    }
+    private static func hex(_ s: String) -> NSColor {
+        let v = Int(s.dropFirst(), radix: 16)!
+        return NSColor(srgbRed: CGFloat((v >> 16) & 0xff) / 255,
+                       green: CGFloat((v >> 8) & 0xff) / 255,
+                       blue: CGFloat(v & 0xff) / 255, alpha: 1)
+    }
+    private func hue(_ c: Color) -> Double {
+        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        NSColor(c).usingColorSpace(.sRGB)!.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
+        return Double(h)
+    }
+
+    /// The ramp is indexed by `accentSlot`, which is persisted — a length change silently
+    /// repaints every existing host, so it is pinned to the slot space, not to the theme.
+    @Test func hostRampAlwaysMatchesTheSlotSpace() {
+        #expect(ForkTheme.hostRamp(from: themePalette).count == ForkHost.N)
+        #expect(ForkTheme.hostRamp(from: []).count == ForkHost.N)
+        #expect(ForkTokens.wheel.count == ForkHost.N)
+    }
+
+    /// The ramp must actually be the theme's colors. Without this, every other ramp test
+    /// passes vacuously on a silent fallback: the wheel trivially satisfies "each slot keeps
+    /// its hue" because the wheel *is* the hue stops.
+    @Test func aRichThemeActuallyReplacesTheWheel() {
+        let ramp = ForkTheme.hostRamp(from: themePalette)
+        #expect(ramp != ForkTokens.wheel)
+        // Every entry is a real palette color, not an interpolation.
+        let themeHexes = Set(themePalette.compactMap { $0.hexString })
+        for c in ramp { #expect(themeHexes.contains(NSColor(c).hexString ?? "")) }
+    }
+
+    /// The point of matching by hue: a host keeps the color it had. Every slot must land
+    /// within a quarter-turn of its wheel hue, or a retheme is repainting hosts at random.
+    @Test func everySlotKeepsItsHueFamily() {
+        let ramp = ForkTheme.hostRamp(from: themePalette)
+        for (slot, stop) in ForkHost.wheelHues.enumerated() {
+            let d = abs(hue(ramp[slot]) - stop)
+            #expect(min(d, 1 - d) < ForkTheme.maxHueDrift,
+                    "slot \(slot) drifted off its hue position")
+        }
+    }
+
+    /// Hosts must stay distinguishable — the dot's entire job. Measured perceptually, not by
+    /// hex: two colors a byte apart are distinct strings and the same dot.
+    /// The measured margin: a real theme's tightest pair (its own normal/bright of one hue)
+    /// must clear the bar with room, or `minSeparation` is tuned to reject real themes.
+    @Test func aRealThemeClearsTheSeparationBarWithMargin() {
+        let ramp = ForkTheme.hostRamp(from: themePalette).map { NSColor($0) }
+        var worst = Double.infinity
+        for i in ramp.indices { for j in ramp.indices where j > i {
+            worst = min(worst, ramp[i].deltaE(to: ramp[j]))
+        } }
+        #expect(worst > ForkTheme.minSeparation * 1.5, "tightest pair \(worst) is too near the bar")
+    }
+
+    @Test func rampEntriesAreVisiblyDifferent() {
+        let ramp = ForkTheme.hostRamp(from: themePalette).map { NSColor($0) }
+        for i in ramp.indices {
+            for j in ramp.indices where j > i {
+                #expect(ramp[i].deltaE(to: ramp[j]) >= ForkTheme.minSeparation,
+                        "slots \(i)/\(j) look alike")
+            }
+        }
+    }
+
+    /// ΔE has to actually measure perception, or the legibility guard is decorative. The
+    /// near-duplicate is Broadcast's real pair; the far one is two obviously different colors.
+    @Test func deltaESeparatesLookalikesFromRealDifferences() {
+        #expect(Self.hex("#6D9CBE").deltaE(to: Self.hex("#6E9CBE")) < 1)
+        #expect(Self.hex("#d97757").deltaE(to: Self.hex("#6a9bcc")) > 40)
+        #expect(Self.hex("#d97757").deltaE(to: Self.hex("#d97757")) == 0)
+    }
+
+    /// A palette that is distinct as *hex* but not to the eye must not ship: it would paint two
+    /// hosts the same dot. Broadcast really does ship `#6D9CBE` and `#6E9CBE`.
+    @Test func rampDeclinesAThemeWhoseColorsOnlyDifferAsHex() {
+        var lookalikes = themePalette
+        lookalikes[12] = Self.hex("#6D9CBE")
+        lookalikes[4] = Self.hex("#6E9CBE")
+        #expect(ForkTheme.hostRamp(from: lookalikes) == ForkTokens.wheel)
+    }
+
+    /// A palette with 10+ colors that are individually legible but don't *span* the wheel must
+    /// not ship either: some slot ends up far from its hue and a host you'd learned gets
+    /// silently repainted. This is real — Wryan turns a yellow host teal.
+    ///
+    /// The fixture has to clear the count and separation guards to reach the drift one, or it
+    /// would pass for the wrong reason: twelve reds, well apart in lightness (so ΔE-distinct
+    /// and unique), all at hue ≈ 0 (so no slot past the oranges can be served).
+    @Test func rampDeclinesAThemeThatCannotCoverTheWheel() {
+        let redsOnly = (0..<16).map { i -> NSColor in
+            let v = 0.18 + CGFloat(i % 12) * 0.07
+            return NSColor(srgbRed: v, green: v * 0.08, blue: v * 0.08, alpha: 1)
+        }
+        // Guard the fixture itself: it must fail on drift, not on count or separation.
+        let chromatic = [1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14].map { redsOnly[$0] }
+        #expect(Set(chromatic.compactMap { $0.hexString }).count >= ForkHost.N)
+        #expect(chromatic.allSatisfy { $0.saturationComponentSafe >= 0.15 })
+        #expect(ForkTheme.hostRamp(from: redsOnly) == ForkTokens.wheel)
+    }
+
+    /// The guard is the property: anything accepted satisfies both halves by construction.
+    @Test func anyAcceptedRampIsLegible() {
+        let ramp = ForkTheme.hostRamp(from: themePalette)
+        #expect(ramp != ForkTokens.wheel)
+        #expect(ForkTheme.isLegible(ramp.map { NSColor($0) }))
+    }
+
+    /// A theme without `N` distinct chromatic colors keeps the wheel. Otherwise a grayscale
+    /// palette paints every host the same gray — worse than not theming at all.
+    @Test func rampDeclinesAThemeWithoutEnoughDistinctHues() {
+        let grays = (0..<16).map { NSColor(srgbRed: CGFloat($0) / 16, green: CGFloat($0) / 16,
+                                           blue: CGFloat($0) / 16, alpha: 1) }
+        #expect(ForkTheme.hostRamp(from: grays) == ForkTokens.wheel)
+        // Bright row identical to normal → only 6 unique, below N.
+        let sixHues = (0..<16).map { themePalette[[0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7][$0]] }
+        #expect(ForkTheme.hostRamp(from: sixHues) == ForkTokens.wheel)
+        #expect(ForkTheme.hostRamp(from: []) == ForkTokens.wheel)
+    }
+
+    /// Slots 22/55/99 are live in the author's fork.json. Their `a` halves must keep landing in
+    /// the hue family they were picked as — a silent repaint of a host you've learned is the
+    /// exact regression the hue-matching exists to prevent.
+    @Test func liveHostSlotsKeepTheirIdentity() {
+        let ramp = ForkTheme.hostRamp(from: themePalette)
+        for slot in [22, 55, 99] {
+            let a = ForkHost.pair(slot).a
+            let d = abs(hue(ramp[a]) - ForkHost.wheelHues[a])
+            #expect(min(d, 1 - d) < 0.2, "slot \(slot) would be repainted out of its family")
+        }
+    }
+
     // MARK: Constants
 
     /// The accent is deliberately NOT theme-derived — it must survive any reload. Pinning the
