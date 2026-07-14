@@ -88,6 +88,8 @@ struct ForkPanePalette: View {
 /// window — see `showPanePalette`). Keyboard contract matches upstream's palette: ↑↓ and
 /// ⌃P/⌃N move, ⏎ runs, Esc closes, typing filters with first-match auto-select.
 private struct ForkPaletteCard: View {
+    @Environment(\.forkTokens) private var tokens
+
     let options: [CommandOption]
     let onDone: () -> Void
     @State private var query = ""
@@ -132,7 +134,7 @@ private struct ForkPaletteCard: View {
 
                 HStack(spacing: 10) {
                     Image(systemName: "rectangle.split.3x1.fill")
-                        .font(.system(size: 14)).foregroundStyle(.secondary)
+                        .font(.system(size: 14)).foregroundStyle(tokens.textSecondary)
                     TextField("Jump to pane or run a command…", text: $query)
                         .textFieldStyle(.plain)
                         .font(.system(size: 18, weight: .light))
@@ -153,7 +155,7 @@ private struct ForkPaletteCard: View {
             Divider()
             if items.isEmpty {
                 Spacer()
-                Text("No matches").font(.system(size: 12)).foregroundStyle(.secondary)
+                Text("No matches").font(.system(size: 12)).foregroundStyle(tokens.textSecondary)
                 Spacer()
             } else {
                 ScrollViewReader { proxy in
@@ -178,11 +180,11 @@ private struct ForkPaletteCard: View {
                 Spacer()
                 Text("↑↓ move · ⏎ run · esc close")
             }
-            .font(.system(size: 10)).foregroundStyle(.secondary)
+            .font(.system(size: 10)).foregroundStyle(tokens.textSecondary)
             .padding(.horizontal, 14).padding(.vertical, 5)
         }
         .background(.ultraThinMaterial, in: HandCut(tl: 14, tr: 8, br: 16, bl: 10))
-        .overlay(HandCut(tl: 14, tr: 8, br: 16, bl: 10).stroke(Theme.cardBorder, lineWidth: 1))
+        .overlay(HandCut(tl: 14, tr: 8, br: 16, bl: 10).stroke(tokens.cardBorder, lineWidth: 1))
         .shadow(color: .black.opacity(0.35), radius: 18, y: 6)
         // Margin inside the borderless panel so the shadow has room to render.
         .padding(24)
@@ -227,7 +229,7 @@ private struct ForkPaletteCard: View {
                 } else if let icon = opt.leadingIcon {
                     Image(systemName: icon)
                         .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(tokens.textSecondary)
                         .frame(width: 16)
                 } else {
                     Color.clear.frame(width: 16, height: 1)
@@ -238,7 +240,7 @@ private struct ForkPaletteCard: View {
                         // Subtitle highlights only when the title itself didn't match —
                         // same rule as upstream's CommandRow.
                         (titleMatched(opt) ? Text(sub) : highlight(sub))
-                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                            .font(.system(size: 11)).foregroundStyle(tokens.textSecondary)
                             .lineLimit(1).truncationMode(.middle)
                     }
                 }
@@ -257,14 +259,14 @@ private struct ForkPaletteCard: View {
                             Text(s).font(.system(size: 11, weight: .medium))
                         }
                     }
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(tokens.textSecondary)
                 }
             }
             .padding(.horizontal, 10).padding(.vertical, 6)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .background(isSelected ? Theme.selectedRow : hovered == opt.id ? Theme.hover : .clear,
+        .background(isSelected ? tokens.selectedRow : hovered == opt.id ? tokens.hover : .clear,
                     in: RoundedRectangle(cornerRadius: 6))
         .id(opt.id)
         .onHover { hovered = $0 ? opt.id : nil }
@@ -296,6 +298,8 @@ private struct ForkPaletteCard: View {
 /// Match is client-side `contains` on the fetched buffer — `controlArgv` stays
 /// argv-only so user input never touches a shell (CLAUDE.md security boundary).
 struct ScrollbackSearchView: View {
+    @Environment(\.forkTokens) private var tokens
+
     weak var controller: ForkWindowController?
     let onDone: () -> Void
     @EnvironmentObject private var registry: SessionRegistry
@@ -326,7 +330,7 @@ struct ScrollbackSearchView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Image(systemName: "text.magnifyingglass").foregroundStyle(.secondary)
+                Image(systemName: "text.magnifyingglass").foregroundStyle(tokens.textSecondary)
                 TextField("Search scrollback (all sessions)…", text: $query)
                     .textFieldStyle(.plain).focused($fieldFocused).onSubmit(search)
                     .onChange(of: query) { _ in
@@ -352,11 +356,11 @@ struct ScrollbackSearchView: View {
                                 VStack(alignment: .leading, spacing: 1) {
                                     HStack(spacing: 4) {
                                         Text(hit.label).font(.system(size: 12, weight: .medium))
-                                        Text(hit.crumb).font(.system(size: 11)).foregroundStyle(.secondary)
+                                        Text(hit.crumb).font(.system(size: 11)).foregroundStyle(tokens.textSecondary)
                                     }
                                     Text(hit.snippet)
                                         .font(.system(size: 10, design: .monospaced))
-                                        .foregroundStyle(.secondary).lineLimit(1)
+                                        .foregroundStyle(tokens.textSecondary).lineLimit(1)
                                 }
                                 Spacer()
                             }
@@ -368,7 +372,7 @@ struct ScrollbackSearchView: View {
                 }
             }
             if !searching && hits.isEmpty && !query.isEmpty {
-                Text("No matches").font(.system(size: 11)).foregroundStyle(.secondary).padding()
+                Text("No matches").font(.system(size: 11)).foregroundStyle(tokens.textSecondary).padding()
             }
         }
         .frame(width: 600, height: 420)

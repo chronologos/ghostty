@@ -5,6 +5,8 @@ import SwiftUI
 /// No own chrome (padding/width/Done) — `HostsView` provides that. Edits save eagerly on
 /// change — there is no Cancel.
 struct HostDetailView: View {
+    @Environment(\.forkTokens) private var tokens
+
     let host: ForkHost
     let onRemove: () -> Void
 
@@ -28,7 +30,7 @@ struct HostDetailView: View {
                 Text(host.label).font(.headline)
                 Spacer()
                 Text(host.transport.displayConnection).font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(tokens.textSecondary)
             }
 
             TextField("Label", text: $label).textFieldStyle(.roundedBorder)
@@ -43,7 +45,7 @@ struct HostDetailView: View {
             Divider()
 
             HStack {
-                Text("Sessions").font(.subheadline).foregroundStyle(.secondary)
+                Text("Sessions").font(.subheadline).foregroundStyle(tokens.textSecondary)
                 Spacer()
                 Button { Task { await reload() } } label: {
                     Image(systemName: "arrow.clockwise").font(.caption)
@@ -55,7 +57,7 @@ struct HostDetailView: View {
             if !loading, !unreachable,
                registry.ccLive[host.id] == nil || !registry.tabs.contains(where: { $0.hostID == host.id }) {
                 Text("CC status unknown for this host (not currently polled)")
-                    .font(.caption2).foregroundStyle(.secondary)
+                    .font(.caption2).foregroundStyle(tokens.textSecondary)
             }
             sessionList.frame(maxHeight: .infinity)
 
@@ -78,16 +80,16 @@ struct HostDetailView: View {
 
     @ViewBuilder private var sessionList: some View {
         if loading {
-            HStack { ProgressView().controlSize(.small); Text("Listing…").foregroundStyle(.secondary) }
+            HStack { ProgressView().controlSize(.small); Text("Listing…").foregroundStyle(tokens.textSecondary) }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if unreachable {
             // Distinct from "No sessions": the query failed, so the sessions are very likely
             // still alive — saying "none" here is how people conclude their work is gone.
             Text("Couldn't reach \(host.label) — check ssh / zmx, then ⟳")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(tokens.textSecondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if sessions.managed.isEmpty && sessions.external.isEmpty {
-            Text("No sessions").foregroundStyle(.secondary)
+            Text("No sessions").foregroundStyle(tokens.textSecondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             List {
@@ -143,6 +145,8 @@ struct HostDetailView: View {
 /// N×N grid (solids on the diagonal) + "Auto" chip. Auto's `own` reads the *stored* slot
 /// so a swatch tap before Auto doesn't subtract the wrong one.
 struct SlotPicker: View {
+    @Environment(\.forkTokens) private var tokens
+
     @Binding var slot: Int
     let hostID: ForkHost.ID
     @EnvironmentObject private var registry: SessionRegistry
@@ -162,7 +166,7 @@ struct SlotPicker: View {
                 ForEach(0..<ForkHost.slotCount, id: \.self) { s in
                     HostDot(slot: s, size: 18)
                         .overlay(HostDot.outline(slot: s)
-                            .stroke(s == slot ? Color.primary : .clear, lineWidth: Theme.ringWidth))
+                            .stroke(s == slot ? tokens.text : .clear, lineWidth: Theme.ringWidth))
                         .onTapGesture { slot = s }
                 }
             }

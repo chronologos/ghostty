@@ -1051,7 +1051,7 @@ final class ForkWindowController: TerminalController {
     private func presentSheet<V: View>(size: CGSize, bare: Bool = false,
                                        @ViewBuilder _ content: () -> V) {
         guard let window, sheetPanel == nil else { return }
-        let host = NSHostingController(rootView: content().environmentObject(registry))
+        let host = NSHostingController(rootView: ForkThemed { content().environmentObject(registry) })
         host.sizingOptions = []  // honor `size`, not SwiftUI's ideal — else padding/shadow inflate the panel
         host.view.frame = .init(origin: .zero, size: size)
         let panel = ForkSheetPanel(contentViewController: host)
@@ -1141,7 +1141,7 @@ final class ForkWindowController: TerminalController {
         // Instead: keep `terminalContent` as `window.contentView`, add the sidebar
         // as a sibling subview of the container, and re-pin the container's inner
         // hosting view to start after the sidebar.
-        let sidebar = NSHostingView(rootView: SidebarView(controller: self).environmentObject(registry))
+        let sidebar = NSHostingView(rootView: ForkThemed { SidebarView(controller: self).environmentObject(registry) })
         sidebar.translatesAutoresizingMaskIntoConstraints = false
         terminalContent.addSubview(sidebar)
         sidebarHost = sidebar
@@ -1172,7 +1172,7 @@ final class ForkWindowController: TerminalController {
             terminalLeadingConstraint!.isActive = true
         }
 
-        let cheatsheet = NSHostingView(rootView: CheatsheetView(hoverCommands: registry.hoverCommands))
+        let cheatsheet = NSHostingView(rootView: ForkThemed { CheatsheetView(hoverCommands: registry.hoverCommands) })
         cheatsheet.translatesAutoresizingMaskIntoConstraints = false
         cheatsheet.isHidden = true
         terminalContent.addSubview(cheatsheet)

@@ -42,6 +42,11 @@ enum ForkBootstrap {
         // here (before any window draws) rather than mid-`newWindow`.
         logger.info("fork enabled — zmx: \(ZmxAdapter.localZmx, privacy: .public)")
         ForkNotify.shared.install()
+        // Seed the sidebar's colors from the terminal theme before any window draws, and
+        // follow reloads from here on. `install` is nonisolated but only ever runs from
+        // `applicationWillFinishLaunching`, which is main — same assumption as the
+        // willTerminate handler below; if that ever changes this traps rather than degrading.
+        MainActor.assumeIsolated { ForkTheme.shared.start(ghostty.config) }
         let violet = NSColor(red: 0x7C/255, green: 0x5C/255, blue: 0xD3/255, alpha: 1)
         let icon = ColorizedGhosttyIcon(
             screenColors: [.systemPurple, violet],
