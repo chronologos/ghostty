@@ -260,7 +260,7 @@ struct SidebarView: View {
                     // shows) — with the tag filter on, a hidden untagged tab's state must
                     // not drive a dot that points at something the user can't see.
                     stateDot(tabs.lazy.compactMap { registry.rollup(tab: $0) }.max(),
-                             accent: host.accent)
+                             accent: tokens.hostAccent(host))
                         .padding(.trailing, 6)
                 }
                 if let i = registry.hosts.firstIndex(where: { $0.id == host.id }), i < 9 {
@@ -1117,15 +1117,6 @@ extension Ghostty.Config {
     var forkFontFamily: String? { windowTitleFontFamily }
 }
 
-extension ForkHost {
-    /// Primary tint (the A half) — used for text/stroke/status-rail; the dot is the only
-    /// bicolor render.
-    var accent: Color { Self.color(Self.pair(slot).a) }
-    static func color(_ i: Int) -> Color {
-        Color(hue: palette[i % N], saturation: 0.45, brightness: 0.7)
-    }
-}
-
 /// Split-pebble host marker. Hard-stop gradient at 0.5 for a clean half; same-color stops
 /// render solid (diagonal-slot case — first N hosts) so no `a==b` branch needed. The slot
 /// also seeds `Pebble`, so each host's dot has its own slightly-irregular silhouette —
@@ -1148,8 +1139,8 @@ struct HostDot: View {
         let (a, b) = ForkHost.pair(slot)
         Self.outline(slot: slot)
             .fill(slot < 0 ? AnyShapeStyle(tokens.textSecondary) : AnyShapeStyle(LinearGradient(
-                stops: [.init(color: ForkHost.color(a), location: 0.5),
-                        .init(color: ForkHost.color(b), location: 0.5)],
+                stops: [.init(color: tokens.hostColor(a), location: 0.5),
+                        .init(color: tokens.hostColor(b), location: 0.5)],
                 startPoint: .leading, endPoint: .trailing)))
             .frame(width: size, height: size)
     }

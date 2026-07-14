@@ -27,16 +27,20 @@ struct ForkHost: Codable, Identifiable, Hashable {
     var label: String
     var transport: Transport
     var expanded: Bool = true
-    /// `palette` index pair encoded as `a*N+b`; `a==b` ⇒ solid. Resolved at add/load time
+    /// `wheelHues` index pair encoded as `a*N+b`; `a==b` ⇒ solid. Resolved at add/load time
     /// (`resolveAutoSlots`) so deleting host A can't shift host B's color.
     var accentSlot: Int?
 
     static let local = ForkHost(id: "local", label: "localhost", transport: .local)
 
-    /// 10 hand-picked hue stops; rendered at sat 0.45 / bright 0.7. Slot space = N², solids
-    /// on the diagonal (`i*N+i`).
-    static let palette: [Double] = [0.00, 0.08, 0.13, 0.24, 0.34, 0.45, 0.54, 0.63, 0.74, 0.88]
-    static let N = palette.count, slotCount = N * N
+    /// Hue stops, ascending. Load-bearing twice over: `N` sizes the slot space that
+    /// `accentSlot` is persisted against — changing the count silently repaints every existing
+    /// host — and the ascending *order* is what lets `ForkTheme.hostRamp` swap in a theme's own
+    /// colors by nearest hue and have each host keep the color it had. Slot space is N², solids
+    /// on the diagonal (`i*N+i`). The colors themselves live in `ForkTokens.wheel`; this is
+    /// only the identity space.
+    static let wheelHues: [Double] = [0.00, 0.08, 0.13, 0.24, 0.34, 0.45, 0.54, 0.63, 0.74, 0.88]
+    static let N = wheelHues.count, slotCount = N * N
     static func pair(_ s: Int) -> (a: Int, b: Int) { ((s / N) % N, s % N) }
     var slot: Int { accentSlot ?? Self.autoSlot(for: id, avoiding: []) }
 
@@ -67,7 +71,7 @@ struct ForkHost: Codable, Identifiable, Hashable {
         transport = try c.decode(Transport.self, forKey: .transport)
         expanded = try c.decodeIfPresent(Bool.self, forKey: .expanded) ?? true
         // Clamp — fork.json is hand-editable; an out-of-range slot would reach
-        // `palette[-1]` via `pair().a` (Swift `%` keeps the dividend's sign) and trap on
+        // `hostRamp[-1]` via `pair().a` (Swift `%` keeps the dividend's sign) and trap on
         // launch. Absent or unknown-key (legacy `accentHue`) → nil → `resolveAutoSlots`
         // re-derives.
         if let s = try c.decodeIfPresent(Int.self, forKey: .accentSlot) {
