@@ -632,12 +632,14 @@ final class SessionRegistry: ObservableObject {
 
     /// Move a leaf from `src` to `dst` (same host only). Migrates per-pane state
     /// (labels/tags/lastActive) BEFORE `setPersistedTree` since that prunes non-live
-    /// keys. `dst`'s tree gets `ref` appended on the right; `src`'s tree may become
+    /// keys. `dst`'s tree gets `ref` appended on the right (or below, per `direction`);
+    /// `src`'s tree may become
     /// `.empty` — the controller is responsible for detecting that and closing src.
     /// Returns true on success, false if refused (cross-host, missing tab, ref not
     /// in src, src == dst).
     @discardableResult
-    func movePanePersisted(from src: TabModel.ID, ref: SessionRef, to dst: TabModel.ID) -> Bool {
+    func movePanePersisted(from src: TabModel.ID, ref: SessionRef, to dst: TabModel.ID,
+                           direction: SplitViewDirection = .horizontal) -> Bool {
         guard src != dst,
               let si = tabs.firstIndex(where: { $0.id == src }),
               let di = tabs.firstIndex(where: { $0.id == dst }),
@@ -656,7 +658,7 @@ final class SessionRegistry: ObservableObject {
         // so without the retarget the eventual departure stamp dies on the entry-nil guard
         // and the moved pane reads as old as its arrival time in its new tab.
         if lastTouched.map({ $0 == (src, key) }) ?? false { lastTouched = (dst, key) }
-        setPersistedTree(tabs[di].tree.appending(leaf: ref), for: dst)
+        setPersistedTree(tabs[di].tree.appending(leaf: ref, direction: direction), for: dst)
         setPersistedTree(tabs[si].tree.removing(ref), for: src)
         return true
     }

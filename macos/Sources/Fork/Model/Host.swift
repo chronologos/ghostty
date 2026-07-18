@@ -262,17 +262,29 @@ indirect enum PersistedTree: Codable, Hashable {
         }
     }
 
-    /// Append a leaf to the right. Empty → `.leaf(ref)`; non-empty → horizontal split
-    /// 50/50 with `self` on the left. Matches the ⌘D `newSplit(direction: .right)` shape
-    /// so "move pane into tab" feels like "split off the right".
+    /// Append a leaf to the right (or below, `.vertical`). Empty → `.leaf(ref)`;
+    /// non-empty → 50/50 split with `self` first. Matches the ⌘D `newSplit(direction:
+    /// .right)` shape so "move pane into tab" feels like "split off the right"; the
+    /// vertical form is Merge Into's "Below". `SplitViewDirection` (upstream, non-generic)
+    /// is the shared axis type — the sidebar menu shouldn't have to spell out
+    /// `SplitTree<Ghostty.SurfaceView>.NewDirection`.
     /// (`merging(_:)` was removed — no production caller; `mergeTab` folds merges through
     /// repeated `movePane`, the same policy note as `SessionRegistry`'s absent
     /// `mergeTabPersisted`.)
-    func appending(leaf ref: SessionRef) -> PersistedTree {
+    func appending(leaf ref: SessionRef, direction: SplitViewDirection = .horizontal) -> PersistedTree {
         switch self {
         case .empty: .leaf(ref)
-        default: .split(horizontal: true, ratio: 0.5, a: self, b: .leaf(ref))
+        default: .split(horizontal: direction == .horizontal, ratio: 0.5, a: self, b: .leaf(ref))
         }
+    }
+}
+
+extension SplitViewDirection {
+    /// The `SplitTree` insertion that appends a leaf on this axis after the anchor:
+    /// horizontal → to its `.right`, vertical → `.down`. One mapping, shared by the live
+    /// (`movePane`) and persisted (`appending`) append paths so their shapes can't drift.
+    var appendDirection: SplitTree<Ghostty.SurfaceView>.NewDirection {
+        self == .horizontal ? .right : .down
     }
 }
 #endif
