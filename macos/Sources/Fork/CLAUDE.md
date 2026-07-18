@@ -110,7 +110,8 @@ Fork/
                                chevron; ⌘I/⌘⇧I → inline rename; tag pills; single density (no
                                compact toggle): unread CC status text is bright + up to 3
                                lines, read text (exit-stamped ccSeenDetail) demotes to one
-                               tertiary line; solo ⌥-hold ≥0.5s reveals all, ⌥⌥ marks all
+                               tertiary line; solo ⌥-hold ≥0.5s reveals all (and pops the
+                               cheatsheet — one peek, one threshold), ⌥⌥ marks all
                                read; recency = afterglow wash (<15m) + doze opacity (>1h /
                                past focus cutoff; never on unread/blocked rows) + the peek
                                ledger's age line; resting the cursor on a row ≥ Theme.peekDelay
@@ -118,8 +119,10 @@ Fork/
                                lines + un-clamped status text — replaced the row tooltip);
                                focus mode wraps each tab
                                in a ForkCard with a ⌘N + HostDot + host-label caption row
-    OptionGesture.swift        OptionGestureRecognizer — the ⌥-hold / ⌥⌥ recognizer
-                               (extracted ViewModifier; SidebarView binds revealAll/onSweep)
+    OptionGesture.swift        OptionGestureRecognizer — the *only* ⌥-hold / ⌥⌥ recognizer
+                               (extracted ViewModifier; SidebarView binds revealAll/onPeek/
+                               onSweep). Solo-⌥ 0.5s peek drives the sidebar reveal and the
+                               cheatsheet as a unit via `setPeek`
     ForkTheme.swift            ForkTokens (terminal `foreground`/`background` → text +
                                chrome; ANSI `palette` → the host-dot/tab-accent ramp, by
                                nearest hue so a slot keeps its color, or the wheel if the
@@ -152,7 +155,9 @@ Fork/
                                highlighting still reuses upstream String.matchedIndices) +
                                ScrollbackSearchView (⌘⇧K, history fetched once per sheet
                                then matched client-side)
-    CheatsheetView.swift       hold-⌘ shortcut overlay (600ms debounce; flagsChanged monitor)
+    CheatsheetView.swift       hold-⌥ shortcut overlay; static content, shown/hidden by
+                               `setCheatsheet` off OptionGestureRecognizer's `onPeek`
+                               (it owns the debounce — there is no second ⌥ recognizer)
     ForkSheetPanel.swift       NSWindow.performKeyEquivalent → ⌘V/C/X/A/Z/⇧Z to
                                firstResponder; reused as the borderless ⌘K palette window
 ```
@@ -264,7 +269,7 @@ local), not the internal hash id. `mode` (unknown values — including the remov
 
 `{cwd}` resolves `surface.pwd` (OSC 7, needs shell integration in the remote zshrc) ›
 `ccLive[host][ref.key].cwd` (CCProbe poll) › `"."`. Bindings appear in the ⌘K palette
-(targeting the *focused* pane, via `runPaneCommand`) and in the ⌘-hold cheatsheet —
+(targeting the *focused* pane, via `runPaneCommand`) and in the ⌥-hold cheatsheet —
 there is no bare-letter hover dispatch (`hoveredPane` was removed; the terminal is
 usually firstResponder so stray letters intercepted). The `key` in `hoverCommands` is
 now just a stable config id; it's no longer the dispatch character.
@@ -378,8 +383,10 @@ A terminal that runs arbitrary shells will trip every macOS privacy surface. Thr
   AZERTY gets ⌘⌥A on ⌘⌥Q. ⌘⇧R (repaint) is keyCode 15.
   ⌘K/⌘⇧K shadow upstream's `clear_screen`; rebind via
   `keybind = cmd+ctrl+k=clear_screen` if wanted.
-  Hold-⌘ ≥600ms (with no other key) shows `CheatsheetView`; any keyDown while ⌘ is
-  held — including autorepeat — cancels/hides it.
+  Hold a solo ⌥ ≥0.5s to peek: `CheatsheetView` plus the sidebar's read-CC reveal, one
+  threshold, one recognizer (`OptionGestureRecognizer`). Any key or mouse event while ⌥
+  is down — including autorepeat — is a chord and cancels/hides both. ⌘-hold shows
+  nothing (it used to drive the cheatsheet; ⌘ is held too often for that to sit still).
 - CC probe (sparkle toggle) reads `~/.claude/sessions/` — a zshrc-only
   `CLAUDE_CONFIG_DIR` override is invisible to the Dock-launched app and to
   `ssh -o BatchMode=yes` (non-login shell). The **local** host probe is native Swift

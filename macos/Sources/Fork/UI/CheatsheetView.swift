@@ -1,9 +1,10 @@
 #if os(macOS)
 import SwiftUI
 
-/// Slack-style shortcut overlay shown after holding ⌘ ≥600ms (controller's
-/// flagsChanged monitor + debounce). Static content; controller toggles the
-/// hosting `NSView.isHidden`.
+/// Slack-style shortcut overlay shown after holding a solo ⌥ ≥0.5s — the same peek the
+/// sidebar's `OptionGestureRecognizer` uses to reveal read CC status text, so one hold
+/// opens both. Static content; the controller toggles the hosting `NSView.isHidden` via
+/// `setCheatsheet`, driven by that recognizer's `onPeek`.
 struct CheatsheetView: View {
     let hoverCommands: [String: HoverCommand]
 
@@ -25,7 +26,7 @@ struct CheatsheetView: View {
         ("⌘⌥P", "Pin / unpin tab"),
         ("⌘⇧B", "Toggle sidebar"),
         ("Drag sidebar edge", "Resize sidebar"),
-        ("⌥ hold", "Reveal read CC status text"),
+        ("⌥ hold", "This sheet + reveal read CC status text"),
         ("⌥⌥", "Mark all CC status read"),
         ("Hover pane ⅓s", "Peek — status · dir · zmx name · age"),
         ("Long-press ◎", "Focus cutoff & sort options"),
