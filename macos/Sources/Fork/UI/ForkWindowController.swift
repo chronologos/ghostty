@@ -254,12 +254,12 @@ final class ForkWindowController: TerminalController {
     // MARK: ⌘[/⌘]/⌘1-9/⌘⌥1-9 — sidebar-tab navigation (SPEC §10).
 
     private var navMonitor: Any?
-    private var cheatMonitor: Any?
     private weak var cheatsheetHost: NSView?
     private var cheatsheetCenterX: NSLayoutConstraint?
-    private var cheatsheetTimer: Timer?
-    private func setCheatsheet(_ on: Bool) {
-        cheatsheetTimer?.invalidate(); cheatsheetTimer = nil
+    /// Driven solely by the sidebar's `OptionGestureRecognizer` (⌥-hold peek) — the
+    /// debounce, the chord disqualifiers and the release/resign teardown all live there,
+    /// so this is a dumb setter.
+    func setCheatsheet(_ on: Bool) {
         cheatsheetHost?.isHidden = !on
     }
 
@@ -309,8 +309,6 @@ final class ForkWindowController: TerminalController {
                 }
             }
             guard self.sheetPanel == nil else { return ev }
-            // Any keystroke = chord completed (or non-⌘ typing) → hide/cancel cheatsheet.
-            self.setCheatsheet(false)
             let mods = ev.modifierFlags.intersection([.command, .shift, .option, .control])
             if let n = Self.digitKeyCodes[ev.keyCode] {
                 switch mods {
@@ -358,24 +356,6 @@ final class ForkWindowController: TerminalController {
             case "b", "B": self.toggleSidebar(); return nil
             default: return ev
             }
-        }
-        // ⌘-hold cheatsheet: arm 600ms after ⌘-down (so quick chords don't flash it),
-        // hide on ⌘-up. Stuck-state guards: the keyDown
-        // monitor above hides on any chord-completion via `setCheatsheet(false)` calls
-        // baked into the goto/step/toggle handlers, and `windowDidResignKey` covers
-        // app-switch swallowing the flagsChanged release.
-        cheatMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] ev in
-            guard let self, ev.window === self.window else { return ev }
-            let cmd = ev.modifierFlags.contains(.command)
-            cheatsheetTimer?.invalidate(); cheatsheetTimer = nil
-            if cmd, ev.modifierFlags.intersection([.shift, .option, .control]).isEmpty {
-                cheatsheetTimer = .scheduledTimer(withTimeInterval: 0.6, repeats: false) {
-                    [weak self] _ in MainActor.assumeIsolated { self?.setCheatsheet(true) }
-                }
-            } else {
-                setCheatsheet(false)
-            }
-            return ev
         }
         NotificationCenter.default.addObserver(
             self, selector: #selector(parkedSurfaceDidExit(_:)),
@@ -892,7 +872,8 @@ final class ForkWindowController: TerminalController {
     /// active-and-empty case — the sibling `activate(tab:)` inside closeForkTab
     /// will replace surfaceTree wholesale, avoiding an in-flight debounced
     /// `persistActive(empty)` landing under the newly-active sibling's id.
-    func movePane(from src: TabModel.ID, ref: SessionRef, to dstOrNil: TabModel.ID?) {
+    func movePane(from src: TabModel.ID, ref: SessionRef, to dstOrNil: TabModel.ID?,
+                  direction: SplitViewDirection = .horizontal) {
         guard let srcTab = registry.tabs.first(where: { $0.id == src }),
               srcTab.tree.leafRefs.contains(ref) else { return }
 
@@ -921,12 +902,13 @@ final class ForkWindowController: TerminalController {
         let prunedSrc = srcLive.removing(srcNode)
         let dstLive = liveTree(for: dst)
         let extendedDst: SplitTree<Ghostty.SurfaceView>
-        // Rightmost leaf + `.right` makes the depth-first-left traversal yield
-        // `[...existing, moved]` — matches PersistedTree.appending(leaf:) so live
-        // and persisted shapes agree even when dst is inactive (no debounced
+        // Rightmost leaf + `.right`/`.down` (`appendDirection`) makes the depth-first-left
+        // traversal yield `[...existing, moved]` — matches PersistedTree.appending(leaf:direction:)
+        // so live and persisted leaf order agree even when dst is inactive (no debounced
         // persistActive.project() to paper over a mismatch).
         if let anchor = Array(dstLive).last {
-            extendedDst = (try? dstLive.inserting(view: surface, at: anchor, direction: .right)) ?? dstLive
+            extendedDst = (try? dstLive.inserting(view: surface, at: anchor,
+                                                   direction: direction.appendDirection)) ?? dstLive
         } else {
             extendedDst = .init(view: surface)
         }
@@ -938,7 +920,7 @@ final class ForkWindowController: TerminalController {
             surfaceTree = extendedDst
         }
 
-        registry.movePanePersisted(from: src, ref: ref, to: dst)
+        registry.movePanePersisted(from: src, ref: ref, to: dst, direction: direction)
         // The moved pane just landed on screen (dst is the active tab; surfaceTree was
         // swapped above) — ack its unread/blocked state the same way `activate(tab:)`
         // does. Without this a `.waiting`/`.blocked` pane moved into view keeps its stale
@@ -965,14 +947,15 @@ final class ForkWindowController: TerminalController {
     /// external (`@`-keyed) refs — moving an external reattaches someone else's
     /// session under a different tab, which is the split/merge-externals rabbit
     /// hole we're deliberately deferring per Fork/CLAUDE.md §Gotchas.
-    func mergeTab(from src: TabModel.ID, into dst: TabModel.ID) {
+    func mergeTab(from src: TabModel.ID, into dst: TabModel.ID,
+                  direction: SplitViewDirection = .horizontal) {
         guard src != dst,
               let srcTab = registry.tabs.first(where: { $0.id == src }),
               let dstTab = registry.tabs.first(where: { $0.id == dst }),
               srcTab.hostID == dstTab.hostID else { return }
         let refs = Array(liveTree(for: src)).compactMap { registry.refs[$0.id] }.filter { !$0.external }
         for ref in refs {
-            movePane(from: src, ref: ref, to: dst)
+            movePane(from: src, ref: ref, to: dst, direction: direction)
         }
     }
 
@@ -1088,17 +1071,10 @@ final class ForkWindowController: TerminalController {
 
     // MARK: Window setup — wrap upstream's contentView in a sidebar split.
 
-    override func windowDidResignKey(_ notification: Notification) {
-        super.windowDidResignKey(notification)
-        setCheatsheet(false)
-    }
-
     override func windowWillClose(_ notification: Notification) {
         // Run-loop / NSEvent retain these independently of `self`; weak-self in the
-        // closures makes the firings no-ops, but the timers/monitors themselves leak.
+        // closures makes the firings no-ops, but the monitor itself leaks.
         navMonitor.map(NSEvent.removeMonitor); navMonitor = nil
-        cheatMonitor.map(NSEvent.removeMonitor); cheatMonitor = nil
-        cheatsheetTimer?.invalidate(); cheatsheetTimer = nil
         // `panes` lives on the singleton and `ForkNotify.badgeSub` outlives this
         // controller; `.detached` (via `stopObservingProgress`) resets phase so the dock
         // badge doesn't stick.

@@ -60,6 +60,7 @@ struct SidebarView: View {
         .onChange(of: showCC) { registry.setCCProbeEnabled($0) }
         .modifier(OptionGestureRecognizer(window: { controller?.window },
                                           revealAll: $revealAll,
+                                          onPeek: { controller?.setCheatsheet($0) },
                                           onSweep: { registry.markAllCCRead() }))
         .onDisappear {
             // Stop the singleton's 3s ccPoll loop — `setCCProbeEnabled` cancels the
@@ -419,8 +420,9 @@ struct SidebarView: View {
         }
     }
 
-    /// "Merge Into ▸" — fold all of `tab`'s panes into another tab on the same host.
-    /// Hidden when no valid destination exists.
+    /// "Merge Into ▸ <tab> ▸ To the Right / Below" — fold all of `tab`'s panes into
+    /// another tab on the same host, side-by-side (horizontal split) or stacked
+    /// (vertical split). Hidden when no valid destination exists.
     @ViewBuilder
     private func mergeIntoMenu(_ tab: TabModel) -> some View {
         let targets = registry.tabs(on: tab.hostID).filter { $0.id != tab.id }
@@ -428,8 +430,17 @@ struct SidebarView: View {
         if !targets.isEmpty, tab.tree.leafRefs.contains(where: { !$0.external }) {
             Menu("Merge Into…") {
                 ForEach(targets) { dst in
-                    Button(dst.title.isEmpty ? "(untitled)" : dst.title) {
-                        controller?.mergeTab(from: tab.id, into: dst.id)
+                    Menu(dst.title.isEmpty ? "(untitled)" : dst.title) {
+                        Button {
+                            controller?.mergeTab(from: tab.id, into: dst.id, direction: .horizontal)
+                        } label: {
+                            Label("To the Right (side by side)", systemImage: "rectangle.split.2x1")
+                        }
+                        Button {
+                            controller?.mergeTab(from: tab.id, into: dst.id, direction: .vertical)
+                        } label: {
+                            Label("Below (stacked)", systemImage: "rectangle.split.1x2")
+                        }
                     }
                 }
             }

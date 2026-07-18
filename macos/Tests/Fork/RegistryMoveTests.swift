@@ -37,6 +37,25 @@ struct RegistryMoveTests {
         #expect(paneCount(dst) == 2)
     }
 
+    /// Merge Into ▸ Below writes a vertical split; the default (To the Right) stays
+    /// horizontal. Locks the direction→shape mapping so the persisted tree agrees
+    /// with the live `.right`/`.down` insertion in `movePane`.
+    @Test func movePane_directionSetsSplitOrientation() {
+        let r = reset()
+        for (dir, wantHorizontal) in [(SplitViewDirection.horizontal, true), (.vertical, false)] {
+            let src = makeTab(r, names: ["a"])
+            let dst = makeTab(r, names: ["x"])
+            #expect(r.movePanePersisted(from: src, ref: .init(hostID: "local", name: "a"),
+                                        to: dst, direction: dir) == true)
+            let tree = r.tabs.first { $0.id == dst }!.tree
+            if case .split(let horizontal, _, _, _) = tree {
+                #expect(horizontal == wantHorizontal)
+            } else {
+                Issue.record("expected a split, got \(tree)")
+            }
+        }
+    }
+
     // MARK: - Tab visit history (mouse back/forward)
 
     /// Mirrors `ForkWindowController.navigateTabHistory`: step the cursor, then activate
