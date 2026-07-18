@@ -902,13 +902,19 @@ final class ForkWindowController: TerminalController {
         let prunedSrc = srcLive.removing(srcNode)
         let dstLive = liveTree(for: dst)
         let extendedDst: SplitTree<Ghostty.SurfaceView>
-        // Rightmost leaf + `.right`/`.down` (`appendDirection`) makes the depth-first-left
-        // traversal yield `[...existing, moved]` — matches PersistedTree.appending(leaf:direction:)
-        // so live and persisted leaf order agree even when dst is inactive (no debounced
-        // persistActive.project() to paper over a mismatch).
-        if let anchor = Array(dstLive).last {
-            extendedDst = (try? dstLive.inserting(view: surface, at: anchor,
-                                                   direction: direction.appendDirection)) ?? dstLive
+        // Graft the moved pane beside/below the WHOLE dst root — the same wrap-the-tree
+        // shape `PersistedTree.appending(leaf:direction:)` writes — not off the rightmost
+        // leaf. Splitting the last leaf only agreed with persisted on leaf ORDER, so the
+        // geometry depended on whether dst was active: active → the debounced persistActive
+        // re-projected the nested shape (half-width under the last pane); inactive → the
+        // persisted whole-tree wrap won on next activation (full-width column/row). One
+        // shape both ways: "To the Right" = a full-height column right of the tab,
+        // "Below" = a full-width row under it. (Zoom is dropped — the layout just changed.)
+        if let dstRoot = dstLive.root {
+            extendedDst = .init(
+                root: .split(.init(direction: direction.treeAxis, ratio: 0.5,
+                                   left: dstRoot, right: .leaf(view: surface))),
+                zoomed: nil)
         } else {
             extendedDst = .init(view: surface)
         }

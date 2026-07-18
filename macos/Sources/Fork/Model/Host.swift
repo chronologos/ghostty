@@ -280,11 +280,11 @@ indirect enum PersistedTree: Codable, Hashable {
 }
 
 extension SplitViewDirection {
-    /// The `SplitTree` insertion that appends a leaf on this axis after the anchor:
-    /// horizontal → to its `.right`, vertical → `.down`. One mapping, shared by the live
-    /// (`movePane`) and persisted (`appending`) append paths so their shapes can't drift.
-    var appendDirection: SplitTree<Ghostty.SurfaceView>.NewDirection {
-        self == .horizontal ? .right : .down
+    /// The live `SplitTree` axis for this direction. One mapping, shared by the live
+    /// (`movePane` root graft) and persisted (`appending(leaf:direction:)`) append paths
+    /// so their shapes can't drift.
+    var treeAxis: SplitTree<Ghostty.SurfaceView>.Direction {
+        self == .horizontal ? .horizontal : .vertical
     }
 }
 #endif
