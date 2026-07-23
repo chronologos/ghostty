@@ -49,7 +49,7 @@ enum CCProbe {
     /// last-known-good); `[:]` on success-with-no-matches. Same `sh -c` path for local and
     /// remote — `controlArgv` is the identity for `.local`, ssh-wrap for `.ssh`.
     static func probe(host: ForkHost, entries: [ZmxAdapter.ListEntry]) async -> [String: Info]? {
-        // Transport failure is already short-circuited by the caller (`ccPollLoop` skips the
+        // Transport failure is already short-circuited by the caller (`pollLoop` skips the
         // probe when `list()` returns nil); zero entries just means there's nothing to match
         // against — keep last-known rather than wiping.
         guard !entries.isEmpty else { return nil }

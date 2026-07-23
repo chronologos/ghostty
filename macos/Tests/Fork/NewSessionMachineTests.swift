@@ -148,20 +148,36 @@ struct NewSessionMachineTests {
         var m = machine(locked: true)
         m.setRecents(.init())
         m.query = "proj"
-        #expect(m.commit(shift: true, in: all) == .create(name: "proj", smartJump: true))
+        #expect(m.commit(shift: true, in: all) == .create(name: "proj", smartJump: true, typed: true))
     }
 
+    /// `typed` distinguishes a user-written name (also seeded as the session's alias) from
+    /// the auto placeholder (not seeded) — decided in the reducer where the branch is, not
+    /// reconstructed downstream by comparing the name back against the placeholder.
     @Test func commitCreatesPlaceholderWhenEmpty() {
         var m = machine(locked: true)
         m.setRecents(.init())
-        #expect(m.commit(shift: false, in: all) == .create(name: "auto-xyz", smartJump: false))
+        #expect(m.commit(shift: false, in: all) == .create(name: "auto-xyz", smartJump: false, typed: false))
+        m.query = "auto-xyz"   // literally typing the placeholder text is still typed
+        #expect(m.commit(shift: false, in: all) == .create(name: "auto-xyz", smartJump: false, typed: true))
     }
 
-    @Test func commitInvalidNameNoop() {
+    /// An id-invalid query (a space, a slash) can still match sessions by *alias*. ⏎ must
+    /// not dead-end silently: exactly one match attaches it, otherwise beep. (Before aliases
+    /// this returned `.none` — nothing to attach and nothing creatable.)
+    @Test func commitInvalidNameBeepsOrAttachesUniqueAliasMatch() {
         var m = machine(locked: true)
         m.setRecents(.init())
         m.query = "bad/name"
-        #expect(m.commit(shift: false, in: all) == .none)
+        #expect(m.commit(shift: false, in: all) == .beep)   // no matches, not creatable
+
+        var one = machine(locked: true)
+        one.setRecents(.init(managed: [
+            .init(name: "acr", clients: 0, created: .distantPast, external: false, pid: nil,
+                  alias: "code review"),
+        ]))
+        one.query = "code review"                            // matches only via the alias
+        #expect(one.commit(shift: false, in: all) == .attach(name: "acr", external: false))
     }
 }
 #endif
