@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Workaround for ziglang/zig#31658: zig 0.15.2's MachO linker can't match
 # arm64e-only libSystem.tbd in the Xcode 26.4 SDK. Redirect zig's SDK probe
-# to a 15.4 SDK whose tbd still lists arm64-macos. Remove once zig ships
-# the fix from PR #31673.
+# to a 15.4 SDK whose tbd still lists arm64-macos. This repo no longer needs
+# it (Zig 0.16 fixed the bug), but this shims dir is also prepended by other
+# 0.15.2 builds — zmx via ~/bin/zmx-deploy — so it stays until nothing on
+# this machine builds with 0.15.2.
 case " $* " in
   *" --sdk macosx "*|*" -sdk macosx "*)
     for a in "$@"; do
