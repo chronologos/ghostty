@@ -56,21 +56,24 @@ struct SidebarView: View {
             }
         }
         .background(.ultraThinMaterial)
-        .task { registry.setCCProbeEnabled(showCC) }
+        // Polling (zmx list → aliases + reachability) starts with the sidebar regardless of
+        // the CC toggle; the toggle only decides whether the loop also runs the CC probe.
+        // Probe flag first so the poll's first reconcile already sees it.
+        .task { registry.setCCProbeEnabled(showCC); registry.setPolling(true) }
         .onChange(of: showCC) { registry.setCCProbeEnabled($0) }
         .modifier(OptionGestureRecognizer(window: { controller?.window },
                                           revealAll: $revealAll,
                                           onPeek: { controller?.setCheatsheet($0) },
                                           onSweep: { registry.markAllCCRead() }))
         .onDisappear {
-            // Stop the singleton's 3s ccPoll loop — `setCCProbeEnabled` cancels the
+            // Stop the singleton's 3s poll loop — `setPolling(false)` cancels the
             // detached `Task`, which `.task`'s own auto-cancel can't (one-shot body
             // returns immediately). Otherwise leaks past last-window close
             // (`shouldQuitAfterLastWindowClosed` defaults false, AppDelegate.swift:1035).
             // Last-window only: the registry is shared, and a sibling window's sidebar has
-            // no re-enable path short of the user toggling showCC off and on.
+            // no re-enable path short of its own next appear.
             if !ForkWindowController.anyOtherForkWindow(besides: controller?.window) {
-                registry.setCCProbeEnabled(false)
+                registry.setPolling(false)
             }
         }
     }
@@ -306,8 +309,10 @@ struct SidebarView: View {
     }
 
     // MARK: Tab → pane rows
-    // Each row's label is `paneLabels[ref.key]` (persisted, ⌘I) › `surface.title` (OSC, live)
-    // › `ref.name`, with `ref.name` as subtitle when the label differs. `tab.title` is a heading
+    // Each row's label is `paneLabels[ref.key]` (the alias — cache of the daemon-side
+    // `ghostty_name` session label, ⌘I renames both) › `surface.title` (OSC, live) ›
+    // `ref.name` (the immutable session id), with the id as subtitle when the alias
+    // differs. `tab.title` is a heading
     // above the group, shown only when it diverges from the first session name (⌘⇧I edits it).
     // Cold-restored tabs have no live surfaces until first activated.
 
@@ -794,7 +799,7 @@ struct SidebarView: View {
                 registry.renameTab(id, to: title)
             }
         case .pane(let id, let name):
-            registry.setPaneLabel(tab: id, name: name, to: renameText.isEmpty ? nil : renameText)
+            registry.renamePane(tab: id, name: name, to: renameText.isEmpty ? nil : renameText)
         case nil: break
         }
         registry.setRenaming(nil)

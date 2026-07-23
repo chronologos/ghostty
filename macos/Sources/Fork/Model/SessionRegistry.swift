@@ -66,13 +66,18 @@ final class SessionRegistry: ObservableObject {
     }
     /// Called when a ref leaves all trees (`removeTab`/`removeHost` — NOT
     /// `setPersistedTree`, which must preserve `blockSig`/`watched` across ⌘W→⌘Z).
-    func dropPane(_ ref: SessionRef) { panes.removeValue(forKey: ref) }
+    func dropPane(_ ref: SessionRef) {
+        panes.removeValue(forKey: ref)
+        aliasSync.removeValue(forKey: ref)
+        aliasSeeds.remove(ref)
+    }
     private func refInAnyTree(_ r: SessionRef) -> Bool {
         tabs.contains { $0.tree.leafRefs.contains(r) }
     }
 
     /// Live CC-session info per pane (`CCProbe`), keyed `[hostID][ref.key]`. Ephemeral; the
-    /// poll only runs while the sidebar's `showCC` toggle is on.
+    /// CC-probe half of the poll only runs while the sidebar's `showCC` toggle is on (the
+    /// `zmx list` half runs whenever a fork window is up — it also carries the aliases).
     @Published private(set) var ccLive: [ForkHost.ID: [String: CCProbe.Info]] = [:]
     /// Heartbeat timestamps split out from `ccLive` so steady-state poll ticks can refresh
     /// them without firing `objectWillChange` (`Info.==` excludes `updatedAt` for that
@@ -94,7 +99,10 @@ final class SessionRegistry: ObservableObject {
     /// probe (which also covers "no CC sessions"); only a transport failure counts. Not
     /// @Published — `noteHostReachability` publishes on the rare transition instead.
     private(set) var hostUnreachableSince: [ForkHost.ID: Date] = [:]
-    private var ccPoll: Task<Void, Never>?
+    private var poll: Task<Void, Never>?
+    /// The CC probe rides the same `pollLoop` as the `zmx list` that carries aliases, so
+    /// it's a flag on the loop rather than the loop's whole reason to exist.
+    private(set) var ccProbeOn = false
 
     /// Not @Published: pure surface→session bookkeeping the sidebar never renders
     /// directly. `isConnected()` reads it, but every flow that mutates `refs` also
@@ -485,60 +493,101 @@ final class SessionRegistry: ObservableObject {
     func unbind(surface: UUID) { refs.removeValue(forKey: surface) }
     func saveNow() { persistence.save(snapshot()) }
 
-    // MARK: CC probe (PR30)
+    // MARK: Poll — zmx list (aliases + reachability) + CC probe (PR30)
+    //
+    // Two stored inputs, one derivation: `windowsUp` (a fork window's sidebar is on
+    // screen) decides whether the `zmx list` loop runs; `ccProbeOn` (the sidebar toggle)
+    // decides whether that loop also runs the CC probe. `reconcile` derives the effects
+    // from the pair, so no call order can leave them inconsistent — the `zmx list` half
+    // must run regardless of the CC toggle, since it carries session aliases into the
+    // sidebar and drives the unreachable cue.
+    private var windowsUp = false
+    var isPolling: Bool { poll != nil }
 
-    func setCCProbeEnabled(_ on: Bool) {
-        if on, ccPoll == nil {
-            ccPoll = Task { [weak self] in await self?.ccPollLoop() }
-        } else if !on {
-            ccPoll?.cancel(); ccPoll = nil
-            if !ccLive.isEmpty { ccLive = [:] }
-            ccUpdatedAt = [:]
-            hostUnreachableSince = [:]
-            // `blocked`/`blockSig` survive toggle (the machine holds the edge-detect latch),
-            // but `ccBusy` must not — nothing else clears it once the poll stops, and `dot`
-            // would wedge at `.working` forever.
-            for ref in Array(panes.keys) { apply(ref, .probeStopped) }
-        }
+    func setPolling(_ on: Bool) {
+        guard windowsUp != on else { return }
+        windowsUp = on
+        reconcile()
     }
 
-    private func ccPollLoop() async {
+    func setCCProbeEnabled(_ on: Bool) {
+        guard ccProbeOn != on else { return }
+        ccProbeOn = on
+        reconcile()
+    }
+
+    private func reconcile() {
+        if windowsUp, poll == nil {
+            poll = Task { [weak self] in await self?.pollLoop() }
+        } else if !windowsUp, poll != nil {
+            poll?.cancel(); poll = nil
+            hostUnreachableSince = [:]
+        }
+        if !(windowsUp && ccProbeOn) { ccTeardown() }
+    }
+
+    private func ccTeardown() {
+        if !ccLive.isEmpty { ccLive = [:] }
+        ccUpdatedAt = [:]
+        // `blocked`/`blockSig` survive toggle (the machine holds the edge-detect latch),
+        // but `ccBusy` must not — nothing else clears it once probing stops, and `dot`
+        // would wedge at `.working` forever.
+        for ref in Array(panes.keys) { apply(ref, .probeStopped) }
+    }
+
+    private func pollLoop() async {
         var tick = 0
         while !Task.isCancelled {
+            let probing = ccProbeOn
+            // Wake every 3s but do the work on a tick schedule: locals every tick and ssh
+            // every 5th at the fast cadence (CC probe on + a fork window visible); every
+            // 10th (30s) at the slow one — nobody can see the sidebar (occluded / minimized
+            // / locked), or the probe is off and only aliases + reachability ride the poll,
+            // which change on human timescales. Slow rather than stop: `.probeStopped`
+            // semantics (the ccBusy wedge) only apply to a stopped poll, and a state change
+            // (window shown, probe toggled) is picked up on the next 3s wake instead of after
+            // a 30s sleep. Agents running overnight behind a locked screen are otherwise the
+            // fork's single biggest CPU/traffic source.
+            let slow = !(ForkWindowController.anyVisibleForkWindow && probing)
             let due = hosts.filter { h in
-                tabs.contains { $0.hostID == h.id } && (h.transport.isLocal || tick % 5 == 0)
+                tabs.contains { $0.hostID == h.id }
+                    && (h.transport.isLocal || tick % 5 == 0)
+                    && (!slow || tick % 10 == 0)
             }
             // Fan-out so one unreachable ssh host (5s timeout) doesn't head-of-line-block
-            // the local 3s cadence; merge each result as it arrives. The third tuple slot is
-            // "the transport itself failed" — `mergeCC` can't tell that apart from "no CC
+            // the local 3s cadence; merge each result as it arrives. A nil `list` is "the
+            // transport itself failed" — `mergeCC` can't tell that apart from "no CC
             // sessions" (both arrive as nil), and only the former should mark the host
-            // unreachable.
+            // unreachable. The same `zmx list` carries the session labels, so alias sync
+            // rides this poll instead of a second one.
             let tickStart = ContinuousClock.now
-            await withTaskGroup(of: (ForkHost.ID, [String: CCProbe.Info]?, Bool).self) { group in
+            await withTaskGroup(of: (ForkHost.ID, ZmxAdapter.ListResult?, [String: CCProbe.Info]?).self) { group in
                 for h in due {
                     group.addTask {
-                        guard let list = await ZmxAdapter.list(host: h) else { return (h.id, nil, true) }
-                        return (h.id, await CCProbe.probe(host: h, entries: list.managed + list.external), false)
+                        guard let list = await ZmxAdapter.list(host: h) else { return (h.id, nil, nil) }
+                        let probe = probing ? await CCProbe.probe(host: h, entries: list.managed + list.external) : nil
+                        return (h.id, list, probe)
                     }
                 }
-                for await (id, result, listFailed) in group {
-                    mergeCC(hostID: id, result: result)
-                    noteHostReachability(id, unreachable: listFailed)
+                for await (id, list, result) in group {
+                    // A completed child result can drain *after* `setPolling(false)` (last
+                    // window closed) cancelled this loop and `ccTeardown` cleared everything
+                    // — the MainActor hop between children lets `windowWillClose` run. This
+                    // task's own cancellation is the generation check: writing here would
+                    // re-set `ccBusy` with no poll left to clear it (the `.working` wedge) and
+                    // spawn `zmx set`s after the window closed.
+                    guard !Task.isCancelled else { break }
+                    if probing { mergeCC(hostID: id, result: result) }
+                    noteHostReachability(id, unreachable: list == nil)
+                    if let list { syncAliases(hostID: id, list: list) }
                 }
             }
             tick &+= 1
-            // Nobody can see the sidebar (window occluded / minimized / screen locked):
-            // stretch the cadence ~10×. Slow rather than stop — `.probeStopped` semantics
-            // (the ccBusy wedge) only apply to a stopped poll, and a slow tick still
-            // refreshes within 30s of the user coming back. Agents running overnight with
-            // the screen locked are otherwise the fork's single biggest CPU/traffic source.
-            //
             // Deadline cadence, not a flat post-drain sleep: a down ssh host costs its full
             // 5s connect timeout inside the drain above, and sleeping another 3s after that
             // pushed the *local* host's next probe to ~8s. The drain time counts against
-            // the interval, so tick cadence = max(interval, slowest host).
-            let visible = ForkWindowController.anyVisibleForkWindow
-            let interval: Duration = .seconds(visible ? 3 : 30)
+            // the interval, so tick cadence = max(3s, slowest host).
+            let interval: Duration = .seconds(3)
             let elapsed = ContinuousClock.now - tickStart
             if elapsed < interval { try? await Task.sleep(for: interval - elapsed) }
         }
@@ -547,10 +596,10 @@ final class SessionRegistry: ObservableObject {
     /// Flip the per-host unreachable marker, publishing only on the transition (appearing or
     /// clearing) — never per tick.
     private func noteHostReachability(_ id: ForkHost.ID, unreachable: Bool) {
-        // Same drain races `mergeCC` guards against: probe toggled off mid-tick (the
-        // cancelled list() reports a spurious failure after the clear, and with the poll
-        // off nothing would ever clear the badge again) or host removed mid-tick.
-        guard ccPoll != nil, host(id: id) != nil else { return }
+        // Same drain races `mergeCC` guards against: poll stopped mid-tick (the cancelled
+        // list() reports a spurious failure after the clear, and with the poll off nothing
+        // would ever clear the badge again) or host removed mid-tick.
+        guard poll != nil, host(id: id) != nil else { return }
         if unreachable, hostUnreachableSince[id] == nil {
             objectWillChange.send()
             hostUnreachableSince[id] = Date()
@@ -565,9 +614,9 @@ final class SessionRegistry: ObservableObject {
     /// steady-state tick doesn't fire `objectWillChange` (which would churn fork.json via the
     /// debounce-save and re-render the whole sidebar every 3s).
     private func mergeCC(hostID: ForkHost.ID, result: [String: CCProbe.Info]?) {
-        // `ccPoll == nil` ⇒ toggled off mid-tick — the in-flight task group can still drain
+        // `!ccProbeOn` ⇒ toggled off mid-tick — the in-flight task group can still drain
         // a result here after `setCCProbeEnabled(false)` cleared everything.
-        guard ccPoll != nil else { return }
+        guard ccProbeOn else { return }
         applyProbeResult(hostID: hostID, result: result)
     }
 
@@ -605,6 +654,134 @@ final class SessionRegistry: ObservableObject {
                 guard let name = info.name, live.contains(key),
                       tabs[i].ccNames[key] != name else { continue }
                 tabs[i].ccNames[key] = name
+            }
+        }
+    }
+
+    // MARK: Session aliases (zmx `ghostty_name` label)
+    //
+    // The alias lives daemon-side; `paneLabels` is its write-through cache. The per-ref
+    // rules (daemon-wins, capability, the pending-write mask, migration/seed, clear
+    // propagation, retries) live in `AliasSync`; this section is the driver: it feeds each
+    // ref one observation per poll, applies the returned action, and owns the two writers.
+
+    /// Test seam: production fires the real `zmx set`; tests capture the calls. The stamp
+    /// identifies the write so a *failure* can drop exactly that write's pending mask (a
+    /// newer rename's mask must survive an older failure) and unlock a bounded retry.
+    static let liveAliasPusher: (ForkHost, SessionRef, String?, Date) -> Void = { host, ref, alias, at in
+        Task {
+            if await !ZmxAdapter.setAlias(host: host, ref: ref, to: alias) {
+                await MainActor.run { SessionRegistry.shared.noteAliasWriteFailed(ref, at: at) }
+            }
+        }
+    }
+    var aliasPusher: (ForkHost, SessionRef, String?, Date) -> Void = SessionRegistry.liveAliasPusher
+    private(set) var aliasSync: [SessionRef: AliasSync] = [:]
+    /// Freshly created, user-named sessions awaiting their first `zmx list` — the typed name
+    /// (its own id) becomes the alias, but only the daemon carries it: label == id in the
+    /// *cache* would freeze the row over the live OSC title (`paneLabels` outranks
+    /// `surface.title` in the display chain). See `expectedEcho`.
+    private var aliasSeeds: Set<SessionRef> = []
+    /// TTL backstop for a write whose echo never shows up. `var` for tests.
+    var aliasPendingTTL: TimeInterval = 40
+    /// Cap on new `zmx set` spawns per host per poll tick — a first launch after this
+    /// ships migrates every labeled pane at once, and N simultaneous ssh handshakes to one
+    /// host trip sshd's MaxStartups. Unpushed refs stay eligible for the next tick.
+    private static let aliasPushBudget = 4
+
+    /// The one user-facing writer: cache + daemon; `label` nil clears both. The text goes
+    /// through the same sanitize + label-==-id normalization the daemon's echo gets — the
+    /// sidebar's inline rename *prefills the id*, so ⏎ without editing must land as "no
+    /// alias", not as a cached id that freezes the row over the OSC title. The cache write
+    /// fans out to every tab holding the ref (dup-attach) so no tab keeps a stale name.
+    func renamePane(tab id: TabModel.ID, name: String, to label: String?) {
+        guard let t = tabs.first(where: { $0.id == id }),
+              let ref = t.tree.leafRefs.first(where: { $0.key == name }) else { return }
+        let clean = Self.expectedEcho(label.flatMap(AliasCodec.sanitize), ref: ref)
+        writeCache(ref, clean)
+        sendAlias(ref, clean)
+    }
+
+    /// Cache write for one ref across every tab that holds it, `!=`-guarded.
+    private func writeCache(_ ref: SessionRef, _ value: String?) {
+        for i in tabs.indices where tabs[i].hostID == ref.hostID
+            && tabs[i].tree.leafRefs.contains(ref) && tabs[i].paneLabels[ref.key] != value {
+            if let value { tabs[i].paneLabels[ref.key] = value }
+            else { tabs[i].paneLabels.removeValue(forKey: ref.key) }
+        }
+    }
+
+    /// Queue a freshly created, user-named session to be labeled with its own id once the
+    /// daemon exists — every creation path (window, tab, split) funnels through here.
+    func seedAlias(_ ref: SessionRef) { aliasSeeds.insert(ref) }
+
+    /// A label equal to the session's own id is the *seed*, meaningful only daemon-side:
+    /// as a cache entry it displays exactly like no entry while permanently shadowing the
+    /// OSC title. So it's normalized away symmetrically — from what the daemon reports and
+    /// from what we expect it to echo after a push — keeping cache↔daemon comparisons true.
+    private static func expectedEcho(_ v: String?, ref: SessionRef) -> String? {
+        v == ref.name ? nil : v
+    }
+
+    private func sendAlias(_ ref: SessionRef, _ value: String?) {
+        guard let h = host(id: ref.hostID) else { return }
+        let at = Date()
+        aliasSync[ref, default: .init()].noteSent(
+            sent: Self.expectedEcho(value, ref: ref), wire: value, at: at)
+        aliasPusher(h, ref, value, at)
+    }
+
+    /// The `zmx set` stamped `at` failed (old zmx, unreachable host, session not created
+    /// yet). Called via `liveAliasPusher` back on the main actor.
+    func noteAliasWriteFailed(_ ref: SessionRef, at: Date) {
+        aliasSync[ref]?.noteFailed(at: at)
+    }
+
+    /// Feed one poll's `zmx list` to each attached ref's `AliasSync` and apply the
+    /// action. Decisions are made once per *ref* (a session attached in two tabs must not
+    /// evaluate its pending mask twice), then cache writes fan out to every tab holding
+    /// the ref. All cache writes are `!=`-guarded so a steady poll never publishes.
+    func syncAliases(hostID: ForkHost.ID, list: ZmxAdapter.ListResult) {
+        guard host(id: hostID) != nil else { return }
+        var daemon: [SessionRef: ZmxAdapter.ListEntry] = [:]
+        for e in list.managed + list.external {
+            let ref = SessionRef(hostID: hostID, name: e.name, external: e.external)
+            if daemon[ref] == nil { daemon[ref] = e }
+        }
+        let refs = Set(tabs.lazy.filter { $0.hostID == hostID }.flatMap(\.tree.leafRefs))
+        let now = Date()
+        var budget = Self.aliasPushBudget
+        for ref in refs {
+            guard let entry = daemon[ref] else { continue }   // session not (yet) listed
+            // A cached label equal to the id (an old fork.json, or a pre-fix rename) is
+            // the invalid label-==-id state: heal it out of every tab holding the ref and
+            // proceed as "no cache", so it can't freeze the row over the OSC title.
+            var cached = tabs.first { $0.hostID == hostID && $0.tree.leafRefs.contains(ref) }?
+                .paneLabels[ref.key]
+            if cached == ref.name { writeCache(ref, nil); cached = nil }
+            let action = aliasSync[ref, default: .init()].observe(
+                created: entry.created,
+                live: Self.expectedEcho(entry.alias, ref: ref),
+                cached: cached,
+                seeded: aliasSeeds.contains(ref),
+                id: ref.name,
+                budget: budget > 0,
+                // Migration/seed writes go only to sessions the fork created — never
+                // unsolicited into a foreign (external) session's state; those get a
+                // label only from an explicit rename (whose retries aren't gated here).
+                managed: !ref.external,
+                now: now, ttl: aliasPendingTTL)
+            // A seed is consumed once the session is seen carrying any label or its push
+            // went out — the machine's `capable`/`pushed` say exactly that.
+            if let s = aliasSync[ref], s.capable || s.pushed { aliasSeeds.remove(ref) }
+            switch action {
+            case .none:
+                break
+            case .setCache(let v):
+                writeCache(ref, v)
+            case .push(let v):
+                budget -= 1
+                sendAlias(ref, v)
             }
         }
     }
@@ -694,7 +871,9 @@ final class SessionRegistry: ObservableObject {
             hosts[i].label = ForkHost.local.label
             hosts[i].expanded = true
         }
-        ccPoll?.cancel(); ccPoll = nil
+        poll?.cancel(); poll = nil
+        ccProbeOn = false
+        windowsUp = false
         activeTabID = nil
         focusedPaneIndex = nil
         renaming = nil
@@ -708,6 +887,10 @@ final class SessionRegistry: ObservableObject {
         lastTouched = nil
         tabHistory = []
         tabHistoryCursor = -1
+        aliasSync = [:]
+        aliasSeeds = []
+        aliasPendingTTL = 40
+        aliasPusher = Self.liveAliasPusher
     }
 
     /// `autoName()` retried until disjoint from live refs and dormant persisted-tree leaves.
