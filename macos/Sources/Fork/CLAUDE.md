@@ -19,8 +19,12 @@ section numbers as historical anchors).
 ## Build & test
 
 ```sh
-# zig 0.15.2 can't link the macOS 26.4 SDK (ziglang/zig#31658).
-# scripts/shims/xcrun redirects its SDK probe to 15.4. Remove once a fixed zig ships.
+# Upstream requires Zig 0.16 (build.zig.zon `minimum_zig_version`) while system `zig`
+# stays 0.15.2 (zmx builds on it); scripts/shims/zig picks per-project from the nearest
+# build.zig.zon's declared minimum → `zig-0.16` here — a real shim, not an alias, because
+# upstream's `translate_c` dependency discovers the lib dir via `zig env` on PATH.
+# (0.16 no longer needs scripts/shims/xcrun — ziglang/zig#31658 is fixed — but the
+# 0.15.2 consumers of this shims dir, e.g. ~/bin/zmx-deploy, still do; leave it.)
 # -Demit-xcframework: upstream's libghostty-vt split made the xcframework non-default.
 PATH=$(pwd)/scripts/shims:$PATH zig build -Demit-xcframework -Demit-macos-app=false
 
@@ -81,6 +85,9 @@ Fork/
     Host.swift                 ForkHost, Transport, SSHTarget, SessionRef, TabModel,
                                PersistedTree, PaneTag, HoverCommand, isValidIdent/
                                isSafeExternalName
+    AliasSync.swift            Per-SessionRef alias reducer — cache ⇄ daemon `ghostty_name`
+                               label (capability, pending-write mask, migration/seed,
+                               clear propagation, retries); pure, unit-tested
     PaneMachine.swift          Per-SessionRef status reducer — event-ordered `.progress`/
                                `.settled`/`.probe`/`.probeAbsent`/`.probeStopped`/`.viewed`/
                                `.watch`/`.bell(isActive:)`/`.detached` → `.dot` projection
@@ -93,8 +100,11 @@ Fork/
     Persistence.swift          fork.json (atomic write + .bak + preserve-aside + revalidate-on-load)
   Zmx/
     ShellQuote.swift           shq() — POSIX single-quote; stripControl()
+    AliasCodec.swift           pane alias ⇄ zmx `ghostty_name` label value (`_HH` escape into
+                               `[A-Za-z0-9._-]`, lenient decode) + display sanitize
     ZmxAdapter.swift           surfaceConfig/list/partition/kill/history/detachedScript/
-                               restoreCmd/expand/run; Transport.wrap/controlArgv
+                               restoreCmd/expand/run/setAlias; Transport.wrap/controlArgv;
+                               `ListEntry.alias` (parsed label, first-key-wins)
     CCProbe.swift              zmx pid → ~/.claude/sessions/<pid>.json. Local host: native
                                Swift (sysctl process table + FileManager); ssh hosts: sh
                                probe script. Keyed by SessionRef.key; nil-on-failure so the
@@ -200,8 +210,25 @@ shadows upstream's `undo` alias (Config.zig:6934); ⌘Z remains undo.
 - **`SessionRef.name` is not unique within a tab**: `ZmxAdapter` strips the `{hostID}-` prefix
   on list parse, so a tab-owned `acr` and an external-attached `acr` collide. Per-tab dicts
   (`paneLabels`/`paneTags`/`lastActive`) key on `SessionRef.key` (`@`-prefix for external).
-- **Three pane-title layers**: `paneLabels[ref.key]` (fork-persisted, ⌘I) › `surface.title`
+- **Three pane-title layers**: `paneLabels[ref.key]` (the *alias*, ⌘I) › `surface.title`
   (OSC-driven, per-`SurfaceView`-instance, lost on restart) › `ref.name` (zmx session id).
+  The alias's source of truth is the daemon-side session label `ghostty_name=<v>`
+  (`zmx set`); `paneLabels` is its write-through cache. The per-ref rules live in the
+  `AliasSync` reducer (`syncAliases` drives it off the poll's `zmx list`): daemon-wins;
+  a *missing* label is an authoritative clear only from a daemon that has proven
+  label-capable (capability can't be probed — old and new daemons print alike — so an
+  unproven absence keeps the cache, i.e. old-zmx fallback), else it's the once-per-
+  incarnation migration/seed push (managed refs only, budgeted 4/host/tick); session
+  identity is zmx `created`, so a recreated session re-migrates; a pending-write mask
+  (echo-compare, 40s TTL) keeps a fresh rename from being clobbered by the stale echo,
+  and a stamp-matched failure unmasks immediately and queues *that write's own value*
+  for ≤3 retries ahead of daemon-wins (else a failed rename against an already-labeled
+  session silently reverts). `renamePane` is the one user
+  writer (sanitizes via `AliasCodec.sanitize`); a creation seed labels the daemon only —
+  label == id never enters the cache (it would freeze the row over the OSC title). Values
+  escape into zmx's `[A-Za-z0-9._-]` via `AliasCodec` (`_HH`); raw values outside that
+  charset are rejected at parse (zmx validates labels only in its CLI — see Security).
+  An agent inside a pane can rename itself with `zmx set . ghostty_name=…`.
   Upstream's `titleFallbackTimer` writes `"👻"` 500ms after surface init — `PaneLabel` treats
   it as no-title. `zmx attach` replays buffer but not OSC, so `surface.title` stays empty
   until the next prompt.
@@ -225,7 +252,12 @@ Beyond the shell layer: **external** session names bypass the regex (they come f
 `zmx list` verbatim) — `ZmxAdapter.partition` and `Persistence.scrub` drop leading-`-` names
 so they can't become zmx options, and partition only trusts the `{hostID}-` wire prefix when
 the stripped name passes the managed charset (a forged prefix on a hostile name stays
-external); `{cwd}` for hover commands must be an absolute path (`ZmxAdapter.expand` degrades
+external); `ZmxAdapter.parse` is first-key-wins (a session *label* can't shadow the built-in
+`name`/`clients`/`err` fields) and drops a second row for a session key it has already seen
+(zmx validates labels only in its **CLI** — a raw `LabelSet` on the socket stores tab/newline
+bytes verbatim, enough to forge whole `zmx list` rows; `AliasCodec.alias` likewise rejects any
+raw `ghostty_name` outside the codec's own charset — daemon-side validation is the real fix,
+tracked as a zmx patch); `{cwd}` for hover commands must be an absolute path (`ZmxAdapter.expand` degrades
 anything else to `.`) because it originates from OSC 7 / the CC probe, both remote-controlled;
 cached CC names are `stripControl`'d before they reach a local pty, and so are remote-origin
 strings that reach UN notification titles (`paneDisplayLabel`) and `CommandError.stderr`.

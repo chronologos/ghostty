@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Two Zig toolchains live on this machine: 0.16 (this repo — upstream's
+# build.zig.zon `minimum_zig_version`) and the system `zig` 0.15.2 (zmx). Pick
+# per *project*, from the nearest ancestor build.zig.zon: a project declaring a
+# 0.16.x minimum gets `zig-0.16`; anything else falls through to the real system
+# `zig`. This dir sits on PATH beyond this repo — .envrc.local `PATH_add`s it, and
+# zmx-deploy prepends it for the xcrun shim — so an unconditional shim would
+# hijack zmx's 0.15 build. It must be a real PATH shim, not an alias: upstream's
+# `translate_c` build dependency discovers the Zig lib dir by running `zig env`
+# (whatever `zig` is on PATH), so both the entry point and that probe have to
+# resolve the same way.
+self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
+
+# Nearest build.zig.zon walking up from $PWD → its declared minimum version.
+want=""
+d="$PWD"
+while [[ -n "$d" && "$d" != "/" ]]; do
+  if [[ -f "$d/build.zig.zon" ]]; then
+    want="$(sed -nE 's/.*\.minimum_zig_version = "([0-9]+\.[0-9]+).*".*/\1/p' "$d/build.zig.zon" | head -1)"
+    break
+  fi
+  d="$(dirname "$d")"
+done
+
+if [[ "$want" == "0.16" ]] && command -v zig-0.16 >/dev/null 2>&1; then
+  exec zig-0.16 "$@"
+fi
+
+# Fall through to the real system zig (skipping this shim so it can't recurse).
+IFS=: read -r -a dirs <<< "$PATH"
+for d in "${dirs[@]}"; do
+  [[ -x "$d/zig" ]] || continue
+  if [[ "$(cd "$d" 2>/dev/null && pwd -P)/zig" != "$self" ]]; then
+    exec "$d/zig" "$@"
+  fi
+done
+echo "zig shim: no real zig found on PATH" >&2
+exit 127
