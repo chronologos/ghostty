@@ -71,9 +71,13 @@ struct ForkPanePalette: View {
             })
         }
         out += registry.allPanes.map { p in
-            CommandOption(
-                title: p.tab.paneLabels[p.ref.key] ?? p.ref.name,
-                subtitle: "\(p.tab.title) · \(p.host.label)",
+            let alias = p.tab.paneLabels[p.ref.key]
+            // An aliased pane leads with the alias; its session id joins the crumb so the
+            // palette can still be matched on either.
+            let crumb = "\(p.tab.title) · \(p.host.label)"
+            return CommandOption(
+                title: alias ?? p.ref.name,
+                subtitle: (alias != nil && alias != p.ref.name) ? "\(p.ref.name) · \(crumb)" : crumb,
                 leadingColor: tokens.hostAccent(p.host),
                 badge: p.tab.paneTags[p.ref.key]?.text
             ) { [weak controller, id = p.tab.id, i = p.index] in

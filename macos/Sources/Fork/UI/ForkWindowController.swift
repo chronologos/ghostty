@@ -42,6 +42,7 @@ final class ForkWindowController: TerminalController {
                 registry.bind(surface: view.id, to: ref)
                 c.observeProgress(view)
                 let tab = registry.newTab(on: host.id, title: ref.name)
+                if intent?.named == true { registry.seedAlias(ref) }
                 c.liveTabs[tab.id] = c.surfaceTree
                 c.activate(tab: tab.id)
             }
@@ -547,26 +548,45 @@ final class ForkWindowController: TerminalController {
     private weak var sidebarReveal: NSButton?
     private weak var sidebarHandle: NSView?
     private var sidebarWidthConstraint: NSLayoutConstraint?
+    /// Sidebar's leading offset within the container: 0 shown, −width hidden. Hide/show
+    /// slides the sidebar by this — it keeps its full width the whole time, so the SwiftUI
+    /// content never re-lays out mid-animation (the old width-collapse re-truncated every
+    /// row on every frame). The window clips whatever slides off its edge.
+    private var sidebarLeadingConstraint: NSLayoutConstraint?
     private var terminalLeadingConstraint: NSLayoutConstraint?
+    private var sidebarVisible = true
 
     func toggleSidebar() {
-        guard let sidebarHost, let sidebarWidthConstraint, let terminalLeadingConstraint else { return }
-        let hide = sidebarWidthConstraint.constant > 0
-        let w: CGFloat = hide ? 0 : sidebarWidth
-        if !hide { sidebarHost.isHidden = false }
-        sidebarReveal?.isHidden = !hide
+        guard let sidebarHost, let sidebarWidthConstraint, let sidebarLeadingConstraint,
+              let terminalLeadingConstraint else { return }
+        let show = !sidebarVisible
+        sidebarVisible = show
+        let w = sidebarWidth
+        sidebarWidthConstraint.constant = w   // pick up a window-cap change while hidden
+        if show { sidebarHost.isHidden = false }
+        sidebarReveal?.isHidden = show
         // Hide the resize handle immediately on collapse (it must not stay grabbable over
-        // the terminal's left edge); reappears with the sidebar.
-        sidebarHandle?.isHidden = hide
+        // the terminal's left edge); it slides back in with the sidebar.
+        sidebarHandle?.isHidden = !show
+        // The terminal resizes exactly ONCE, up front, and is never animated: driving its
+        // leading edge per frame re-lays out the surface each frame — a Metal drawable
+        // resize plus a pty resize (SIGWINCH storm into every attached zmx client) 10× a
+        // second, which is what read as jank. On collapse the terminal fills instantly and
+        // the sidebar (drawn above it) slides off across the top of it; on expand it steps
+        // back once and the sidebar slides into the vacated band.
+        terminalLeadingConstraint.constant = show ? w : 0
+        cheatsheetCenterX?.constant = show ? w / 2 : 0
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.18
+            ctx.duration = 0.2
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             ctx.allowsImplicitAnimation = true
-            sidebarWidthConstraint.animator().constant = w
-            terminalLeadingConstraint.animator().constant = w
-            cheatsheetCenterX?.animator().constant = w / 2
+            sidebarLeadingConstraint.animator().constant = show ? 0 : -w
             sidebarHost.superview?.layoutSubtreeIfNeeded()
-        } completionHandler: {
-            sidebarHost.isHidden = sidebarWidthConstraint.constant == 0
+        } completionHandler: { [weak self] in
+            // Detach from the render tree while collapsed (occlusion / hit-testing), but a
+            // re-toggle mid-animation must not leave it hidden while `sidebarVisible`.
+            guard let self else { return }
+            sidebarHost.isHidden = !self.sidebarVisible
         }
     }
 
@@ -701,7 +721,7 @@ final class ForkWindowController: TerminalController {
     }
 
     private func revealRow(on hostID: ForkHost.ID) {
-        if sidebarWidthConstraint?.constant == 0 { toggleSidebar() }
+        if !sidebarVisible { toggleSidebar() }
         registry.setExpanded(hostID, true)
     }
 
@@ -817,7 +837,7 @@ final class ForkWindowController: TerminalController {
         }
     }
 
-    /// Is any *other* visible fork window still open? Gates singleton teardown (the CC poll)
+    /// Is any *other* visible fork window still open? Gates singleton teardown (the poll)
     /// on window close — the registry is shared, so "this window is closing" is not the same
     /// as "the fork is done with it".
     static func anyOtherForkWindow(besides w: NSWindow?) -> Bool {
@@ -827,8 +847,8 @@ final class ForkWindowController: TerminalController {
     }
 
     /// Any fork window the user can actually *see* right now (not occluded, minimized, or
-    /// behind a locked screen)? Gates the CC poll cadence — status freshness is pointless
-    /// when nothing renders it.
+    /// behind a locked screen)? Gates the poll's fast cadence — status freshness is
+    /// pointless when nothing renders it.
     static var anyVisibleForkWindow: Bool {
         NSApp.windows.contains {
             $0.isVisible && $0.occlusionState.contains(.visible)
@@ -991,12 +1011,12 @@ final class ForkWindowController: TerminalController {
         presentSheet(size: .init(width: 400, height: 300)) { [weak self] in
             NewSessionView(
                 host: h, locked: host != nil, placeholder: placeholder,
-                onSubmit: { ref, smartJump in
+                onSubmit: { ref, smartJump, named in
                     self?.newForkTab(intent: .init(
                         hostID: ref.hostID, name: ref.name,
                         // ⇧⏎: the session's shell starts at the zsh-z match for its name.
                         cmd: smartJump ? ZmxAdapter.smartJumpCmd(name: ref.name) : nil,
-                        external: ref.external))
+                        external: ref.external, named: named))
                     self?.endSheet()
                 },
                 onCancel: { self?.endSheet() })
@@ -1088,17 +1108,17 @@ final class ForkWindowController: TerminalController {
         endSheet()  // drops sheetResignSub; child-window auto-close doesn't guarantee resign-key fires first
         // Focus is leaving the window for good — record the focused pane's departure now,
         // so a reopen hours later can't back-date it to "just now" via the exit-stamp.
-        // Must run BEFORE the probe stop below: the read-stamp half reads `ccLive`, which
-        // `setCCProbeEnabled(false)` wipes.
+        // Must run BEFORE the poll stop below: the read-stamp half reads `ccLive`, which
+        // `setPolling(false)` wipes.
         registry.flushPaneExit()
-        // The sidebar's `.onDisappear` usually stops the cc poll + ⌥ monitor, but that path
+        // The sidebar's `.onDisappear` usually stops the poll + ⌥ monitor, but that path
         // depends on upstream nilling `contentView` during close (a line upstream has marked
         // as removable). Stop the poll here too — idempotent, and the sidebar re-enables it
         // on its next appear — so a closed window can't leave a 3s ps/ssh probe running.
         // Only when this is the *last* fork window: the registry is a singleton, and killing
-        // the probe under a surviving window's sidebar would silently freeze its CC status
-        // (its showCC toggle still reads "on" and nothing re-enables until it's flipped).
-        if !Self.anyOtherForkWindow(besides: window) { registry.setCCProbeEnabled(false) }
+        // the poll under a surviving window's sidebar would silently freeze its CC status
+        // and alias sync (nothing re-enables until that sidebar re-appears).
+        if !Self.anyOtherForkWindow(besides: window) { registry.setPolling(false) }
         // The fork's two selector observers: without this a parked pane's pty exit after
         // close still builds a placeholder surface — a fresh `zmx attach` pty — for a window
         // that no longer exists. Scoped (not a blanket removeObserver(self)) so upstream's
@@ -1128,8 +1148,11 @@ final class ForkWindowController: TerminalController {
         terminalContent.addSubview(sidebar)
         sidebarHost = sidebar
         sidebarWidthConstraint = sidebar.widthAnchor.constraint(equalToConstant: sidebarWidth)
+        // The leading offset is the hide/show axis (0 shown, −width hidden) — see
+        // `toggleSidebar`. The width constraint never collapses to 0 anymore.
+        sidebarLeadingConstraint = sidebar.leadingAnchor.constraint(equalTo: terminalContent.leadingAnchor)
         NSLayoutConstraint.activate([
-            sidebar.leadingAnchor.constraint(equalTo: terminalContent.leadingAnchor),
+            sidebarLeadingConstraint!,
             sidebar.topAnchor.constraint(equalTo: terminalContent.topAnchor),
             sidebar.bottomAnchor.constraint(equalTo: terminalContent.bottomAnchor),
             sidebarWidthConstraint!,
@@ -1306,6 +1329,9 @@ final class ForkWindowController: TerminalController {
         registry.bind(surface: surface.id, to: ref)
         observeProgress(surface)
         let tab = registry.newTab(on: host.id, title: ref.name)
+        // A typed name is both the id and the initial alias (queued — the session doesn't
+        // exist until the pty's `zmx attach` runs; the poll labels it once it lists).
+        if intent.named { registry.seedAlias(ref) }
         liveTabs[tab.id] = .init(view: surface)
         // Match `gotoHost`/`revealRow`: force-expand so the new row is visible. Without this,
         // ⌘T onto a collapsed host swaps the terminal in but the sidebar shows nothing new.
@@ -1366,12 +1392,14 @@ final class ForkWindowController: TerminalController {
             NewSessionView(
                 title: "Split on \(host.label)",
                 host: host, locked: true, placeholder: placeholder,
-                onSubmit: { ref, smartJump in
+                onSubmit: { ref, smartJump, named in
                     guard let self, let p = self.pendingSplit else { return }
                     self.pendingSplit = nil
-                    _ = self.completeSplit(
+                    let view = self.completeSplit(
                         at: p.at, direction: p.dir, host: host, ref: ref,
                         initialCmd: smartJump ? ZmxAdapter.smartJumpCmd(name: ref.name) : nil)
+                    // Typed name = id + initial alias (queued for when the session lists).
+                    if view != nil, named { self.registry.seedAlias(ref) }
                     self.endSheet()
                 },
                 onCancel: { self?.pendingSplit = nil; self?.endSheet() })
