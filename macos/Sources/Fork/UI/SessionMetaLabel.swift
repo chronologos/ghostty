@@ -1,6 +1,32 @@
 #if os(macOS)
 import SwiftUI
 
+/// Leading name for a zmx session row (⌘T picker, Manage Hosts): the alias (daemon-side
+/// `ghostty_name`) leads and the session id demotes to a dim mono line under it; with no
+/// alias the id is the name. The dual of `SessionMetaLabel` — both lists share the pair so
+/// their typography can't drift.
+struct SessionNameLabel: View {
+    @Environment(\.forkTokens) private var tokens
+
+    let entry: ZmxAdapter.ListEntry
+
+    var body: some View {
+        // A seeded session is labeled with its own id — one line, not "proj" over a dim
+        // "proj". Capped alias (64) still can't take the row: single-line, and the parent
+        // HStack's trailing `SessionMetaLabel` keeps its width.
+        if let alias = entry.alias, alias != entry.name {
+            Text(alias).font(.system(size: 12))
+                .lineLimit(1).truncationMode(.middle)
+            Text(entry.name).font(.system(size: 10, design: .monospaced))
+                .lineLimit(1).truncationMode(.middle)
+                .foregroundStyle(tokens.textSecondary)
+        } else {
+            Text(entry.name).font(.system(size: 12, design: .monospaced))
+                .lineLimit(1).truncationMode(.middle)
+        }
+    }
+}
+
 /// Trailing metadata for a zmx session row. The client count alone is a poor "in use"
 /// signal — it counts attached *viewers* (live `zmx attach` clients), so a detached session
 /// with a CC agent working inside, or one whose only presence is a cold-restored placeholder

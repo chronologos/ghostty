@@ -102,7 +102,8 @@ struct HostDetailView: View {
 
     private func sessionRow(_ e: ZmxAdapter.ListEntry) -> some View {
         HStack {
-            Text(e.name).font(.system(size: 12, design: .monospaced))
+            // Alias + demoted id (or id alone); Kill still keys on the id (`e.name`).
+            VStack(alignment: .leading, spacing: 0) { SessionNameLabel(entry: e) }
             Spacer()
             SessionMetaLabel(entry: e,
                              inSidebar: registry.isInSidebar(e.name, external: e.external, on: host.id),

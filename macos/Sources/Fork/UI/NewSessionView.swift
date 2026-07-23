@@ -7,6 +7,10 @@ struct NewSessionIntent {
     var cwd: String?
     var cmd: [String]?
     var external: Bool = false
+    /// The user typed `name` (vs. the auto placeholder / an attach): a fresh named session
+    /// gets its id seeded as its `ghostty_name` alias too, so it starts life renamable and
+    /// labeled in `zmx list`. Auto names (`shell-abc`) stay unlabeled — that would be noise.
+    var named: Bool = false
 }
 
 /// Reducer for the two-stage new-session palette. Owns *all* state — including
@@ -17,7 +21,9 @@ struct NewSessionMachine {
 
     enum Action: Equatable {
         case attach(name: String, external: Bool)
-        case create(name: String, smartJump: Bool)
+        /// `typed`: the user wrote the name (vs. taking the auto placeholder) — a typed
+        /// name is seeded as the session's alias too. Decided here, where the branch is.
+        case create(name: String, smartJump: Bool, typed: Bool)
         case beep
         case none
     }
@@ -52,7 +58,12 @@ struct NewSessionMachine {
     var sessions: [ZmxAdapter.ListEntry] {
         guard let r = recents else { return [] }
         let all = r.managed + r.external
-        return query.isEmpty ? all : all.filter { $0.name.localizedCaseInsensitiveContains(query) }
+        // Match the alias as well as the id — the alias is what the user reads in the
+        // sidebar, the id is what `zmx` and ⏎-create key on.
+        return query.isEmpty ? all : all.filter {
+            $0.name.localizedCaseInsensitiveContains(query)
+                || ($0.alias?.localizedCaseInsensitiveContains(query) ?? false)
+        }
     }
 
     var nameValid: Bool {
@@ -108,9 +119,18 @@ struct NewSessionMachine {
                 let e = sessions[sel - 1]
                 return .attach(name: e.name, external: e.external)
             }
-            if shift { return canSmartJump ? .create(name: query, smartJump: true) : .beep }
-            return nameValid ? .create(name: query.isEmpty ? placeholder : query, smartJump: false)
-                             : .none
+            if shift { return canSmartJump ? .create(name: query, smartJump: true, typed: true) : .beep }
+            if nameValid {
+                return .create(name: query.isEmpty ? placeholder : query, smartJump: false,
+                               typed: !query.isEmpty)
+            }
+            // The query can't be a new id (a space, say) but matched exactly one existing
+            // session by alias — ⏎ means "that one". Anything more ambiguous beeps rather
+            // than dead-ending silently.
+            if sessions.count == 1, let e = sessions.first {
+                return .attach(name: e.name, external: e.external)
+            }
+            return .beep
         }
     }
 }
@@ -131,7 +151,9 @@ struct NewSessionView: View {
     @EnvironmentObject private var registry: SessionRegistry
 
     let title: String?
-    let onSubmit: (SessionRef, _ smartJump: Bool) -> Void
+    /// (ref, smartJump, named) — `named` = the user typed the session name (not the
+    /// auto placeholder, not an attach), so the controller seeds it as the alias too.
+    let onSubmit: (SessionRef, _ smartJump: Bool, _ named: Bool) -> Void
     let onCancel: () -> Void
 
     @State private var m: NewSessionMachine
@@ -141,7 +163,7 @@ struct NewSessionView: View {
          host: ForkHost,
          locked: Bool = false,
          placeholder: String,
-         onSubmit: @escaping (SessionRef, Bool) -> Void,
+         onSubmit: @escaping (SessionRef, Bool, Bool) -> Void,
          onCancel: @escaping () -> Void) {
         self.title = title
         self.onSubmit = onSubmit
@@ -263,7 +285,7 @@ struct NewSessionView: View {
                             row(selected: i + 1 == m.sel,
                                 action: { submit(e.name, external: e.external) }) {
                                 VStack(alignment: .leading, spacing: 0) {
-                                    Text(e.name).font(.system(size: 12, design: .monospaced))
+                                    SessionNameLabel(entry: e)
                                     if let t = registry.tabTitle(for: e.name, external: e.external, on: m.host.id) {
                                         Text(t).font(.system(size: 10)).foregroundStyle(tokens.textSecondary)
                                     }
@@ -361,15 +383,16 @@ struct NewSessionView: View {
     private func commit(_ shift: Bool) {
         switch m.commit(shift: shift, in: registry.hosts) {
         case .attach(let name, let ext): submit(name, external: ext)
-        case .create(let name, let sj): submit(name, smartJump: sj)
+        case .create(let name, let sj, let typed): submit(name, smartJump: sj, named: typed)
         case .beep: NSSound.beep()
         case .none: break
         }
     }
 
-    private func submit(_ name: String, external: Bool = false, smartJump: Bool = false) {
+    private func submit(_ name: String, external: Bool = false, smartJump: Bool = false,
+                        named: Bool = false) {
         onSubmit(SessionRef(hostID: m.host.id, name: name, external: external),
-                 smartJump && !external)
+                 smartJump && !external, named && !external)
     }
 }
 #endif

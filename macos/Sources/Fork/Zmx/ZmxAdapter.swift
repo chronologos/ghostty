@@ -112,6 +112,9 @@ enum ZmxAdapter {
         var created: Date
         var external: Bool
         var pid: Int32?
+        /// Decoded `ghostty_name` label — the display alias, source of truth for
+        /// `paneLabels`. nil = no label (or an unlabeled/old daemon). See `AliasCodec`.
+        var alias: String? = nil
     }
 
     struct ListResult {
@@ -132,9 +135,18 @@ enum ZmxAdapter {
     /// (prefix-stripped) / external. Dead-socket lines (`err=…`) are dropped, as are names
     /// `zmx` itself would parse as options (leading `-`) — those can never become a safe
     /// `SessionRef`.
+    ///
+    /// **Row forgery.** zmx enforces the label charset only in its CLI: a `LabelSet` sent
+    /// straight to the daemon socket stores value bytes verbatim, and a value containing
+    /// `\n` prints as an extra, fully attacker-composed *row* — one that can claim any
+    /// session name (bypassing first-key-wins, which only orders fields within a row).
+    /// A name seen twice in one listing is therefore never trusted twice: the first row
+    /// wins and later rows for the same session key are dropped. (The root fix belongs in
+    /// zmx: daemon-side label validation + separator escaping in `list`.)
     static func partition(_ output: String, hostID: ForkHost.ID) -> ListResult {
         let prefix = "\(hostID)-"
         var r = ListResult()
+        var seen = Set<String>()
         for line in output.split(separator: "\n") {
             guard var e = parse(line: line) else { continue }
             // Only a name the fork could have created itself (managed charset) is trusted
@@ -150,27 +162,36 @@ enum ZmxAdapter {
             // Checked AFTER the prefix strip so `h1--foo` can't smuggle a dash-leading
             // managed name through; applies to both partitions.
             guard isSafeExternalName(e.name) else { continue }
+            // Same key `SessionRef.key` would use (`@` for external) — first row wins.
+            guard seen.insert(e.external ? "@\(e.name)" : e.name).inserted else { continue }
             if e.external { r.external.append(e) } else { r.managed.append(e) }
         }
         return r
     }
 
-    /// zmx util.zig:539 — `[→ |  ]name=…\tpid=…\tclients=…\tcreated=…[\t…]`.
-    /// `created` is unix seconds (the `ns` comment at main.zig:359 is stale).
+    /// zmx util.zig:539 — `[→ |  ]name=…\tpid=…\tclients=…\tcreated=…[\t…][\tlabels…]`.
+    /// `created` is unix seconds (the `ns` comment at main.zig:359 is stale). Session
+    /// labels (`zmx set`) are appended as extra `k=v` fields; the daemon reserves only
+    /// name/start_dir/cmd, so a label named `clients` or `err` is settable by anyone on
+    /// the host — first occurrence wins, so the built-ins (emitted first) can't be
+    /// shadowed into corrupting a session row. A dead-socket line (`err=…\tstatus=…`)
+    /// carries no `pid`/`clients`/`created`, so the required-field guard is what drops
+    /// it; a separate `err=` check would let a *label* named `err` hide a live session.
     static func parse(line: Substring) -> ListEntry? {
         var kv: [Substring: Substring] = [:]
         for tok in line.drop(while: { $0 == " " || $0 == "→" }).split(separator: "\t") {
             guard let eq = tok.firstIndex(of: "=") else { continue }
-            kv[tok[..<eq]] = tok[tok.index(after: eq)...]
+            let k = tok[..<eq]
+            if kv[k] == nil { kv[k] = tok[tok.index(after: eq)...] }
         }
-        guard kv["err"] == nil,
-              let name = kv["name"],
+        guard let name = kv["name"],
               let clients = kv["clients"].flatMap({ Int($0) }),
               let created = kv["created"].flatMap({ TimeInterval($0) })
         else { return nil }
         return .init(name: String(name), clients: clients,
                      created: Date(timeIntervalSince1970: created), external: true,
-                     pid: kv["pid"].flatMap { Int32($0) })
+                     pid: kv["pid"].flatMap { Int32($0) },
+                     alias: AliasCodec.alias(from: kv[AliasCodec.keySub]))
     }
 
     /// Shell command for a detached-placeholder surface: shows a prompt, waits for ⏎,
@@ -198,6 +219,33 @@ enum ZmxAdapter {
         ["sh", "-c", "printf '\\033[2m  was: %s\\033[0m\\n\\n' \(shq(stripControl(ccName, max: 96))); exec ${SHELL:-/bin/sh}"]
     }
 
+    /// The `k=v` token for `zmx set`. The value is always inside zmx's label charset
+    /// (`AliasCodec.encode`), so it's inert under both `controlArgv` branches; empty =
+    /// remove the label. Pure, for tests.
+    static func aliasKV(_ alias: String?) -> String {
+        "\(AliasCodec.key)=\(alias.map(AliasCodec.encode) ?? "")"
+    }
+
+    /// Write the display alias onto the session as the `ghostty_name` label (nil clears
+    /// it). Best-effort: an old zmx (client or daemon) that predates labels fails or
+    /// silently no-ops, and the local `paneLabels` cache keeps carrying the name — so
+    /// callers don't await success, they just fire this and let the next `list()` poll
+    /// confirm. Returns whether the command reported success (drives the write's
+    /// failure path in `AliasSync`).
+    @discardableResult
+    static func setAlias(host: ForkHost, ref: SessionRef, to alias: String?) async -> Bool {
+        let kv = aliasKV(alias)
+        let argv = host.transport.controlArgv([zmx(on: host), "set", wireName(ref), kv])
+        do {
+            _ = try await run(argv: argv, timeout: 5)
+            return true
+        } catch {
+            ForkBootstrap.logger.debug(
+                "zmx set \(kv, privacy: .public) on \(host.label, privacy: .public) failed: \(String(describing: error), privacy: .public)")
+            return false
+        }
+    }
+
     static func kill(host: ForkHost, ref: SessionRef) async throws {
         let argv = host.transport.controlArgv([zmx(on: host), "kill", wireName(ref)])
         _ = try await run(argv: argv, timeout: 5)
@@ -223,7 +271,7 @@ enum ZmxAdapter {
     /// handlers, exit via the termination handler, deadlines via timers — all serialized on
     /// one queue, so no thread ever blocks. The previous shape parked a GCD thread in
     /// `readDataToEndOfFile` + `waitUntilExit`; when Foundation lost track of a SIGKILLed
-    /// child's exit, that wait never returned and — because `ccPollLoop` awaits every host
+    /// child's exit, that wait never returned and — because `pollLoop` awaits every host
     /// task — CC polling and the reachability cue froze for *all* hosts.
     ///
     /// Completion rules:
