@@ -199,6 +199,19 @@ struct TransportTests {
         #expect(cmd.contains(#"'\''$(id)'\''"#))
     }
 
+    /// The placeholder must re-prompt in place when the attach dies (sleep drops ssh again,
+    /// or ⏎ before the network is back) — an `exec` would end the pty and lose the error.
+    @Test func detachedScriptLoopsInPlace() {
+        let ref = SessionRef(hostID: "local", name: "s")
+        let cmd = ZmxAdapter.detachedScript(host: .local, ref: ref)
+        #expect(cmd.contains("while read _; do "))
+        #expect(!cmd.contains("exec "))
+        #expect(!cmd.contains("\n"), "`\\` continuations must collapse the script to one line")
+        // Post-attach tidy: back to primary screen + cooked tty before the next prompt.
+        #expect(cmd.contains("stty sane"))
+        #expect(cmd.contains(#"\033[?1049l"#))
+    }
+
     @Test func restoreCmdCCNameQuoted() {
         let argv = ZmxAdapter.restoreCmd(ccName: "a';id;'b")
         #expect(argv[0] == "sh" && argv[1] == "-c")

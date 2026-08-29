@@ -195,12 +195,13 @@ enum ZmxAdapter {
     }
 
     /// Shell command for a detached-placeholder surface: shows a prompt, waits for ⏎,
-    /// then execs `zmx attach` for the same ref via the host's transport. `ccName` is the
+    /// then runs `zmx attach` for the same ref via the host's transport, re-prompting in
+    /// place each time the attach exits. `ccName` is the
     /// cached `tab.ccNames[ref.key]` — printed dim on a second line so a cold-restored
     /// pane whose session is gone still says what it used to be.
     static func detachedScript(host: ForkHost, ref: SessionRef, ccName: String? = nil) -> String {
         // `attach` is already a fully shq'd command line (each token single-quoted),
-        // so it's interpolated *unquoted* after `exec` — wrapping it again would make
+        // so it's interpolated *unquoted* into the loop body — wrapping it again would make
         // it one word. shq is total (POSIX `'` → `'\''`); see TransportTests.wrapSshInjection.
         let attach = host.transport.wrap([zmx(on: host), "attach", wireName(ref)])
         // External `ref.name` is raw remote `zmx list` output (validation is bypassed for
@@ -209,7 +210,22 @@ enum ZmxAdapter {
         // control-stripping before it is printed to the local terminal.
         let msg = "session \(stripControl(ref.name, max: 128)) — press ⏎ to reattach, ⌘⇧W to close"
         let was = ccName.map { "; printf '\\033[2m  was: %s\\033[0m\\n' \(shq(stripControl($0, max: 96)))" } ?? ""
-        return shq(["sh", "-c", "printf '%s\\n' \(shq(msg))\(was); read _; exec \(attach)"])
+        // Loop in place rather than `exec`: when the attach dies (ssh dropped over the next
+        // sleep, or ⏎ pressed before the network was back) its error text stays on screen
+        // and the same pty re-prompts — no surface churn, nothing flashes and vanishes.
+        // `while read` ends on ^D/EOF, so a dead stdin can't spin; sh exiting just lands
+        // back on `makeDetachedPlaceholder`. The attach may die mid-TUI, so before
+        // re-prompting: cooked termios, primary screen, kitty-kbd stack cleared (over-pop
+        // = reset), cursor on, mouse/bracketed-paste off, SGR reset, and OSC 9;4;0 so the
+        // sidebar rail settles now instead of on upstream's 15s auto-nil. Ghostty has no
+        // DECSTR, and RIS would wipe the very error line this loop exists to keep.
+        let tidy = "\\033[?1049l\\033[<99u\\033[?25h\\033[?1000l\\033[?1002l\\033[?1003l\\033[?1006l\\033[?2004l\\033[0m\\033]9;4;0\\007"
+        let again = "press ⏎ to reattach, ⌘⇧W to close"
+        return shq(["sh", "-c", """
+            printf '%s\\n' \(shq(msg))\(was); \
+            while read _; do \(attach); rc=$?; stty sane 2>/dev/null; \
+            printf '\(tidy)\\n\\033[2m  exited (%s) — %s\\033[0m\\n' "$rc" \(shq(again)); done
+            """])
     }
 
     /// `initialCmd` for a cold-restored leaf with a cached CC name. `zmx attach` only runs

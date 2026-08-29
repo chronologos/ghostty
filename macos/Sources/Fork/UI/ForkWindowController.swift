@@ -85,13 +85,16 @@ final class ForkWindowController: TerminalController {
     }
 
     // MARK: Detached panes — when a bound surface's child exits, swap in a placeholder
-    // that prints "press ⏎ to reattach" and execs `zmx attach` on ⏎ (SPEC §5).
+    // that prints "press ⏎ to reattach" and runs `zmx attach` on ⏎ (SPEC §5).
 
-    private var detachedPlaceholders: Set<UUID> = []
-
+    /// No "already a placeholder" guard: on ⏎ the placeholder runs `zmx attach` in the
+    /// same pty, so the placeholder surface *becomes* the long-lived pane. `detachedScript`
+    /// re-prompts in place when that attach dies, so normally the surface never exits —
+    /// but if its `sh` does (^D at the prompt, SIGHUP), it must get a fresh placeholder,
+    /// not a silent close. Every cycle is gated on a keypress, so there is no respawn loop
+    /// to protect against; ⌘⇧W is the exit.
     private func makeDetachedPlaceholder(for dead: Ghostty.SurfaceView) -> Ghostty.SurfaceView? {
         guard dead.processExited,
-              !detachedPlaceholders.contains(dead.id),
               let ref = registry.refs[dead.id],
               let host = registry.host(id: ref.hostID),
               let app = ghostty.app else { return nil }
@@ -100,7 +103,6 @@ final class ForkWindowController: TerminalController {
         var cfg = Ghostty.SurfaceConfiguration()
         cfg.command = ZmxAdapter.detachedScript(host: host, ref: ref, ccName: ccName)
         let placeholder = Ghostty.SurfaceView(app, baseConfig: cfg)
-        detachedPlaceholders.insert(placeholder.id)
         // Tear the dead surface down BEFORE binding its replacement: with the placeholder
         // already bound to the same ref, `isLastSurface` sees a sibling, the `.detached`
         // phase-reset never fires, and a pane that died mid-turn keeps a wedged `.working`
@@ -143,8 +145,7 @@ final class ForkWindowController: TerminalController {
             } catch {}
         }
 
-        // A re-reattached placeholder dying (`detachedPlaceholders.contains` blocks the
-        // swap above), or any unbound dead leaf — close silently. PR23 dropped the
+        // An unbound dead leaf (Kill unbinds first; externals) — close silently. PR23 dropped the
         // `withConfirmation` gate on the branches below, so without this a background
         // pty death would pop the Detach/Kill sheet for an already-exited process.
         // Root case must route to `closeForkTab` — `super` on root → `closeWindow(nil)`.
