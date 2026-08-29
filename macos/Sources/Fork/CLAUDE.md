@@ -347,7 +347,6 @@ these five exercise the upstream contracts the fork leans on hardest):
   `AppDelegate.ghosttyNewTab` since `ForkWindowController is TerminalController`.
 - Direct "Rename Host" item in the sidebar host context menu (rename today goes through
   Manage Host… → label field).
-- `detachedPlaceholders` pruning.
 - `macos-titlebar-style = tabs` config — `tabbingMode = .disallowed` should suppress
   the native tab bar but untested with our sidebar.
 - Scripted **splits** (`NewTerminalIntent.swift:133`, `ScriptTerminal.swift:121`) hit our
