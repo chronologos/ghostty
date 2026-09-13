@@ -79,7 +79,12 @@ enum AliasCodec {
         where u.properties.generalCategory != .format {
             out.unicodeScalars.append(u)
         }
+        // Trim → cap → trim again: capping a name whose 64th character is a space would
+        // otherwise leave a trailing space that the daemon's echo (decoded and re-sanitized)
+        // trims off — the cache and the echo would then never compare equal, breaking the
+        // byte-identical invariant above and pinning the pending-write mask for its full TTL.
         let clean = String(out.trimmingCharacters(in: .whitespaces).prefix(cap))
+            .trimmingCharacters(in: .whitespaces)
         return clean.isEmpty ? nil : clean
     }
 

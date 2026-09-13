@@ -74,7 +74,10 @@ Fork/
   ForkBootstrap.swift          enabled flag (env GHOSTTY_FORK=1), seam entry points;
                                exports the login-shell PATH at install (cached + background
                                refresh — GUI launches get launchd's bare PATH, which breaks
-                               ssh ProxyCommand wrappers resolved by name)
+                               ssh ProxyCommand wrappers resolved by name); scrubs the zmx
+                               env vars that would change what our own commands mean
+                               (`ZMX_SESSION`, `ZMX_SESSION_PREFIX`) and sets
+                               `ZMX_NO_DETACH_KEY`
   Notify.swift                 UN delegate proxy (wraps AppDelegate's); userInfo["forkTab"]
                                → foreground banner + click→activate(tab:); dock badge =
                                count of (finished-unread OR blocked) && !ccBusy panes
@@ -86,8 +89,9 @@ Fork/
                                PersistedTree, PaneTag, HoverCommand, isValidIdent/
                                isSafeExternalName
     AliasSync.swift            Per-SessionRef alias reducer — cache ⇄ daemon `ghostty_name`
-                               label (capability, pending-write mask, migration/seed,
-                               clear propagation, retries); pure, unit-tested
+                               label (capability earned by a seen label or an Ack'd write,
+                               pending-write mask, migration/seed, two-strike clear
+                               propagation, stamp-matched retries); pure, unit-tested
     PaneMachine.swift          Per-SessionRef status reducer — event-ordered `.progress`/
                                `.settled`/`.probe`/`.probeAbsent`/`.probeStopped`/`.viewed`/
                                `.watch`/`.bell(isActive:)`/`.detached` → `.dot` projection
@@ -102,9 +106,12 @@ Fork/
     ShellQuote.swift           shq() — POSIX single-quote; stripControl()
     AliasCodec.swift           pane alias ⇄ zmx `ghostty_name` label value (`_HH` escape into
                                `[A-Za-z0-9._-]`, lenient decode) + display sanitize
-    ZmxAdapter.swift           surfaceConfig/list/partition/kill/history/detachedScript/
-                               restoreCmd/expand/run/setAlias; Transport.wrap/controlArgv;
-                               `ListEntry.alias` (parsed label, first-key-wins)
+    ZmxAdapter.swift           surfaceConfig/list(Result)/partition/kill/history/
+                               detachedScript/restoreCmd/expand/run/setAlias;
+                               Transport.wrap/controlArgv; `ListEntry` (alias, daemon cwd,
+                               cmd, task end/exit) + `ListResult.unresponsive` (daemons that
+                               didn't answer — present, not gone); `ListFailure` (why a list
+                               failed), `KillOutcome`, `SetResult`
     CCProbe.swift              zmx pid → ~/.claude/sessions/<pid>.json. Local host: native
                                Swift (sysctl process table + FileManager); ssh hosts: sh
                                probe script. Keyed by SessionRef.key; nil-on-failure so the
@@ -154,8 +161,9 @@ Fork/
                                ⌫ on empty name steps back to host pick. Stage/sel/query
                                state lives in `NewSessionMachine` (unit-tested) so the
                                sel-reset invariants don't depend on view-side onChange
-    SessionMetaLabel.swift     shared row trailer: CC sparkle (busy/blocked/idle) +
-                               in-sidebar glyph + client-count + creation age
+    SessionMetaLabel.swift     shared session-row pieces: name (alias › id › dim cwd/cmd
+                               line), trailer (CC sparkle + in-sidebar glyph + client-count
+                               + creation age or task exit), and the not-responding row
     HostsView.swift            master-detail Hosts sheet (list + add-host form)
     HostDetailView.swift       detail pane: rename, N×N SlotPicker (10-slot theme-derived ramp,
                                bicolor HostDot), sessions, remove
@@ -186,13 +194,29 @@ shadows upstream's `undo` alias (Config.zig:6934); ⌘Z remains undo.
   `$surfaceTree` uses `.debounce(80ms, .main)` — async delivery so `bind()` completes before
   `persistActive` projects, *and* divider-drag (per-frame `splitDidResize`) doesn't storm
   the sidebar.
-- **Split-prompt redraw** (resolved, zmx-side): old pane's prompt vanished after
-  ⌘D because zig stdlib's `posix.poll` auto-retries on EINTR — zmx's SIGWINCH
-  handler set its flag but the client loop never woke to check it. Fixed in zmx
-  via self-pipe. None of the Swift-side ordering mattered; the prior "fixes"
-  here (split-before-endSheet, `refs` un-@Published) were timing coincidences.
-  `GHOSTTY_FORK_ZMX=/path` overrides zmx resolution; `GHOSTTY_FORK=0` disables the
+- `GHOSTTY_FORK_ZMX=/path` overrides zmx resolution; `GHOSTTY_FORK=0` disables the
   whole fork (the per-feature `GHOSTTY_FORK_NO_*` bisect toggles were removed).
+- **zmx reads the *client's* environment, and every pane inherits the app's.**
+  `ZMX_SESSION` (injected into every shell inside a session) turns `zmx attach X` into
+  "switch the session I'm in to X" — it never attaches, exits 0, and yanks the launching
+  pane's client onto the new name. Running the app binary from a fork pane would kill
+  every new local pane and hijack the pane you launched from; `ZMX_SESSION_PREFIX` would
+  silently file every managed session as external. `ForkBootstrap.scrubZmxEnvironment`
+  unsets both at install. The same function sets `ZMX_NO_DETACH_KEY=1`: ctrl+\ is zmx's
+  in-band detach key, which in a fork pane blanks it into the placeholder and makes
+  SIGQUIT undeliverable — the fork owns detach (⌘W). Remote attaches get it via
+  `Transport.wrap`'s env prefix.
+- **A session name is not opaque to zmx.** A trailing `*` makes `zmx kill`/`wait`/`tail` a
+  *prefix match* while `attach` reads it literally — so a session literally named `dev*`
+  exists, lists, and would turn the Kill button into "kill everything starting with dev"
+  (`*` alone: every session on the host). `isSafeExternalName` refuses such names, like
+  leading `-`; they never become a `SessionRef`.
+- **`err=` rows are sessions, not noise.** A daemon that misses `zmx list`'s 1s probe
+  prints `name=…\terr=Timeout\tstatus=unreachable`; zmx says it may just be busy. They
+  land in `ListResult.unresponsive`: kill verification counts them as still-present, the CC
+  probe keeps last-known for them (not `.probeAbsent`), and pickers/Hosts show a dim
+  "not responding" row. Never reach for `zmx kill --force` — it unlinks the socket of a
+  merely busy daemon and orphans it.
 - **Sheet ⌘V**: nil-targeted menu actions walk *past* the sheet to
   `mainWindow.firstResponder` (the `SurfaceView`, which has its own `paste:`).
   `ForkSheetPanel.performKeyEquivalent` intercepts before the menu.
@@ -214,24 +238,38 @@ shadows upstream's `undo` alias (Config.zig:6934); ⌘Z remains undo.
   (OSC-driven, per-`SurfaceView`-instance, lost on restart) › `ref.name` (zmx session id).
   The alias's source of truth is the daemon-side session label `ghostty_name=<v>`
   (`zmx set`); `paneLabels` is its write-through cache. The per-ref rules live in the
-  `AliasSync` reducer (`syncAliases` drives it off the poll's `zmx list`): daemon-wins;
-  a *missing* label is an authoritative clear only from a daemon that has proven
-  label-capable (capability can't be probed — old and new daemons print alike — so an
-  unproven absence keeps the cache, i.e. old-zmx fallback), else it's the once-per-
-  incarnation migration/seed push (managed refs only, budgeted 4/host/tick); session
-  identity is zmx `created`, so a recreated session re-migrates; a pending-write mask
-  (echo-compare, 40s TTL) keeps a fresh rename from being clobbered by the stale echo,
-  and a stamp-matched failure unmasks immediately and queues *that write's own value*
-  for ≤3 retries ahead of daemon-wins (else a failed rename against an already-labeled
-  session silently reverts). `renamePane` is the one user
+  `AliasSync` reducer (`syncAliases` drives it off the poll's `zmx list`, and every
+  `zmx set` result is fed back in): daemon-wins; a *missing* label is an authoritative
+  clear only from a daemon that has proven label-capable — it has shown a label, or Ack'd
+  one of our writes (since zmx 0.7.0 `zmx set` exits 0 only on the daemon's Ack; `zmx list`
+  alone still can't tell, old and new daemons print alike) — and only on the *second*
+  consecutive label-less row (`zmx list` waits just 50ms for a busy daemon's labels); an
+  unproven absence keeps the cache and gets the once-per-incarnation migration/seed push
+  (managed refs only, budgeted 4/host/tick). The proof is persisted per incarnation
+  (`TabModel.aliasProven`), so a clear made elsewhere while the app was quit isn't
+  "migrated" back on launch. Session identity is zmx `created` + pid (1s resolution alone
+  misses kill-then-recreate), so a recreated session re-migrates; a pending-write mask
+  (released by the echo, by the first list fetched after the write's Ack, or a 40s TTL)
+  keeps a fresh rename from being clobbered by the stale echo; a stamp-matched failure
+  unmasks immediately and queues *that write's own value* for ≤3 retries ahead of
+  daemon-wins (else a failed rename against an already-labeled session silently reverts)
+  — counted since the last write that landed, dropped if the daemon's label has moved on
+  since (someone else's newer write wins), and skipped entirely for "daemon too old".
+  Writes for one session run strictly one at a time, newest wins (`liveAliasPusher`).
+  Don't reach for `zmx attach --labels` to seed: despite its help text it applies on
+  *every* attach (restore/placeholder paths would clobber renames made elsewhere), a label
+  failure aborts the attach, and a pre-0.8 client reads the flag as the session name.
+  `renamePane` is the one user
   writer (sanitizes via `AliasCodec.sanitize`); a creation seed labels the daemon only —
   label == id never enters the cache (it would freeze the row over the OSC title). Values
   escape into zmx's `[A-Za-z0-9._-]` via `AliasCodec` (`_HH`); raw values outside that
   charset are rejected at parse (zmx validates labels only in its CLI — see Security).
   An agent inside a pane can rename itself with `zmx set . ghostty_name=…`.
   Upstream's `titleFallbackTimer` writes `"👻"` 500ms after surface init — `PaneLabel` treats
-  it as no-title. `zmx attach` replays buffer but not OSC, so `surface.title` stays empty
-  until the next prompt.
+  it as no-title. A zmx ≥0.8 *daemon* replays the window title (and OSC 7) on re-attach;
+  an older one replays only the buffer, so `surface.title` stays empty until the next
+  prompt. Daemons keep the binary they were started with, so after a zmx upgrade some rows
+  restore their titles and some don't — expected, not a fork bug.
 - **Codable defaults aren't optional**: adding a non-Optional field with a default to a
   persisted type breaks decode of old `fork.json`. Use `decodeIfPresent` in a custom
   `init(from:)`.
@@ -256,9 +294,14 @@ external); `ZmxAdapter.parse` is first-key-wins (a session *label* can't shadow 
 `name`/`clients`/`err` fields) and drops a second row for a session key it has already seen
 (zmx validates labels only in its **CLI** — a raw `LabelSet` on the socket stores tab/newline
 bytes verbatim, enough to forge whole `zmx list` rows; `AliasCodec.alias` likewise rejects any
-raw `ghostty_name` outside the codec's own charset — daemon-side validation is the real fix,
-tracked as a zmx patch); `{cwd}` for hover commands must be an absolute path (`ZmxAdapter.expand` degrades
-anything else to `.`) because it originates from OSC 7 / the CC probe, both remote-controlled;
+raw `ghostty_name` outside the codec's own charset — daemon-side validation was proposed
+upstream and declined, so these parse-side guards are permanent; `ghostty_name` itself is
+*last*-occurrence-wins, because `cwd=`/`cmd=` print before the labels and are free text — a
+tab inside a command line must not pose as the label); `{cwd}` for hover commands must be an absolute path (`ZmxAdapter.expand` degrades
+anything else to `.`) because it originates from OSC 7 / the CC probe / the zmx daemon's
+`cwd=`, all pane-controlled — and the directory a remote split starts in travels as one
+`shq`'d positional argument to a fixed `sh -c` script (`Transport.wrap(_:cwd:)`), never
+interpolated into it;
 cached CC names are `stripControl`'d before they reach a local pty, and so are remote-origin
 strings that reach UN notification titles (`paneDisplayLabel`) and `CommandError.stderr`.
 `zmx run()` output accumulation is capped (8 MiB stdout / 256 KiB stderr) so a hostile remote
@@ -288,8 +331,10 @@ local), not the internal hash id. `mode` (unknown values — including the remov
 `overlay` — drop that one binding; the load path preserves the original file aside):
 
 - `pane` — sibling split next to the *focused* pane, running `zmx attach <fresh-ref> <cmd…>`
-  on that pane's host (local or ssh, via `Transport.wrap`). The new session does **not**
-  inherit the sibling's directory — pass `{cwd}` via the tool's own flag (`-C`/`-R`/`-p`).
+  on that pane's host (local or ssh, via `Transport.wrap`). The new session starts in the
+  focused pane's directory (same rule as ⌘D), so `{cwd}` flags are optional. The split is
+  *disposable*: when the tool exits the pane closes — no reattach placeholder — and the
+  throwaway session is killed best-effort.
   No-ops on a tab whose `liveTabs` entry hasn't been built yet (cold-restored, never
   activated).
 - `local` — fire-and-forget `Process` on the mac via `/usr/bin/env`; PATH is the
@@ -299,8 +344,11 @@ local), not the internal hash id. `mode` (unknown values — including the remov
   must not steer what a local tool opens or operates on; only `pane` mode (or panes on
   the local host) receives the pane's real cwd.
 
-`{cwd}` resolves `surface.pwd` (OSC 7, needs shell integration in the remote zshrc) ›
-`ccLive[host][ref.key].cwd` (CCProbe poll) › `"."`. Bindings appear in the ⌘K palette
+`{cwd}` resolves (`ForkWindowController.paneCwd`) `surface.pwd` (OSC 7 — **local panes
+only**: Ghostty drops OSC 7 whose host isn't the Mac, so it is always nil on ssh hosts) ›
+`ccLive[host][ref.key].cwd` (CCProbe poll, while an agent runs) › `zmxCwd[host][ref.key]`
+(the daemon's own tracking from the last `zmx list`, zmx ≥0.8 — every session on every
+host, CC toggle or not) › `"."`. ⌘D and `pane`-mode commands start the new session there. Bindings appear in the ⌘K palette
 (targeting the *focused* pane, via `runPaneCommand`) and in the ⌥-hold cheatsheet —
 there is no bare-letter hover dispatch (`hoveredPane` was removed; the terminal is
 usually firstResponder so stray letters intercepted). The `key` in `hoverCommands` is
@@ -352,8 +400,11 @@ these five exercise the upstream contracts the fork leans on hardest):
 - Scripted **splits** (`NewTerminalIntent.swift:133`, `ScriptTerminal.swift:121`) hit our
   `newSplit` override → picker pops + script gets nil. (Scripted new-window/new-tab paths
   already carry a `NewSessionIntent` through `ForkBootstrap.intercept`.)
-- **Detached-pane list-probe** — `detachedScript` reattaches blindly; should
-  `zmx list` first and show "session ended — start fresh?" if absent.
+- **Scrollback peek** — a throwaway local split running `zmx history --vt <name> | less -R`:
+  full-colour look at any session (in the sidebar or not) without becoming a client, so it
+  can't claim leadership or resize an agent's TUI.
+- Persist a dirty bit for an alias write that hadn't been Ack'd at quit (today the relaunch
+  lets the daemon win, i.e. the rename reverts).
 - ssh attach to a re-keyed host behind a ProxyCommand dies opaque (`UNKNOWN port 65535`)
   at the host-key prompt — consider `-o StrictHostKeyChecking=accept-new` or a clearer
   error surface in the ssh argv builders (`ZmxAdapter.swift` Transport extension).
@@ -381,10 +432,30 @@ A terminal that runs arbitrary shells will trip every macOS privacy surface. Thr
   background probe (15s bound — heavy rc inits measured at 2-4s defeat any short inline
   probe; `ForkBootstrap.exportLoginShellPATH`). The first-ever launch has no cache, so
   ProxyCommand-by-name hosts may stay unreachable until the background probe lands
-  (seconds). Only `ZmxAdapter.localZmx`'s last-resort 2s login-shell probe can still stall
-  a cold launch, and only when zmx isn't in env/PATH or the hardcoded dir list (`static
-  let` is swift_once-serialized, so it can't move off main). Set `GHOSTTY_FORK_ZMX=/abs/path`
-  to skip the zmx probe.
+  (seconds). `ZmxAdapter.localZmx` no longer probes the login shell: env override → PATH →
+  the hardcoded dir list → bare `zmx` (which self-heals once the PATH refresh lands). Set
+  `GHOSTTY_FORK_ZMX=/abs/path` for an install somewhere exotic.
+- **The pane can't tell why its zmx client ended** — shell `exit`, ssh drop, detach and a
+  kill from another Mac are all exit 0. So the placeholder *asks* (`zmx list` over the
+  control transport, before each prompt): "detached — still running" / "session ended — ⏎
+  starts a fresh shell" / "can't reach <host>". The sidebar shows the same from the poll
+  (`SessionRegistry.liveness`): ⏸ detached (a hydrated pane whose session has 0 clients —
+  the placeholder at its prompt, or a pane whose client was *switched* in-band by typing
+  `zmx attach other` inside it; the fork doesn't follow a switch, its ref/alias/Kill keep
+  naming the original session), ⏹ ended (absent from two consecutive lists — shown on
+  cold rows too), ⚠ not responding. Host header: "⏸ N" + context-menu **Reattach N
+  Detached Panes** after a VPN flap.
+- ssh panes run with `ServerAliveInterval=15 / CountMax=3 / ConnectTimeout=15`
+  (`Transport.paneSSHOptions`; command-line `-o` beats `ssh_config`). Without them a link
+  that died silently leaves the pane frozen for minutes while everything else reads healthy.
+- Kill is fire-and-forget after the tab closes, so a kill that didn't land is reported as a
+  banner ("Kill didn't land on <host>", click → Hosts sheet). Verified by one follow-up
+  `list` (answered rows *plus* `err=` rows), re-checked after 4s — a timed-out kill is
+  "sent, not confirmed" and often lands late. Already-gone counts as success.
+- `TERM_PROGRAM`/`SSH_AUTH_SOCK` in a *pre-existing* remote session: `wrap` sets
+  `ZMX_TRACK_ENV` so zmx ≥0.8 records them from each attaching client; add
+  `eval "$(zmx print-env -s .)"` to the remote shell's precmd hook to pick them up (it only
+  records — it never changes a running process's environment).
 - `refs` entries for **Detach**-closed panes leak until tab close / quit (Kill and tab/host
   close do unbind; `persistActive` never prunes — see undo gotcha); `isConnected()` may stay
   green slightly stale. In-memory only, not persisted.
@@ -443,5 +514,8 @@ A terminal that runs arbitrary shells will trip every macOS privacy surface. Thr
   width-capped at 4 concurrent, local-first so a many-pane query doesn't burst
   N fresh ssh connections past sshd `MaxStartups`) and matches client-side against
   the cached buffers as you type (keeps user input out of `controlArgv`'s shell).
-  Content written after the sheet opened isn't searched — reopen to refresh.
-  Per-ref 10s timeout means a stalled remote silently drops.
+  Each hit shows the latest matching line ± one line of context and the match count.
+  Content written after the sheet opened isn't searched — reopen to refresh. zmx keeps
+  the last 10k lines per session. A pane whose history didn't come back (10s timeout, or
+  zmx's own 5s internal one, which exits 0 with nothing) is counted as *unavailable* in
+  the footer, not as "no match".

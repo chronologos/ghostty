@@ -254,9 +254,22 @@ struct SidebarView: View {
                     // Transport-level cue (zmx list failing), distinct from the dot's
                     // "no live surface" dimming — without it, hours-old CC status on a
                     // dead ssh host reads as live.
+                    // The reason matters: "zmx list timed out" (a few sessions not answering)
+                    // and "ssh couldn't connect" send the user to different places.
+                    let why = registry.hostUnreachableWhy[host.id].map { " — \($0)" } ?? ""
                     Image(systemName: "wifi.slash")
                         .font(.system(size: 9)).foregroundStyle(tokens.textSecondary)
-                        .help("Unreachable since \(since.formatted(date: .omitted, time: .shortened)) — CC status may be stale")
+                        .help("No answer since \(since.formatted(date: .omitted, time: .shortened))\(why). Status shown may be stale.")
+                } else if let n = controller?.detachedPlaceholders(on: host.id).count, n > 0 {
+                    // After a VPN flap / wake every ssh pane here is sitting at its reattach
+                    // prompt while the sessions are fine — say so without making the user
+                    // click through tabs to find out. The action is in the context menu.
+                    HStack(spacing: 2) {
+                        Image(systemName: "pause.circle").font(.system(size: 9))
+                        Text("\(n)").font(mono(9, .semibold))
+                    }
+                    .foregroundStyle(tokens.textSecondary)
+                    .help("\(n) pane\(n == 1 ? "" : "s") detached — sessions still running. Right-click → Reattach.")
                 }
                 Spacer()
                 if !host.expanded {
@@ -289,6 +302,11 @@ struct SidebarView: View {
                 controller?.showSessionPicker(lockedTo: host)
             }
             Button("Manage Host…") { controller?.showHostsSheet(select: host.id) }
+            if let n = controller?.detachedPlaceholders(on: host.id).count, n > 0 {
+                Button("Reattach \(n) Detached Pane\(n == 1 ? "" : "s")") {
+                    controller?.reattachDetached(on: host.id)
+                }
+            }
             if host.id != ForkHost.local.id {
                 Divider()
                 Button("Remove Host", role: .destructive) {
@@ -466,6 +484,7 @@ struct SidebarView: View {
         // for a blocked pane. Scoped to .blocked — a stale `needs` on a working pane reads
         // as a false alarm. Shared with `ccLine` so the two can't derive differently.
         let blockedDetail = dot == .blocked ? live?.attention : nil
+        let cue = zmxCue(ref, hydrated: surface != nil)
         // Recency lives in three carriers, not a column: afterglow on the row background
         // (the short-term "where was I just now" trail — user focus only, or every agent
         // turn fleet-wide would keep half the sidebar lit), doze opacity (the long tail —
@@ -541,6 +560,12 @@ struct SidebarView: View {
                             }
                         }
                         Spacer()
+                        if let cue {
+                            Image(systemName: cue.icon)
+                                .font(.system(size: 11)).foregroundStyle(tokens.textSecondary)
+                                .padding(.trailing, 4)
+                                .help(cue.help)
+                        }
                         if registry.panes[ref]?.watched == true {
                             Image(systemName: "eye")
                                 .font(.system(size: 11)).foregroundStyle(tokens.textSecondary)
@@ -576,7 +601,11 @@ struct SidebarView: View {
                             (focused ? nil : tab.lastActive[ref.key]).map { "you were here \($0.shortAge) ago" },
                         ].compactMap { $0 }
                         PanePeek(state: dot, accent: accent,
-                                 cwd: live?.cwd,
+                                 // CC's cwd (where the agent works) › the zmx daemon's own
+                                 // tracking — the only source for a plain shell on an ssh
+                                 // host, and it works with the CC toggle off.
+                                 cwd: live?.cwd ?? registry.zmxCwd[tab.hostID]?[ref.key]?.cwd,
+                                 zmxState: cue?.word,
                                  // Wire name, not ref.name: managed sessions attach as
                                  // "{hostID}-{name}" — showing the bare name as the ZMX
                                  // identity invites a `zmx attach` that silently creates
@@ -653,6 +682,30 @@ struct SidebarView: View {
         // ledger turns that leak into a fully expanded wrong row, not just a faint wash).
         // Compound offset+ref key stays unique under PR26 duplicate-ref attach.
         .id("\(index)-\(ref.key)")
+    }
+
+    /// What the last `zmx list` says is *wrong* with this pane's session, if anything — the
+    /// pane's own pty can't tell (every way a zmx client ends is exit 0, and a placeholder
+    /// looks the same whether there's anything left to reattach to).
+    /// - ended: shown for cold rows too — it's what stops "just looking at a tab" from
+    ///   silently re-creating dead sessions.
+    /// - detached: only for a hydrated pane (a cold row has no client by definition).
+    ///   Covers the placeholder at its prompt *and* a pane whose client was switched to
+    ///   another session in-band (`zmx attach other` typed inside it) — either way the
+    ///   thing this row names has nobody attached.
+    private func zmxCue(_ ref: SessionRef, hydrated: Bool) -> (icon: String, word: String, help: String)? {
+        switch registry.liveness[ref] {
+        case .ended:
+            ("stop.circle", "ENDED",
+             "This zmx session is gone — its shell exited, or it was killed. Reattaching starts a fresh shell under the same name.")
+        case .unresponsive(let err):
+            ("exclamationmark.circle", "NOT RESPONDING",
+             "The zmx daemon didn't answer (\(err)). The session is very likely still alive, just busy.")
+        case .listed(let clients) where clients == 0 && hydrated:
+            ("pause.circle", "DETACHED",
+             "No zmx client is attached to this session — the pane is at its reattach prompt, or its client switched to another session.")
+        default: nil
+        }
     }
 
     @ViewBuilder
@@ -933,6 +986,8 @@ private struct PanePeek: View {
     let state: PaneState?
     let accent: Color
     let cwd: String?
+    /// ENDED / DETACHED / NOT RESPONDING from the last poll, nil when healthy.
+    var zmxState: String? = nil
     /// zmx wire name — what `zmx attach <this>` takes on the host; the one identity that
     /// never appears in the row once a user label or OSC title covers it.
     let session: String
@@ -976,8 +1031,9 @@ private struct PanePeek: View {
             if let cwd, !cwd.isEmpty {
                 line(1, label: "DIR", tint: tokens.textSecondary, value: cwd)
             }
-            line(cwd?.isEmpty == false ? 2 : 1, label: "ZMX", tint: tokens.textSecondary,
-                 value: "\(session) @ \(host)")
+            line(cwd?.isEmpty == false ? 2 : 1, label: "ZMX",
+                 tint: zmxState == nil ? tokens.textSecondary : tokens.text,
+                 value: "\(session) @ \(host)" + (zmxState.map { " · \($0.lowercased())" } ?? ""))
         }
         .padding(.top, 5).padding(.bottom, 6)
         .onAppear { revealed = true }

@@ -104,12 +104,34 @@ final class ForkNotify: NSObject, UNUserNotificationCenterDelegate {
             .init(identifier: UUID().uuidString, content: content, trigger: nil))
     }
 
+    /// A banner about a *host* rather than a tab (a kill that didn't land: the tab is
+    /// already closed). Click opens the Hosts sheet on that host.
+    @MainActor func post(host: ForkHost.ID, title: String, body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        content.userInfo = ["forkHost": host]
+        content.threadIdentifier = "fork-host-\(host)"
+        UNUserNotificationCenter.current().add(
+            .init(identifier: UUID().uuidString, content: content, trigger: nil))
+    }
+
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse,
         withCompletionHandler done: @escaping () -> Void
     ) {
         let info = response.notification.request.content.userInfo
+        if let hostID = info["forkHost"] as? String {
+            Task { @MainActor in
+                NSApp.activate(ignoringOtherApps: true)
+                ForkWindowController.instance?.window?.makeKeyAndOrderFront(nil)
+                ForkWindowController.instance?.showHostsSheet(select: hostID)
+            }
+            done()
+            return
+        }
         guard let s = info["forkTab"] as? String, let id = UUID(uuidString: s) else {
             wrapped?.userNotificationCenter?(center, didReceive: response,
                                              withCompletionHandler: done) ?? done()
@@ -128,7 +150,8 @@ final class ForkNotify: NSObject, UNUserNotificationCenterDelegate {
         willPresent n: UNNotification,
         withCompletionHandler done: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        guard n.request.content.userInfo["forkTab"] == nil else { done([.banner, .sound]); return }
+        let info = n.request.content.userInfo
+        guard info["forkTab"] == nil, info["forkHost"] == nil else { done([.banner, .sound]); return }
         wrapped?.userNotificationCenter?(center, willPresent: n,
                                          withCompletionHandler: done) ?? done([])
     }

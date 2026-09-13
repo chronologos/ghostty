@@ -6,7 +6,11 @@ enum ZmxAdapter {
     /// Absolute local path to `zmx`. Spotlight/Dock launches inherit launchd's minimal
     /// PATH, and Ghostty runs commands via `bash --noprofile --norc`, so bare `zmx` fails.
     /// Resolved once: env override → current PATH (usually already enriched by install()'s
-    /// login-PATH export) → common install dirs → login-shell probe.
+    /// login-PATH export) → common install dirs → bare `zmx`. (A login-shell probe used to
+    /// sit last: it blocked main for up to 2s inside this swift_once on exactly the launches
+    /// where it was least likely to answer in time, and the bare-name fallback self-heals
+    /// anyway — control commands run via `/usr/bin/env` and surfaces inherit the app env,
+    /// so both pick up the background PATH refresh seconds later.)
     static let localZmx: String = {
         let fm = FileManager.default
         let env = ProcessInfo.processInfo.environment
@@ -20,17 +24,6 @@ enum ZmxAdapter {
         if let hit = candidates.compactMap({ $0 }).first(where: fm.isExecutableFile(atPath:)) {
             return hit
         }
-        // Last resort: ask the user's login shell (rarely reached now that install() exports
-        // the login PATH before forcing this). Bounded inside `loginShellOutput` — a hung
-        // .zshrc must not wedge the static-let initializer (and with it, every caller).
-        // `-i` sources .zshrc, which may chatter to stdout (nvm/pyenv init, fortune) —
-        // `command -v` is the last line.
-        if let out = ForkBootstrap.loginShellOutput("command -v zmx")?
-            .split(separator: "\n").last.map(String.init),
-           (out as NSString).lastPathComponent == "zmx",
-           fm.isExecutableFile(atPath: out) {
-            return out
-        }
         ForkBootstrap.logger.warning("zmx not resolved; falling back to PATH lookup")
         return "zmx"
     }()
@@ -39,6 +32,12 @@ enum ZmxAdapter {
     private static func zmx(on host: ForkHost) -> String {
         host.transport.isLocal ? localZmx : "zmx"
     }
+
+    /// zmx's default tracked-env list (cfg.zig `tracked_envs` — `ZMX_TRACK_ENV` *replaces*
+    /// it, so the defaults are repeated) plus the two variables CC's progress reporting
+    /// gates on.
+    static let trackedEnv = "DISPLAY,SSH_AUTH_SOCK,SSH_AGENT_PID,SSH_CONNECTION,WINDOWID,XAUTHORITY,"
+        + "KITTY_LISTEN_ON,KITTY_PID,KITTY_WINDOW_ID,TERM_PROGRAM,TERM_PROGRAM_VERSION"
 
     /// On-the-wire name. Managed refs get `{hostID}-` prefix; external refs use raw name.
     static func wireName(_ ref: SessionRef) -> String {
@@ -100,9 +99,12 @@ enum ZmxAdapter {
         cwd: String? = nil
     ) -> Ghostty.SurfaceConfiguration {
         var c = Ghostty.SurfaceConfiguration()
+        // zmx starts a *new* session in the attaching client's cwd (and ignores it when the
+        // session already exists), so "start where I am" is just "run the client there":
+        // locally libghostty chdirs the child; remotely `wrap` prepends a `cd`.
         if host.transport.isLocal { c.workingDirectory = cwd }
         let argv = [zmx(on: host), "attach", wireName(ref)] + (initialCmd ?? [])
-        c.command = host.transport.wrap(argv)
+        c.command = host.transport.wrap(argv, cwd: host.transport.isLocal ? nil : cwd)
         return c
     }
 
@@ -115,20 +117,105 @@ enum ZmxAdapter {
         /// Decoded `ghostty_name` label — the display alias, source of truth for
         /// `paneLabels`. nil = no label (or an unlabeled/old daemon). See `AliasCodec`.
         var alias: String? = nil
+        /// The daemon's view of the session's working directory, decoded to a plain
+        /// absolute path (`decodeCwd`). zmx ≥0.8 tracks it live from OSC 7; older daemons
+        /// report the static creation dir. This is the *only* cwd source for a plain shell
+        /// on an ssh host — Ghostty drops OSC 7 whose host isn't the Mac, so `surface.pwd`
+        /// is always nil there. Remote-controlled text: display / `{cwd}` only.
+        var cwd: String? = nil
+        /// Host part of the OSC 7 URI, when present. Differs from the session's own host
+        /// when the shell has ssh'd somewhere else (OSC 7 crosses ssh).
+        var cwdHost: String? = nil
+        /// The command the session was created with (`zmx attach name cmd…` / `zmx run`).
+        var cmd: String? = nil
+        /// `zmx run` task bookkeeping: when the last task finished, and how.
+        var ended: Date? = nil
+        var exitCode: Int? = nil
+    }
+
+    /// A session whose socket exists but whose daemon didn't answer `zmx list`'s 1s probe
+    /// (`err=Timeout|Unexpected|InfoSizeMismatch`, `status=unreachable`). zmx is explicit
+    /// that such a daemon may just be busy — the session, and any agent in it, is very
+    /// likely still alive. Dropping these rows made a wedged session indistinguishable from
+    /// a dead one: kill verification could never see the one case it exists for, the Hosts
+    /// sheet showed a failed Kill as success, and the CC probe read it as "agent exited".
+    struct Unresponsive: Hashable {
+        var name: String
+        var external: Bool
+        var err: String
     }
 
     struct ListResult {
         var managed: [ListEntry] = []
         var external: [ListEntry] = []
+        var unresponsive: [Unresponsive] = []
+
+        /// `SessionRef.key`s of everything the host still *has* — answered or not.
+        func presentKeys(hostID: ForkHost.ID) -> Set<String> {
+            Set((managed + external).map {
+                SessionRef(hostID: hostID, name: $0.name, external: $0.external).key
+            } + unresponsive.map {
+                SessionRef(hostID: hostID, name: $0.name, external: $0.external).key
+            })
+        }
+    }
+
+    /// Why a `zmx list` produced no answer — so the UI can stop blaming ssh for a slow zmx.
+    enum ListFailure: Error, Equatable {
+        /// Wall-clock timeout. With ssh up this is usually zmx itself: `list` probes every
+        /// socket serially at 1s each, so a handful of wedged daemons exceeds the budget.
+        case timeout
+        /// ssh exited 255 — the transport, not zmx.
+        case transport(String)
+        /// `zmx` isn't on the (non-interactive) PATH over there.
+        case zmxMissing
+        case other(String)
+
+        var summary: String {
+            switch self {
+            case .timeout: "zmx list timed out (slow link, or sessions not responding)"
+            case .transport(let m): m.isEmpty ? "ssh couldn't connect" : "ssh: \(m)"
+            case .zmxMissing: "zmx not found on PATH there"
+            case .other(let m): m.isEmpty ? "zmx list failed" : m
+            }
+        }
     }
 
     /// `zmx list` partitioned into fork-managed and external. `nil` means the *query* failed
     /// (host unreachable, ssh refused, zmx missing) — callers must not render that as an
     /// empty-but-healthy host; an empty `ListResult` means the query worked and found nothing.
     static func list(host: ForkHost, timeout: TimeInterval = 5) async -> ListResult? {
+        try? await listResult(host: host, timeout: timeout).get()
+    }
+
+    /// `list()` with the failure reason kept. Also refuses to read an *unrecognized* row
+    /// format as "no sessions": a remote zmx old enough to print different field names
+    /// parses to zero rows, which is exactly the empty-but-healthy state the contract above
+    /// says a broken query must never produce.
+    static func listResult(host: ForkHost, timeout: TimeInterval = 5) async -> Result<ListResult, ListFailure> {
         let argv = host.transport.controlArgv([zmx(on: host), "list"])
-        guard let out = try? await run(argv: argv, timeout: timeout) else { return nil }
-        return partition(out, hostID: host.id)
+        do {
+            let out = try await run(argv: argv, timeout: timeout)
+            let r = partition(out, hostID: host.id)
+            let rows = out.split(separator: "\n").filter { $0.contains("\t") && $0.contains("=") }
+            if !rows.isEmpty, r.managed.isEmpty, r.external.isEmpty, r.unresponsive.isEmpty,
+               !rows.allSatisfy({ $0.contains("status=cleaning up") }) {
+                return .failure(.other("zmx there prints an unrecognized list format (version mismatch?)"))
+            }
+            return .success(r)
+        } catch let e as CommandError {
+            return .failure(classify(e, remote: !host.transport.isLocal))
+        } catch {
+            return .failure(.timeout)
+        }
+    }
+
+    /// Pure, for tests. ssh reserves 255 for its own failures; 127 is the shell's (or
+    /// `env`'s) "command not found".
+    static func classify(_ e: CommandError, remote: Bool) -> ListFailure {
+        if remote, e.status == 255 { return .transport(e.stderr) }
+        if e.status == 127 { return .zmxMissing }
+        return .other(e.stderr)
     }
 
     /// Pure half of `list()` (separated for tests): full k=v lines → fork-managed
@@ -147,69 +234,152 @@ enum ZmxAdapter {
         let prefix = "\(hostID)-"
         var r = ListResult()
         var seen = Set<String>()
+        /// Shared by both row kinds: prefix-strip → safety rule → first-row-wins.
+        func admit(_ wire: String) -> (name: String, external: Bool)? {
+            var name = wire, external = true
+            if name.hasPrefix(prefix), isValidIdent(String(name.dropFirst(prefix.count))) {
+                name = String(name.dropFirst(prefix.count)); external = false
+            }
+            guard isSafeExternalName(name),
+                  seen.insert(external ? "@\(name)" : name).inserted else { return nil }
+            return (name, external)
+        }
         for line in output.split(separator: "\n") {
-            guard var e = parse(line: line) else { continue }
+            guard let row = parseRow(line: line) else { continue }
+            guard case .entry(var e) = row else {
+                if case .unresponsive(let wire, let err) = row, let a = admit(wire) {
+                    r.unresponsive.append(.init(name: a.name, external: a.external, err: err))
+                }
+                continue
+            }
             // Only a name the fork could have created itself (managed charset) is trusted
             // as managed: the wire prefix alone is forgeable by anyone on the host, and a
             // forged name with shell-hostile characters must not become a non-external
             // `SessionRef` (downstream code assumes managed ⇒ `isValid` — derived-name
             // seeding, `Persistence.scrub`'s rule choice). Forged-prefix names that fail
             // the charset stay external under their full wire name.
-            if e.name.hasPrefix(prefix), isValidIdent(String(e.name.dropFirst(prefix.count))) {
-                e.name = String(e.name.dropFirst(prefix.count))
-                e.external = false
-            }
-            // Checked AFTER the prefix strip so `h1--foo` can't smuggle a dash-leading
-            // managed name through; applies to both partitions.
-            guard isSafeExternalName(e.name) else { continue }
-            // Same key `SessionRef.key` would use (`@` for external) — first row wins.
-            guard seen.insert(e.external ? "@\(e.name)" : e.name).inserted else { continue }
+            // The safety rule is checked AFTER the prefix strip so `h1--foo` can't smuggle a
+            // dash-leading managed name through; it applies to both partitions. The seen-key
+            // is the one `SessionRef.key` would use (`@` for external) — first row wins.
+            guard let a = admit(e.name) else { continue }
+            e.name = a.name; e.external = a.external
             if e.external { r.external.append(e) } else { r.managed.append(e) }
         }
         return r
     }
 
-    /// zmx util.zig:539 — `[→ |  ]name=…\tpid=…\tclients=…\tcreated=…[\t…][\tlabels…]`.
-    /// `created` is unix seconds (the `ns` comment at main.zig:359 is stale). Session
-    /// labels (`zmx set`) are appended as extra `k=v` fields; the daemon reserves only
-    /// name/start_dir/cmd, so a label named `clients` or `err` is settable by anyone on
-    /// the host — first occurrence wins, so the built-ins (emitted first) can't be
-    /// shadowed into corrupting a session row. A dead-socket line (`err=…\tstatus=…`)
-    /// carries no `pid`/`clients`/`created`, so the required-field guard is what drops
-    /// it; a separate `err=` check would let a *label* named `err` hide a live session.
-    static func parse(line: Substring) -> ListEntry? {
+    /// One `zmx list` row (zmx `util.zig writeSessionLine`), today:
+    /// `[→ |  ]name=…\tpid=…\tclients=…\tcreated=…[\tcwd=…][\tcmd=…][\tended=…[\texit_code=…]][\tlabels…]`.
+    /// `created` is unix seconds (zmx's own struct comment says ns; the code stores
+    /// seconds). Session labels (`zmx set`) are appended last as extra `k=v` fields. Two
+    /// precedence rules fall out of that order:
+    /// - **Built-ins are first-occurrence-wins.** zmx reserves only a few label keys, so a
+    ///   label named `clients` or `err` is settable — but it prints *after* the real field
+    ///   and can't shadow it into corrupting a row.
+    /// - **`ghostty_name` is last-occurrence-wins.** `cwd=` and `cmd=` print *before* the
+    ///   labels and are free text (an OSC 7 path; the command line a hover command built
+    ///   from `{cwd}`), so a tab inside one of them followed by `ghostty_name=…` would
+    ///   otherwise beat the real label.
+    /// A row for a daemon that didn't answer (`name=…\terr=…\tstatus=…`) carries no
+    /// `pid`/`clients`/`created`; it is recognized by that absence, not by `err=` alone —
+    /// a separate `err=` check would let a *label* named `err` hide a live session.
+    /// `status=cleaning up` means zmx just deleted a definitively dead socket: gone.
+    enum Row: Equatable {
+        case entry(ListEntry)
+        case unresponsive(wire: String, err: String)
+    }
+
+    static func parseRow(line: Substring) -> Row? {
         var kv: [Substring: Substring] = [:]
         for tok in line.drop(while: { $0 == " " || $0 == "→" }).split(separator: "\t") {
             guard let eq = tok.firstIndex(of: "=") else { continue }
-            let k = tok[..<eq]
-            if kv[k] == nil { kv[k] = tok[tok.index(after: eq)...] }
+            let k = tok[..<eq], v = tok[tok.index(after: eq)...]
+            if k == AliasCodec.keySub || kv[k] == nil { kv[k] = v }
         }
-        guard let name = kv["name"],
-              let clients = kv["clients"].flatMap({ Int($0) }),
+        guard let name = kv["name"] else { return nil }
+        guard let clients = kv["clients"].flatMap({ Int($0) }),
               let created = kv["created"].flatMap({ TimeInterval($0) })
-        else { return nil }
-        return .init(name: String(name), clients: clients,
-                     created: Date(timeIntervalSince1970: created), external: true,
-                     pid: kv["pid"].flatMap { Int32($0) },
-                     alias: AliasCodec.alias(from: kv[AliasCodec.keySub]))
+        else {
+            guard kv["pid"] == nil, let err = kv["err"], kv["status"] != "cleaning up" else { return nil }
+            return .unresponsive(wire: String(name), err: stripControl(String(err), max: 32))
+        }
+        let cwd = kv["cwd"].flatMap(decodeCwd)
+        return .entry(.init(
+            name: String(name), clients: clients,
+            created: Date(timeIntervalSince1970: created), external: true,
+            pid: kv["pid"].flatMap { Int32($0) },
+            alias: AliasCodec.alias(from: kv[AliasCodec.keySub]),
+            cwd: cwd?.path, cwdHost: cwd?.host,
+            cmd: kv["cmd"].map { stripControl(String($0), max: 256) }.flatMap { $0.isEmpty ? nil : $0 },
+            ended: kv["ended"].flatMap { TimeInterval($0) }.flatMap { $0 > 0 ? Date(timeIntervalSince1970: $0) : nil },
+            exitCode: kv["exit_code"].flatMap { Int($0) }))
     }
 
-    /// Shell command for a detached-placeholder surface: shows a prompt, waits for ⏎,
-    /// then runs `zmx attach` for the same ref via the host's transport, re-prompting in
-    /// place each time the attach exits. `ccName` is the
-    /// cached `tab.ccNames[ref.key]` — printed dim on a second line so a cold-restored
-    /// pane whose session is gone still says what it used to be.
-    static func detachedScript(host: ForkHost, ref: SessionRef, ccName: String? = nil) -> String {
+    /// The answered-row half of `parseRow` (what most callers and tests want).
+    static func parse(line: Substring) -> ListEntry? {
+        if case .entry(let e) = parseRow(line: line) { return e }
+        return nil
+    }
+
+    /// `cwd=` value → plain absolute path (+ the URI's host). zmx keeps the OSC 7 *URI*:
+    /// `file://host/percent-encoded` for a fresh session, or whatever the shell emits
+    /// verbatim — Ghostty's own shell integration sends `kitty-shell-cwd://host/raw-path`,
+    /// which by that scheme's definition is NOT percent-encoded. A pre-0.8 daemon behind a
+    /// new client prints a bare path. zmx truncates the field at 256 bytes, so a value that
+    /// long may be cut mid-path (or mid-`%XX`): discard it rather than show a wrong place.
+    static func decodeCwd(_ raw: Substring) -> (host: String?, path: String)? {
+        guard !raw.isEmpty, raw.utf8.count < 256 else { return nil }
+        func clean(_ p: String) -> String? {
+            let c = stripControl(p, max: 1024)
+            return c.hasPrefix("/") ? c : nil
+        }
+        if raw.hasPrefix("/") { return clean(String(raw)).map { (nil, $0) } }
+        guard let sep = raw.range(of: "://") else { return nil }
+        let scheme = raw[..<sep.lowerBound], rest = raw[sep.upperBound...]
+        guard scheme == "file" || scheme == "kitty-shell-cwd",
+              let slash = rest.firstIndex(of: "/") else { return nil }
+        let host = stripControl(String(rest[..<slash]), max: 255)
+        let rawPath = String(rest[slash...])
+        guard let path = clean(scheme == "file" ? (rawPath.removingPercentEncoding ?? "") : rawPath)
+        else { return nil }
+        return (host.isEmpty ? nil : host, path)
+    }
+
+    /// Shell command for a detached-placeholder surface: says what state the session is in,
+    /// waits for ⏎, then runs `zmx attach` for the same ref via the host's transport,
+    /// re-prompting in place each time the attach exits. `alias` leads when there is one
+    /// (it's the name the sidebar shows; the id demotes to the dim line). `ccName` is the
+    /// cached `tab.ccNames[ref.key]` — printed dim so a cold-restored pane whose session is
+    /// gone still says what it used to be.
+    ///
+    /// **Why it probes.** Every way a zmx client ends looks the same from here — the shell
+    /// `exit`ed, the ssh link dropped, the client detached, the session was killed from
+    /// another Mac: `zmx attach` returns `.detach` and exits 0 on all of them. So "press ⏎
+    /// to reattach" used to be shown even when there was nothing to reattach *to*, and ⏎
+    /// then silently created a brand-new session under the old name. Before each prompt the
+    /// script asks the host (`zmx list` over the non-interactive control transport) and
+    /// prints one of three lines: still running / ended (⏎ starts fresh) / can't reach.
+    /// The full `list` rather than `--short`: a daemon that didn't answer is printed as an
+    /// `err=` row there and omitted from `--short`, and "busy" must not read as "ended".
+    static func detachedScript(host: ForkHost, ref: SessionRef, alias: String? = nil,
+                               ccName: String? = nil) -> String {
         // `attach` is already a fully shq'd command line (each token single-quoted),
         // so it's interpolated *unquoted* into the loop body — wrapping it again would make
         // it one word. shq is total (POSIX `'` → `'\''`); see TransportTests.wrapSshInjection.
         let attach = host.transport.wrap([zmx(on: host), "attach", wireName(ref)])
+        let probe = shq(host.transport.controlArgv([zmx(on: host), "list"]))
+        // `name=<wire>\t` — every row kind (answered or `err=`) starts its fields with it.
+        let needle = shq("name=\(wireName(ref))\t")
         // External `ref.name` is raw remote `zmx list` output (validation is bypassed for
         // externals — Persistence.swift scrub) and reaches the local pty via `printf %s`.
-        // `ccName` round-trips through hand-editable fork.json, so it gets the same
-        // control-stripping before it is printed to the local terminal.
-        let msg = "session \(stripControl(ref.name, max: 128)) — press ⏎ to reattach, ⌘⇧W to close"
-        let was = ccName.map { "; printf '\\033[2m  was: %s\\033[0m\\n' \(shq(stripControl($0, max: 96)))" } ?? ""
+        // `alias`/`ccName` round-trip through hand-editable fork.json, so they get the same
+        // control-stripping before they are printed to the local terminal.
+        let id = stripControl(ref.name, max: 128)
+        let shown = alias.map { stripControl($0, max: 96) }.flatMap { $0.isEmpty || $0 == id ? nil : $0 }
+        let msg = "session \(shown ?? id)"
+        let idLine = shown == nil ? "" : "; printf '\\033[2m  id: %s\\033[0m\\n' \(shq(id))"
+        let was = ccName.map { "; " + wasLine($0) } ?? ""
+        let where_ = shq(stripControl(host.label, max: 64))
         // Loop in place rather than `exec`: when the attach dies (ssh dropped over the next
         // sleep, or ⏎ pressed before the network was back) its error text stays on screen
         // and the same pty re-prompts — no surface churn, nothing flashes and vanishes.
@@ -218,21 +388,38 @@ enum ZmxAdapter {
         // re-prompting: cooked termios, primary screen, kitty-kbd stack cleared (over-pop
         // = reset), cursor on, mouse/bracketed-paste off, SGR reset, and OSC 9;4;0 so the
         // sidebar rail settles now instead of on upstream's 15s auto-nil. Ghostty has no
-        // DECSTR, and RIS would wipe the very error line this loop exists to keep.
+        // DECSTR, and RIS would wipe the very error line this loop exists to keep. (zmx
+        // itself writes RIS on every exit *after* it connected — that's a clean detach, where
+        // there's no error text to lose; `tidy` is for the ssh-drop / killed-client exits
+        // where zmx's own restore never ran.)
         let tidy = "\\033[?1049l\\033[<99u\\033[?25h\\033[?1000l\\033[?1002l\\033[?1003l\\033[?1006l\\033[?2004l\\033[0m\\033]9;4;0\\007"
-        let again = "press ⏎ to reattach, ⌘⇧W to close"
         return shq(["sh", "-c", """
-            printf '%s\\n' \(shq(msg))\(was); \
+            state() { \
+            if out=$(\(probe) 2>/dev/null); then \
+            if printf '%s\\n' "$out" | grep -qF -- \(needle); \
+            then printf '\\033[2m  detached — still running on %s · ⏎ reattaches, ⌘⇧W closes\\033[0m\\n' \(where_); \
+            else printf '\\033[2m  session ended — ⏎ starts a fresh shell under this name, ⌘⇧W closes\\033[0m\\n'; fi; \
+            else printf "\\033[2m  can't reach %s — ⏎ retries, ⌘⇧W closes\\033[0m\\n" \(where_); fi; }; \
+            printf '%s\\n' \(shq(msg))\(idLine)\(was); state; \
             while read _; do \(attach); rc=$?; stty sane 2>/dev/null; \
-            printf '\(tidy)\\n\\033[2m  exited (%s) — %s\\033[0m\\n' "$rc" \(shq(again)); done
+            printf '\(tidy)\\n\\033[2m  exited (%s)\\033[0m\\n' "$rc"; state; done
             """])
+    }
+
+    /// The dim "was: <cc name>" line, shared by the placeholder and the restore banner.
+    private static func wasLine(_ ccName: String) -> String {
+        "printf '\\033[2m  was: %s\\033[0m\\n' \(shq(stripControl(ccName, max: 96)))"
     }
 
     /// `initialCmd` for a cold-restored leaf with a cached CC name. `zmx attach` only runs
     /// the trailing argv when *creating* the session, so an existing session ignores this and
-    /// a fresh one shows the banner above its first prompt.
+    /// a fresh one shows the banner above its first prompt. (zmx ≥0.8 replays the window
+    /// title on re-attach, but only onto a *live* daemon — a session that died took its
+    /// title and labels with it, so the cached CC name is the only surviving hint.)
+    /// `-l`: zmx's own sessions are login shells; a restored one shouldn't come up with a
+    /// bare PATH just because it went through this banner.
     static func restoreCmd(ccName: String) -> [String] {
-        ["sh", "-c", "printf '\\033[2m  was: %s\\033[0m\\n\\n' \(shq(stripControl(ccName, max: 96))); exec ${SHELL:-/bin/sh}"]
+        ["sh", "-c", "\(wasLine(ccName)); printf '\\n'; exec ${SHELL:-/bin/sh} -l"]
     }
 
     /// The `k=v` token for `zmx set`. The value is always inside zmx's label charset
@@ -242,29 +429,78 @@ enum ZmxAdapter {
         "\(AliasCodec.key)=\(alias.map(AliasCodec.encode) ?? "")"
     }
 
+    /// What a `zmx set` told us. Since zmx 0.7.0 the CLI waits (1s) for the daemon's Ack and
+    /// exits non-zero otherwise, so the three cases are distinguishable:
+    enum SetResult: Equatable {
+        /// Exit 0 with nothing on stdout: the daemon Ack'd — the write landed, and this
+        /// daemon is *proven* label-capable.
+        case acked
+        /// Permanent for this session: "does not support labels (daemon too old?)", or a
+        /// pre-label *client* that fell through to printing its help text (exit 0 + stdout).
+        /// Retrying is pointless — each attempt costs an ssh handshake plus zmx's 1s wait.
+        case unsupported
+        /// Anything else — host blip, ssh `MaxStartups`, busy daemon, session not created
+        /// yet. Worth a bounded retry.
+        case transient
+    }
+
     /// Write the display alias onto the session as the `ghostty_name` label (nil clears
-    /// it). Best-effort: an old zmx (client or daemon) that predates labels fails or
-    /// silently no-ops, and the local `paneLabels` cache keeps carrying the name — so
-    /// callers don't await success, they just fire this and let the next `list()` poll
-    /// confirm. Returns whether the command reported success (drives the write's
-    /// failure path in `AliasSync`).
+    /// it). Callers don't await success — they fire this and feed the result back into
+    /// `AliasSync` (`noteLanded` / `noteFailed`); the local `paneLabels` cache keeps
+    /// carrying the name either way.
     @discardableResult
-    static func setAlias(host: ForkHost, ref: SessionRef, to alias: String?) async -> Bool {
+    static func setAlias(host: ForkHost, ref: SessionRef, to alias: String?) async -> SetResult {
         let kv = aliasKV(alias)
         let argv = host.transport.controlArgv([zmx(on: host), "set", wireName(ref), kv])
         do {
-            _ = try await run(argv: argv, timeout: 5)
-            return true
+            let out = try await run(argv: argv, timeout: 5)
+            return classifySet(stdout: out, error: nil)
         } catch {
             ForkBootstrap.logger.debug(
                 "zmx set \(kv, privacy: .public) on \(host.label, privacy: .public) failed: \(String(describing: error), privacy: .public)")
-            return false
+            return classifySet(stdout: "", error: error)
         }
     }
 
-    static func kill(host: ForkHost, ref: SessionRef) async throws {
+    /// Pure half of `setAlias`, for tests.
+    static func classifySet(stdout: String, error: Error?) -> SetResult {
+        if let e = error as? CommandError {
+            return e.stderr.contains("does not support labels") ? .unsupported : .transient
+        }
+        if error != nil { return .transient }
+        return stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .acked : .unsupported
+    }
+
+    /// How a `zmx kill` came out — exit status alone can't say.
+    enum KillOutcome: Equatable {
+        /// zmx printed `killed session <name>`: it blocked until the daemon hung up, so
+        /// the session is gone and the name is free.
+        case killed
+        /// Nothing to kill — the shell already exited, or another client got there first.
+        /// (Exit 1 `SessionNotFound` since 0.8.0; exit 0 + "does not exist" before.) The
+        /// goal state holds, so this is not an error.
+        case alreadyGone
+        /// Exit 0 without the confirmation line. zmx's kill dispatch still falls through
+        /// to exit 0 when a listed session's kill failed (it prints "failed to kill…" on
+        /// stderr, which a success path doesn't reliably capture). Callers verify with a
+        /// follow-up `list`.
+        case unconfirmed
+    }
+
+    /// Throws `CommandError` for a real failure and `CancellationError` for a timeout —
+    /// and a *timed-out* kill means "sent, not confirmed": by the time zmx blocks waiting
+    /// for the hang-up, the Kill message is already in the daemon's socket, so a busy
+    /// daemon may still act on it later.
+    @discardableResult
+    static func kill(host: ForkHost, ref: SessionRef) async throws -> KillOutcome {
         let argv = host.transport.controlArgv([zmx(on: host), "kill", wireName(ref)])
-        _ = try await run(argv: argv, timeout: 5)
+        do {
+            let out = try await run(argv: argv, timeout: 5)
+            return out.contains("killed session") ? .killed : .unconfirmed
+        } catch let e as CommandError where e.stderr.contains("SessionNotFound")
+            || e.stderr.contains("does not exist") {
+            return .alreadyGone
+        }
     }
 
     static func history(host: ForkHost, ref: SessionRef) async throws -> String {
@@ -477,7 +713,13 @@ extension ForkHost.Transport {
     /// Shell string for libghostty's `command` field — interactive (tty-allocating) path.
     /// SECURITY: only place untrusted-ish data meets a shell. argv is single-quoted (layer 1);
     /// for remote, the joined remote command is single-quoted again (layer 2).
-    func wrap(_ argv: [String]) -> String {
+    ///
+    /// `cwd` (remote only; local panes get `workingDirectory`): start the client — and so a
+    /// *newly created* session — in that directory. It is remote-controlled text (OSC 7 as
+    /// reported by that same host's zmx daemon), so it must be absolute and travels as one
+    /// `shq`'d positional argument to a fixed `sh -c` script, never interpolated into it.
+    /// A directory that has since vanished just leaves the shell in its default place.
+    func wrap(_ argv: [String], cwd: String? = nil) -> String {
         switch self {
         case .local:
             return shq(argv)
@@ -488,10 +730,32 @@ extension ForkHost.Transport {
             // sets the *creation* env for zmx-new sessions; existing sessions keep their
             // frozen env until restarted. Version is the minimum CC checks for, not the
             // bundle version — this is a capability flag.
-            let env = ["env", "TERM_PROGRAM=ghostty", "TERM_PROGRAM_VERSION=1.2.0"]
-            return shq(["ssh", "-t", "--", t.connectionString]) + " " + shq(shq(env + argv))
+            // `ZMX_NO_DETACH_KEY`: see `ForkBootstrap.scrubZmxEnvironment` (this is its
+            // remote half — the variable is read by the attach *client*).
+            // `ZMX_TRACK_ENV`: zmx ≥0.8 records these from each attaching client and hands
+            // the leader's values to `zmx print-env` — so a shell in a *pre-existing*
+            // session (frozen env, no TERM_PROGRAM, a dead SSH_AUTH_SOCK) can pick them up
+            // with `eval "$(zmx print-env -s .)"` in its precmd hook. It only records; it
+            // never changes a running process's environment, so the prefix above stays.
+            let env = ["env", "TERM_PROGRAM=ghostty", "TERM_PROGRAM_VERSION=1.2.0",
+                       "ZMX_NO_DETACH_KEY=1", "ZMX_TRACK_ENV=\(ZmxAdapter.trackedEnv)"]
+            var remote = env + argv
+            if let cwd, cwd.hasPrefix("/") {
+                remote = ["sh", "-c", #"cd "$1" 2>/dev/null; shift; exec "$@""#, "_", cwd] + remote
+            }
+            return shq(["ssh", "-t"] + Self.paneSSHOptions + ["--", t.connectionString])
+                + " " + shq(shq(remote))
         }
     }
+
+    /// Liveness for the *interactive* ssh. Without these a link that died silently (laptop
+    /// sleep, NAT expiry) leaves the pane frozen for minutes while everything else reads
+    /// healthy — control commands open fresh connections and succeed, and the remote side
+    /// hasn't noticed either, so `clients=1` persists. With them a dead link surfaces as
+    /// the placeholder within ~45s, and a reattach to a black-holed host fails in 15s
+    /// instead of sitting out the OS TCP timeout. Command-line `-o` beats `ssh_config`.
+    static let paneSSHOptions = ["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
+                                 "-o", "ConnectTimeout=15"]
 
     /// argv (no shell) for non-interactive control commands (`list`, `kill`) via `Process`.
     func controlArgv(_ argv: [String]) -> [String] {
