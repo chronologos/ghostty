@@ -329,8 +329,18 @@ struct ScrollbackSearchView: View {
         let label: String
         let crumb: String
         let slot: Int
+        /// The *latest* matching line, with up to one line either side for context.
+        let before: String?
         let snippet: String
+        let after: String?
+        /// Matching lines in this pane's buffer (the row shows only the latest).
+        let count: Int
     }
+    /// Panes whose history couldn't be fetched (timeout, host down) or came back empty —
+    /// `zmx history` exits 0 with no output when the daemon doesn't answer in time, so an
+    /// empty buffer is "not searched", not "searched, no match".
+    @State private var unsearched = 0
+    @State private var searchedPanes = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -362,10 +372,22 @@ struct ScrollbackSearchView: View {
                                     HStack(spacing: 4) {
                                         Text(hit.label).font(.system(size: 12, weight: .medium))
                                         Text(hit.crumb).font(.system(size: 11)).foregroundStyle(tokens.textSecondary)
+                                        if hit.count > 1 {
+                                            Text("· \(hit.count) matches, latest shown")
+                                                .font(.system(size: 10)).foregroundStyle(tokens.textTertiary)
+                                        }
+                                    }
+                                    if let b = hit.before {
+                                        Text(b).font(.system(size: 10, design: .monospaced))
+                                            .foregroundStyle(tokens.textTertiary).lineLimit(1)
                                     }
                                     Text(hit.snippet)
                                         .font(.system(size: 10, design: .monospaced))
                                         .foregroundStyle(tokens.textSecondary).lineLimit(1)
+                                    if let a = hit.after {
+                                        Text(a).font(.system(size: 10, design: .monospaced))
+                                            .foregroundStyle(tokens.textTertiary).lineLimit(1)
+                                    }
                                 }
                                 Spacer()
                             }
@@ -378,6 +400,17 @@ struct ScrollbackSearchView: View {
             }
             if !searching && hits.isEmpty && !query.isEmpty {
                 Text("No matches").font(.system(size: 11)).foregroundStyle(tokens.textSecondary).padding()
+            }
+            if !searching && !query.isEmpty {
+                // Say what was actually searched: zmx keeps the last 10k lines per session,
+                // and a pane whose history didn't come back isn't a pane with no match.
+                Divider()
+                Text("Searched \(searchedPanes) pane\(searchedPanes == 1 ? "" : "s")"
+                     + (unsearched > 0 ? " · \(unsearched) unavailable (no answer)" : "")
+                     + " · last 10k lines per session, as of when this opened")
+                    .font(.system(size: 10)).foregroundStyle(tokens.textTertiary)
+                    .padding(.horizontal, 12).padding(.vertical, 5)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .frame(width: 600, height: 420)
@@ -432,19 +465,31 @@ struct ScrollbackSearchView: View {
             await bufferFetch().value
             guard gen == generation, !Task.isCancelled else { return }
             // Pure client-side match against the cached buffers — no per-keystroke processes.
+            var missing = 0
             hits = panes.compactMap { p in
-                guard let buf = buffers["\(p.ref.hostID)/\(p.ref.key)"],
-                      let line = buf.split(separator: "\n")
-                          .last(where: { $0.localizedCaseInsensitiveContains(q) })
-                else { return nil }
+                guard let buf = buffers["\(p.ref.hostID)/\(p.ref.key)"], !buf.isEmpty
+                else { missing += 1; return nil }
+                let lines = buf.split(separator: "\n", omittingEmptySubsequences: false)
+                let matches = lines.indices.filter { lines[$0].localizedCaseInsensitiveContains(q) }
+                guard let i = matches.last else { return nil }
+                func tidy(_ j: Int) -> String? {
+                    guard lines.indices.contains(j) else { return nil }
+                    let t = String(lines[j]).trimmingCharacters(in: .whitespaces)
+                    return t.isEmpty ? nil : t
+                }
                 return Hit(
                     tabID: p.tab.id, paneIndex: p.index,
                     label: p.tab.paneLabels[p.ref.key] ?? p.ref.name,
                     crumb: "· \(p.tab.title) · \(p.host.label)",
                     slot: p.host.slot,
-                    snippet: String(line).trimmingCharacters(in: .whitespaces)
+                    before: tidy(i - 1),
+                    snippet: tidy(i) ?? "",
+                    after: tidy(i + 1),
+                    count: matches.count
                 )
             }
+            unsearched = missing
+            searchedPanes = panes.count - missing
             searching = false
         }
     }

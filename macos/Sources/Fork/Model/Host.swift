@@ -14,11 +14,15 @@ func isValidIdent(_ s: String) -> Bool {
 }
 
 /// External session names bypass `isValidIdent` (they come from remote `zmx list` verbatim;
-/// `shq` keeps them shell-inert) — but a leading `-` would be parsed by zmx itself as an
-/// option, so the one rule they do get lives here, shared by `ZmxAdapter.partition` and
-/// `Persistence.scrub`.
+/// `shq` keeps them shell-inert) — but zmx *itself* gives two spellings meaning, so the
+/// rules they do get live here, shared by `ZmxAdapter.partition` and `Persistence.scrub`:
+/// a leading `-` would be parsed as an option, and a trailing `*` makes `zmx kill` (and
+/// `wait`/`tail`) a **prefix match** — Kill on a session literally named `dev*` would take
+/// out `dev`, `dev-api`, …, and one named `*` every session on the host. `attach`/`set`/
+/// `history` read the name literally, so such a session is creatable and listable but has
+/// no way to be targeted precisely; it simply never becomes a `SessionRef`.
 func isSafeExternalName(_ s: String) -> Bool {
-    !s.isEmpty && !s.hasPrefix("-")
+    !s.isEmpty && !s.hasPrefix("-") && !s.hasSuffix("*")
 }
 
 /// A machine zmx sessions can run on.
@@ -184,6 +188,13 @@ struct TabModel: Codable, Identifiable, Hashable {
     /// Last-seen CC session name per pane (CCProbe write-through). Shown dimmed when the
     /// live probe has nothing — i.e. the agent has exited but the zmx shell remains.
     var ccNames: [String: String]
+    /// Per-pane proof that *this incarnation* of the session (`AliasSync.incarnation`:
+    /// zmx `created` + pid) is label-capable — it has shown a `ghostty_name` or Ack'd a
+    /// `zmx set`. `AliasSync.capable` is otherwise in-memory, so without this every launch
+    /// re-ran "migration" for any pane whose daemon label was absent and re-imposed the
+    /// cached name over a clear made elsewhere while the app was quit. A stale or missing
+    /// entry only degrades to that old behaviour, never to a wrong clear.
+    var aliasProven: [String: String]
     var collapsed: Bool
     var pinned: Bool
     /// Set by `dismissFromFocus`; `focusTabs` hides the tab while non-nil and `> mru`.
@@ -201,6 +212,7 @@ struct TabModel: Codable, Identifiable, Hashable {
         self.paneLabels = [:]
         self.paneTags = [:]
         self.ccNames = [:]
+        self.aliasProven = [:]
         self.collapsed = false
         self.pinned = false
         self.dismissedAt = nil
@@ -216,6 +228,7 @@ struct TabModel: Codable, Identifiable, Hashable {
         paneLabels = try c.decodeIfPresent([String: String].self, forKey: .paneLabels) ?? [:]
         paneTags = try c.decodeIfPresent([String: PaneTag].self, forKey: .paneTags) ?? [:]
         ccNames = try c.decodeIfPresent([String: String].self, forKey: .ccNames) ?? [:]
+        aliasProven = try c.decodeIfPresent([String: String].self, forKey: .aliasProven) ?? [:]
         collapsed = try c.decodeIfPresent(Bool.self, forKey: .collapsed) ?? false
         pinned = try c.decodeIfPresent(Bool.self, forKey: .pinned) ?? false
         dismissedAt = try c.decodeIfPresent(Date.self, forKey: .dismissedAt)

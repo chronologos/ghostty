@@ -141,8 +141,17 @@ struct AliasSyncTests {
         // (from another Mac / `zmx set … ghostty_name=`) and must propagate, not resurrect.
         var c = AliasSync()
         _ = observe(&c, live: "Alpha", cached: "Alpha")
+        // …on the *second* label-less row: `zmx list` waits only 50ms for a daemon's labels,
+        // so one bare row from a daemon busy with pty output proves nothing.
+        #expect(observe(&c, live: nil, cached: "Alpha") == .none)
         #expect(observe(&c, live: nil, cached: "Alpha") == .setCache(nil))
         #expect(observe(&c, live: nil, cached: nil) == .none)
+        // A label reappearing in between resets the count — strikes must be consecutive.
+        var f = AliasSync()
+        _ = observe(&f, live: "Alpha", cached: "Alpha")
+        #expect(observe(&f, live: nil, cached: "Alpha") == .none)
+        #expect(observe(&f, live: "Alpha", cached: "Alpha") == .none)
+        #expect(observe(&f, live: nil, cached: "Alpha") == .none)
     }
 
     @Test func seedPushesTheIdButACachedNameOutranksIt() {

@@ -37,9 +37,9 @@ enum ForkBootstrap {
         // panes on a cold morning. Apply last launch's cached login PATH now (instant, before
         // the zmx probe below and any surface spawn), then refresh it in the background.
         exportLoginShellPATH()
-        // Force `localZmx` resolution now. `static let` is swift_once-serialized — a
-        // detached "warm-up" can't beat main to the once-barrier, so we take the hit
-        // here (before any window draws) rather than mid-`newWindow`.
+        scrubZmxEnvironment()
+        // Force `localZmx` resolution now (a few `stat`s — it no longer shells out), so the
+        // resolved path is in the log next to the PATH it was resolved against.
         logger.info("fork enabled — zmx: \(ZmxAdapter.localZmx, privacy: .public)")
         ForkNotify.shared.install()
         // Seed the sidebar's colors from the terminal theme before any window draws, and
@@ -65,6 +65,26 @@ enum ForkBootstrap {
             SessionRegistry.shared.flushPaneExit()
             SessionRegistry.shared.saveNow()
         } }
+    }
+
+    /// zmx reads three variables from the *client's* environment that change what the
+    /// fork's own commands mean, and every pane / `Process` child inherits the app's:
+    /// - `ZMX_SESSION` (injected into every shell inside a session) turns `zmx attach X`
+    ///   into "switch the session I'm in to X": it never attaches, exits 0, and yanks the
+    ///   *launching* pane's client onto the new name. Running the app binary from a fork
+    ///   pane (the normal dev loop) would make every new local pane die into its
+    ///   placeholder while hijacking the pane it was launched from.
+    /// - `ZMX_SESSION_PREFIX` is prepended to every name, so listed names no longer start
+    ///   with `{hostID}-` and the fork's own sessions file as external.
+    /// - `ZMX_NO_DETACH_KEY` (set here, not scrubbed): ctrl+\ is zmx's in-band detach key,
+    ///   which in a fork pane blanks it into the placeholder and makes SIGQUIT undeliverable
+    ///   to the program inside. The fork owns detach (⌘W), so the key is only ever a
+    ///   misfire. Read per attach by the client; older zmx ignores it. Remote attaches get
+    ///   it through `Transport.wrap`'s env prefix.
+    private static func scrubZmxEnvironment() {
+        unsetenv("ZMX_SESSION")
+        unsetenv("ZMX_SESSION_PREFIX")
+        setenv("ZMX_NO_DETACH_KEY", "1", 1)
     }
 
     /// Inherited entries first — the control plane's `ssh`/`sh`/`nc` keep resolving to the
@@ -111,10 +131,9 @@ enum ForkBootstrap {
     /// Bounded probe of the user's login shell: run `cmd` under `$SHELL -lic`, return raw
     /// stdout once it hits EOF (the child's exit closes it), or nil after `timeout`. `cmd`
     /// must be a compile-time literal — this is deliberately NOT a third place where runtime
-    /// strings meet a shell (CLAUDE.md §Security boundary). Callers: the background PATH
-    /// refresh above (generous bound, off-main) and `ZmxAdapter.localZmx`'s last-resort
-    /// lookup (2s, on main before the first window draws) — for the latter a hung .zshrc
-    /// must not wedge launch: stdout drains via a handler (rc chatter bigger than the pipe
+    /// strings meet a shell (CLAUDE.md §Security boundary). Caller: the background PATH
+    /// refresh above (generous bound, off-main). A hung .zshrc must not leak a process:
+    /// stdout drains via a handler (rc chatter bigger than the pipe
     /// buffer can't deadlock the child into the timeout), the wait is bounded, and
     /// interactive zsh ignores SIGTERM, so on timeout the probe's process group is
     /// SIGKILLed and we give up.
