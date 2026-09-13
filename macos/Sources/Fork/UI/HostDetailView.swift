@@ -15,7 +15,8 @@ struct HostDetailView: View {
     @State private var slot: Int
     @State private var sessions = ZmxAdapter.ListResult()
     @State private var loading = true
-    @State private var unreachable = false
+    @State private var failure: ZmxAdapter.ListFailure?
+    private var unreachable: Bool { failure != nil }
     @State private var killError: String?
 
     init(host: ForkHost, onRemove: @escaping () -> Void) {
@@ -85,16 +86,30 @@ struct HostDetailView: View {
         } else if unreachable {
             // Distinct from "No sessions": the query failed, so the sessions are very likely
             // still alive — saying "none" here is how people conclude their work is gone.
-            Text("Couldn't reach \(host.label) — check ssh / zmx, then ⟳")
+            // …and say which half failed: a zmx that's slow to list (a few sessions not
+            // answering its 1s probe each) and an ssh that can't connect are fixed in
+            // different places.
+            Text("No list from \(host.label) — \(failure?.summary ?? "unknown error"). Then ⟳")
+                .multilineTextAlignment(.center)
                 .foregroundStyle(tokens.textSecondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if sessions.managed.isEmpty && sessions.external.isEmpty {
+        } else if sessions.managed.isEmpty && sessions.external.isEmpty && sessions.unresponsive.isEmpty {
             Text("No sessions").foregroundStyle(tokens.textSecondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             List {
                 ForEach(sessions.managed, id: \.name) { sessionRow($0) }
                 ForEach(sessions.external, id: \.name) { sessionRow($0) }
+                // Present but not answering. Listed so a failed Kill can't look like a
+                // successful one (the row used to just vanish) and so there *is* a Kill
+                // button for a session that's wedged.
+                ForEach(sessions.unresponsive, id: \.self) { u in
+                    HStack {
+                        UnresponsiveSessionLabel(entry: u)
+                        Spacer()
+                        killButton(name: u.name, external: u.external)
+                    }
+                }
             }
             .listStyle(.plain)
         }
@@ -108,31 +123,47 @@ struct HostDetailView: View {
             SessionMetaLabel(entry: e,
                              inSidebar: registry.isInSidebar(e.name, external: e.external, on: host.id),
                              ccInfo: registry.ccInfo(for: e, on: host.id))
-            Button("Kill") {
-                // No optimistic removal: a kill that fails (host briefly unreachable,
-                // session already gone) must not leave the row missing while the session
-                // keeps running — re-list and let reality drive the UI.
-                Task {
-                    let ref = SessionRef(hostID: host.id, name: e.name, external: e.external)
-                    do {
-                        try await ZmxAdapter.kill(host: host, ref: ref)
-                        killError = nil
-                    } catch {
-                        killError = "Couldn't kill \(e.name) — " +
-                            (error is CancellationError ? "timed out" : String(describing: error))
-                    }
-                    await reload()
-                }
-            }
-            .buttonStyle(.borderless).foregroundStyle(Theme.error)
+            killButton(name: e.name, external: e.external)
         }
+    }
+
+    private func killButton(name: String, external: Bool) -> some View {
+        Button("Kill") {
+            // No optimistic removal: a kill that fails (host briefly unreachable, daemon
+            // not answering) must not leave the row missing while the session keeps
+            // running — re-list and let reality drive the UI.
+            Task {
+                let ref = SessionRef(hostID: host.id, name: name, external: external)
+                var recheck = false
+                do {
+                    // Already gone counts as done — the goal state holds.
+                    recheck = try await ZmxAdapter.kill(host: host, ref: ref) == .unconfirmed
+                    killError = nil
+                } catch is CancellationError {
+                    // The Kill message is already in the daemon's socket by the time zmx
+                    // blocks waiting for the hang-up, so a busy daemon may still act on it.
+                    killError = "Kill sent to \(name) but not confirmed (timed out) — it may still exit. Re-checking…"
+                    recheck = true
+                } catch {
+                    killError = "Couldn't kill \(name) — \(String(describing: error))"
+                }
+                await reload()
+                guard recheck else { return }
+                try? await Task.sleep(for: .seconds(4))
+                await reload()
+                let still = sessions.presentKeys(hostID: host.id).contains(ref.key)
+                killError = still ? "\(name) is still there — the kill didn't land (daemon not responding?)" : nil
+            }
+        }
+        .buttonStyle(.borderless).foregroundStyle(Theme.error)
     }
 
     private func reload() async {
         loading = true
-        let r = await ZmxAdapter.list(host: host)
-        unreachable = (r == nil)
-        sessions = r ?? .init()
+        switch await ZmxAdapter.listResult(host: host) {
+        case .success(let r): failure = nil; sessions = r
+        case .failure(let f): failure = f; sessions = .init()
+        }
         loading = false
     }
 
