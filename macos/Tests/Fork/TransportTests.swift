@@ -73,7 +73,28 @@ struct TransportTests {
     @Test func wrapSshGolden() {
         let t = ForkHost.SSHTarget(user: "deploy", host: "prod-web-01")
         let cmd = ForkHost.Transport.ssh(t).wrap(["zmx", "attach", "h-n"])
-        #expect(cmd == #"'ssh' '-t' '--' 'deploy@prod-web-01' ''\''env'\'' '\''TERM_PROGRAM=ghostty'\'' '\''TERM_PROGRAM_VERSION=1.2.0'\'' '\''zmx'\'' '\''attach'\'' '\''h-n'\'''"#)
+        // Local half: liveness/connect options, then `--` before the destination.
+        #expect(cmd.hasPrefix(#"'ssh' '-t' '-o' 'ServerAliveInterval=15' '-o' 'ServerAliveCountMax=3' '-o' 'ConnectTimeout=15' '--' 'deploy@prod-web-01' '"#))
+        // Remote half, one shq level down: the env prefix (creation env + the client-side
+        // zmx switches), then the argv — every token its own word.
+        let words = ["env", "TERM_PROGRAM=ghostty", "TERM_PROGRAM_VERSION=1.2.0", "ZMX_NO_DETACH_KEY=1",
+                     "ZMX_TRACK_ENV=\(ZmxAdapter.trackedEnv)", "zmx", "attach", "h-n"]
+        #expect(cmd.hasSuffix(" " + shq(shq(words))))
+        // `ZMX_TRACK_ENV` *replaces* zmx's default list, so the defaults must be repeated.
+        #expect(ZmxAdapter.trackedEnv.contains("SSH_AUTH_SOCK"))
+        #expect(ZmxAdapter.trackedEnv.hasSuffix("TERM_PROGRAM,TERM_PROGRAM_VERSION"))
+    }
+
+    /// A remote pane can start in a directory. The path rides as ONE positional argument
+    /// to a fixed script — never interpolated into it — and only when absolute.
+    @Test func wrapSshCwdIsAPositionalArgument() {
+        let t = ForkHost.Transport.ssh(.init(user: nil, host: "h"))
+        let cmd = t.wrap(["zmx", "attach", "x"], cwd: "/tmp/a b'; rm -rf ~; '$(id)")
+        #expect(cmd.contains(#"cd "$1" 2>/dev/null; shift; exec "$@""#))
+        #expect(!t.wrap(["zmx"], cwd: "relative/path").contains("cd "))
+        #expect(!t.wrap(["zmx"], cwd: nil).contains("cd "))
+        // Local transport ignores it — libghostty's `workingDirectory` does that job.
+        #expect(ForkHost.Transport.local.wrap(["zmx"], cwd: "/tmp") == "'zmx'")
     }
 
     @Test func wrapSshInjection() {
@@ -187,7 +208,9 @@ struct TransportTests {
     }
 
     @Test func parseListLineErr() {
-        #expect(ZmxAdapter.parse(line: "  name=dead\terr=ConnectionRefused\tstatus=cleaning up") == nil)
+        // `cleaning up` = zmx just deleted a definitively dead socket → gone, not even an
+        // unresponsive row (see `ZmxListRowTests` for the rows that *are* kept).
+        #expect(ZmxAdapter.parseRow(line: "  name=dead\terr=ConnectionRefused\tstatus=cleaning up") == nil)
     }
 
     @Test func detachedScriptCCNameQuoted() {
@@ -216,7 +239,8 @@ struct TransportTests {
         let argv = ZmxAdapter.restoreCmd(ccName: "a';id;'b")
         #expect(argv[0] == "sh" && argv[1] == "-c")
         #expect(argv[2].contains(#"'a'\'';id;'\''b'"#))
-        #expect(argv[2].hasSuffix("exec ${SHELL:-/bin/sh}"))
+        // Login shell, like zmx's own sessions — a restored pane must not get a bare PATH.
+        #expect(argv[2].hasSuffix("exec ${SHELL:-/bin/sh} -l"))
     }
 
     @Test func wireName() {

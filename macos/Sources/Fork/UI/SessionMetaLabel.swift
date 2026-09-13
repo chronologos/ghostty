@@ -24,6 +24,51 @@ struct SessionNameLabel: View {
             Text(entry.name).font(.system(size: 12, design: .monospaced))
                 .lineLimit(1).truncationMode(.middle)
         }
+        // Where it is (and, for a session that was created to run something, what): with
+        // twenty `shell-xxx` rows on a host the name alone doesn't say which one is sitting
+        // in the repo you want — or which one the Kill button beside it would take out.
+        // The daemon reports both in the same `zmx list` row. `.head` truncation: the leaf
+        // of a path is the part that identifies it.
+        if let where_ = Self.whereLine(entry) {
+            Text(where_).font(.system(size: 10, design: .monospaced))
+                .lineLimit(1).truncationMode(.head)
+                .foregroundStyle(tokens.textTertiary)
+        }
+    }
+
+    /// `~/work/api  ·  $ zig build` — cwd with the home prefix folded, plus the creating
+    /// command unless it's one of the fork's own wrappers (`restoreCmd`/`smartJumpCmd` both
+    /// start `sh -c`, which says nothing to the user). Pure, for tests.
+    static func whereLine(_ e: ZmxAdapter.ListEntry) -> String? {
+        let cwd = e.cwd.map { $0.replacingOccurrences(
+            of: #"^/(Users|home)/[^/]+"#, with: "~", options: .regularExpression) }
+        let cmd = e.cmd.flatMap { $0.hasPrefix("sh -c") || $0.hasPrefix("'sh' '-c'") ? nil : "$ \($0)" }
+        let parts = [cwd, cmd].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: "  ·  ")
+    }
+}
+
+/// Row for a session whose daemon didn't answer `zmx list` (`ZmxAdapter.Unresponsive`):
+/// the name, dimmed, and why. It has no pid/clients/age to show — the point is that it is
+/// *there*, so it can be attached or killed and isn't mistaken for gone.
+struct UnresponsiveSessionLabel: View {
+    @Environment(\.forkTokens) private var tokens
+
+    let entry: ZmxAdapter.Unresponsive
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(entry.name).font(.system(size: 12, design: .monospaced))
+                .lineLimit(1).truncationMode(.middle)
+                .foregroundStyle(tokens.textSecondary)
+            HStack(spacing: 3) {
+                Image(systemName: "exclamationmark.circle").font(.system(size: 8))
+                Text("not responding (\(entry.err)) — probably busy, still running")
+            }
+            .font(.system(size: 10)).foregroundStyle(tokens.textTertiary)
+        }
+        .help("The zmx daemon for this session didn't answer within 1s. zmx treats that as "
+              + "\"may just be busy\" and so does the fork: the session and anything in it are very likely alive.")
     }
 }
 
@@ -71,8 +116,17 @@ struct SessionMetaLabel: View {
             Text("·").foregroundStyle(tokens.textSecondary)
             // Creation age in plain secondary, not the recency ramp — an old-but-busy
             // session must not render faded as if abandoned.
-            Text("\(entry.created.shortAge) old").foregroundStyle(tokens.textSecondary)
-                .help("Created \(entry.created.shortAge) ago")
+            if let ended = entry.ended {
+                // A `zmx run` task that has finished: how it ended beats how old it is —
+                // "0 clients · 3h old" otherwise reads exactly like an abandoned live shell.
+                let ok = (entry.exitCode ?? 0) == 0
+                Text("\(ok ? "✓" : "✗") exit \(entry.exitCode ?? 0) · \(ended.shortAge) ago")
+                    .foregroundStyle(ok ? tokens.textSecondary : Theme.error)
+                    .help("Task finished \(ended.shortAge) ago; session created \(entry.created.shortAge) ago")
+            } else {
+                Text("\(entry.created.shortAge) old").foregroundStyle(tokens.textSecondary)
+                    .help("Created \(entry.created.shortAge) ago")
+            }
             if entry.external {
                 Text("ext").foregroundStyle(tokens.textSecondary)
             }

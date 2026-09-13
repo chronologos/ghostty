@@ -38,9 +38,13 @@ struct NewSessionMachine {
     var query = "" { didSet { if query != oldValue { sel = 0 } } }
     private(set) var sel = 0
     private(set) var recents: ZmxAdapter.ListResult?
-    private(set) var unreachable = false
+    /// Why the session list couldn't be fetched (nil = it was).
+    private(set) var failure: ZmxAdapter.ListFailure?
+    var unreachable: Bool { failure != nil }
     let locked: Bool
-    let placeholder: String
+    /// The auto name ⏎ creates when nothing is typed. Re-rolled in `setRecents` if the
+    /// host already has a session by that name.
+    private(set) var placeholder: String
 
     init(host: ForkHost, locked: Bool, placeholder: String) {
         self.host = host
@@ -60,10 +64,28 @@ struct NewSessionMachine {
         let all = r.managed + r.external
         // Match the alias as well as the id — the alias is what the user reads in the
         // sidebar, the id is what `zmx` and ⏎-create key on.
+        // …and the directory it's sitting in: typing "ghostty" should find the session
+        // in ~/dev/ghostty whatever it happens to be called.
         return query.isEmpty ? all : all.filter {
             $0.name.localizedCaseInsensitiveContains(query)
                 || ($0.alias?.localizedCaseInsensitiveContains(query) ?? false)
+                || ($0.cwd?.localizedCaseInsensitiveContains(query) ?? false)
         }
+    }
+
+    /// Sessions whose daemon didn't answer the list probe. Shown (dim, attachable) rather
+    /// than dropped: a busy session that vanishes from the picker reads as "gone", and
+    /// typing its name then looks like a create.
+    var unresponsive: [ZmxAdapter.Unresponsive] {
+        guard let r = recents else { return [] }
+        return query.isEmpty ? r.unresponsive
+            : r.unresponsive.filter { $0.name.localizedCaseInsensitiveContains(query) }
+    }
+
+    /// The typed name already belongs to a managed session on the host — answered or not.
+    private var nameTaken: Bool {
+        sessions.contains { $0.name == query }
+            || (recents?.unresponsive.contains { !$0.external && $0.name == query } ?? false)
     }
 
     var nameValid: Bool {
@@ -76,7 +98,7 @@ struct NewSessionMachine {
     /// session list must have loaded (the exists-check below is vacuous against `[]`).
     var canSmartJump: Bool {
         stage == .session && sel == 0 && recents != nil && !query.isEmpty && nameValid
-            && !sessions.contains { $0.name == query }
+            && !nameTaken
     }
 
     // MARK: events
@@ -89,7 +111,7 @@ struct NewSessionMachine {
     }
 
     mutating func advance(to h: ForkHost) {
-        host = h; query = ""; sel = 0; recents = nil; unreachable = false; stage = .session
+        host = h; query = ""; sel = 0; recents = nil; failure = nil; stage = .session
     }
 
     mutating func back() {
@@ -103,8 +125,28 @@ struct NewSessionMachine {
 
     /// View calls after the async `zmx list` resolves; `nil` = host unreachable.
     mutating func setRecents(_ r: ZmxAdapter.ListResult?) {
-        unreachable = (r == nil)
-        recents = r ?? .init()
+        setRecents(r.map(Result.success) ?? .failure(.other("")))
+    }
+
+    /// `reroll`: a fresh auto name. The placeholder is only unique against *this process's*
+    /// panes; a Detach-closed session (still running by design) or one created from another
+    /// Mac shares the same `{hostID}-` namespace. `zmx attach` on a taken name silently
+    /// **attaches** — someone else's scrollback in a "new" pane, any initial command
+    /// dropped, and a later Kill takes out the old session. The host's real list is right
+    /// here, so check against it.
+    mutating func setRecents(_ r: Result<ZmxAdapter.ListResult, ZmxAdapter.ListFailure>,
+                             reroll: (() -> String)? = nil) {
+        switch r {
+        case .success(let list):
+            failure = nil
+            recents = list
+            let taken = Set(list.managed.map(\.name) + list.unresponsive.filter { !$0.external }.map(\.name))
+            var tries = 0
+            while let reroll, taken.contains(placeholder), tries < 8 { placeholder = reroll(); tries += 1 }
+        case .failure(let f):
+            failure = f
+            recents = .init()
+        }
     }
 
     /// Mutating: at `.host` it advances internally and returns `.none`.
@@ -206,9 +248,9 @@ struct NewSessionView: View {
         // toggles the id and retries the fetch.
         .task(id: m.stage) {
             guard m.stage == .session else { return }
-            let r = await ZmxAdapter.list(host: m.host)
+            let r = await ZmxAdapter.listResult(host: m.host)
             guard !Task.isCancelled else { return }
-            m.setRecents(r)
+            m.setRecents(r, reroll: { registry.uniqueAutoName() })
         }
     }
 
@@ -297,6 +339,14 @@ struct NewSessionView: View {
                                     ccInfo: registry.ccInfo(for: e, on: m.host.id))
                             }
                         }
+                        // Not keyboard-selectable (they sit outside `m.sessions`' index
+                        // space) — click attaches; the pane will show whatever zmx says.
+                        ForEach(m.unresponsive, id: \.self) { u in
+                            row(selected: false, action: { submit(u.name, external: u.external) }) {
+                                UnresponsiveSessionLabel(entry: u)
+                                Spacer()
+                            }
+                        }
                     }
                 }
             }
@@ -329,13 +379,16 @@ struct NewSessionView: View {
     @ViewBuilder private var emptyState: some View {
         if m.stage == .host, hosts.isEmpty {
             Text("No host matches").font(.system(size: 11)).foregroundStyle(tokens.textSecondary)
-        } else if m.stage == .session, m.sessions.isEmpty, m.recents != nil {
+        } else if m.stage == .session, m.sessions.isEmpty, m.unresponsive.isEmpty, m.recents != nil {
             // "Couldn't reach" ≠ "No sessions" — a failed query must not imply the host is
-            // empty; ⏎ still works (the new pane will surface the ssh error itself).
-            Text(m.unreachable ? "Couldn't reach \(m.host.label) — ⏎ still creates"
-                 : m.query.isEmpty ? "No sessions on \(m.host.label)"
-                 : "No match — ⏎ creates")
+            // empty; ⏎ still works (the new pane will surface the ssh error itself). And say
+            // *why*: a zmx that's slow to list and an ssh that can't connect are different
+            // problems.
+            Text(m.failure.map { "No list from \(m.host.label) — \($0.summary). ⏎ still creates" }
+                 ?? (m.query.isEmpty ? "No sessions on \(m.host.label)" : "No match — ⏎ creates"))
+                .multilineTextAlignment(.center)
                 .font(.system(size: 11)).foregroundStyle(tokens.textSecondary)
+                .padding(.horizontal, 20)
         } else if m.stage == .session, m.recents == nil {
             ProgressView().controlSize(.small)
         }
