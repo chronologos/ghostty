@@ -1,16 +1,28 @@
 #!/usr/bin/env bash
 # Workaround for ziglang/zig#31658: zig 0.15.2's MachO linker can't match
 # arm64e-only libSystem.tbd in the Xcode 26.4 SDK. Redirect zig's SDK probe
-# to a 15.4 SDK whose tbd still lists arm64-macos. This repo no longer needs
+# to a 15.x SDK whose tbd still lists arm64-macos. This repo no longer needs
 # it (Zig 0.16 fixed the bug), but this shims dir is also prepended by other
 # 0.15.2 builds — zmx via ~/bin/zmx-deploy — so it stays until nothing on
 # this machine builds with 0.15.2.
+#
+# The SDK is looked up, not hardcoded: a Command Line Tools update replaces the
+# point release (15.4 → 15.5 …), and a redirect to a directory that no longer
+# exists breaks *every* build that goes through this dir — including this repo's,
+# which doesn't need the redirect at all. Newest 15.x that exists wins; with none
+# installed the real xcrun answers.
 case " $* " in
   *" --sdk macosx "*|*" -sdk macosx "*)
     for a in "$@"; do
       if [[ "$a" == "--show-sdk-path" || "$a" == "-show-sdk-path" ]]; then
-        echo "/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk"
-        exit 0
+        # Newest first; skip the empty stub directories an update leaves behind.
+        while IFS= read -r sdk; do
+          if [[ -f "$sdk/usr/include/objc/runtime.h" && -f "$sdk/usr/lib/libSystem.tbd" ]]; then
+            echo "$sdk"
+            exit 0
+          fi
+        done < <(/bin/ls -d /Library/Developer/CommandLineTools/SDKs/MacOSX15.[0-9]*.sdk 2>/dev/null | sort -rV)
+        break
       fi
     done
     ;;

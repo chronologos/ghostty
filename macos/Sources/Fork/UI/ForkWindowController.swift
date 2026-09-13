@@ -98,11 +98,13 @@ final class ForkWindowController: TerminalController {
               let ref = registry.refs[dead.id],
               let host = registry.host(id: ref.hostID),
               let app = ghostty.app else { return nil }
-        let ccName = registry.tabs.lazy
-            .first { $0.tree.leafRefs.contains(ref) }?.ccNames[ref.key]
+        let owner = registry.tabs.lazy.first { $0.tree.leafRefs.contains(ref) }
         var cfg = Ghostty.SurfaceConfiguration()
-        cfg.command = ZmxAdapter.detachedScript(host: host, ref: ref, ccName: ccName)
+        cfg.command = ZmxAdapter.detachedScript(host: host, ref: ref,
+                                                alias: owner?.paneLabels[ref.key],
+                                                ccName: owner?.ccNames[ref.key])
         let placeholder = Ghostty.SurfaceView(app, baseConfig: cfg)
+        placeholders.insert(placeholder.id)
         // Tear the dead surface down BEFORE binding its replacement: with the placeholder
         // already bound to the same ref, `isLastSurface` sees a sibling, the `.detached`
         // phase-reset never fires, and a pane that died mid-turn keeps a wedged `.working`
@@ -115,10 +117,48 @@ final class ForkWindowController: TerminalController {
         return placeholder
     }
 
+    /// Surfaces that were created as detached placeholders (they *become* the live pane on
+    /// ⏎, so membership alone doesn't mean "currently detached" — pair it with liveness).
+    private var placeholders: Set<UUID> = []
+
+    /// Placeholder panes on this host that are sitting at their prompt while the session
+    /// is still running — what a VPN flap or a wake-from-sleep leaves behind. Only
+    /// `.listed(clients: 0)`: an *ended* session must not be resurrected by a bulk action.
+    func detachedPlaceholders(on hostID: ForkHost.ID) -> [Ghostty.SurfaceView] {
+        let trees = registry.tabs(on: hostID).map { surfaces(for: $0.id) }
+        return trees.joined().filter { v in
+            guard placeholders.contains(v.id), let ref = registry.refs[v.id] else { return false }
+            return registry.liveness[ref] == .listed(clients: 0)
+        }
+    }
+
+    /// Press ⏎ in each of them. Staggered so a host's worth of panes doesn't open N ssh
+    /// handshakes at once and trip sshd's `MaxStartups`.
+    func reattachDetached(on hostID: ForkHost.ID) {
+        for (i, v) in detachedPlaceholders(on: hostID).enumerated() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(350 * i)) {
+                v.surfaceModel?.sendText("\n")
+            }
+        }
+    }
+
     /// `BaseTerminalController.ghosttyDidCloseSurface` (`:585`) is `@objc private` and
     /// guards on `surfaceTree`, so a parked tab's pty-exit is dropped before our
     /// `closeSurface` override sees it. This second observer covers that case.
     @objc private func parkedSurfaceDidExit(_ note: Notification) {
+        if let dead = note.object as? Ghostty.SurfaceView, dead.processExited,
+           surfaceTree.root?.node(view: dead) == nil,
+           let (tabID, tree) = liveTabs.first(where: {
+               $0.key != registry.activeTabID && $0.value.contains { $0.id == dead.id }
+           }),
+           let node = tree.root?.node(view: dead), retireToolPane(dead) {
+            // A tool pane that finished in a background tab: prune it, no placeholder.
+            let pruned = tree.removing(node)
+            liveTabs[tabID] = pruned
+            if pruned.isEmpty { closeForkTab(tabID) }
+            else { registry.setPersistedTree(project(pruned.root), for: tabID) }
+            return
+        }
         guard let dead = note.object as? Ghostty.SurfaceView,
               surfaceTree.root?.node(view: dead) == nil,
               let (tabID, tree) = liveTabs.first(where: {
@@ -133,6 +173,11 @@ final class ForkWindowController: TerminalController {
     }
 
     override func closeSurface(_ node: SplitTree<Ghostty.SurfaceView>.Node, withConfirmation: Bool = true) {
+        // A finished tool pane (`runPaneCommand`) is disposable: unbind it so it takes the
+        // "unbound dead leaf — close silently" path below instead of becoming a placeholder.
+        if !withConfirmation, case let .leaf(dead) = node, dead.processExited {
+            _ = retireToolPane(dead)
+        }
         // `withConfirmation` is libghostty's `needsConfirmQuit()`, which is false for both
         // process-death AND user ⌘W on an idle shell. `processExited` is the discriminator.
         if !withConfirmation,
@@ -182,17 +227,43 @@ final class ForkWindowController: TerminalController {
         // ⌘W on one pane of several → per-pane Detach/Kill.
         if case let .leaf(surface) = node, let ref = registry.refs[surface.id],
            let host = registry.host(id: ref.hostID), let tab = registry.activeTab {
+            // Name the pane the way the sidebar does. K / a second ⌘W kills in one
+            // keystroke, so this title is the only thing confirming it's the right pane —
+            // and once a pane has an alias its zmx id is a name the user never sees.
+            let alias = tab.paneLabels[ref.key].map { stripControl($0, max: 96) }
+            let shown = alias ?? stripControl(ref.name, max: 96)
+            // The surface is resolved when the button is *clicked*, not when the sheet
+            // opened: if the pane's pty dies while the sheet is up (the hung ssh pane being
+            // closed, a kill from another Mac) `closeSurface` has meanwhile swapped in a
+            // placeholder bound to the same ref. Acting on the captured, now-detached view
+            // would edit only the persisted tree and leave that placeholder on screen —
+            // where its ⏎ silently recreates the session that was just killed.
+            let current = { [weak self] () -> Ghostty.SurfaceView? in
+                guard let self else { return nil }
+                let live = self.surfaces(for: tab.id)
+                return live.first { $0 === surface } ?? live.first { self.registry.refs[$0.id] == ref }
+            }
             confirmDetachOrKill(
-                messageText: "Close pane '\(ref.name)'?",
-                informativeText: "Detach leaves the zmx session running. Reattach from ⌘T or the split picker.",
-                onDetach: { [weak self] in self?.dropPane(tab: tab, ref: ref, surface: surface) },
+                messageText: "Close pane '\(shown)'?",
+                informativeText: (alias == nil ? "" : "zmx session \(stripControl(ref.name, max: 96)). ")
+                    + "Detach leaves the zmx session running. Reattach from ⌘T or the split picker.",
+                onDetach: { [weak self] in self?.dropPane(tab: tab, ref: ref, surface: current()) },
                 onKill: { [weak self] in
                     guard let self else { return }
+                    let target = current()
                     // Unbind first so the pty-death → placeholder path short-circuits.
-                    self.stopObservingProgress(surface.id)
-                    self.registry.unbind(surface: surface.id)
+                    if let target {
+                        self.stopObservingProgress(target.id)
+                        self.registry.unbind(surface: target.id)
+                    }
                     self.killSessions([ref], on: host)
-                    self.dropPane(tab: tab, ref: ref, surface: surface)
+                    self.dropPane(tab: tab, ref: ref, surface: target)
+                    // `dropPane` went through upstream's close path, which registered a
+                    // "Close Terminal" undo holding the just-killed surface. ⌘Z inside the
+                    // undo window would put a dead, unbound leaf back in the tree — which
+                    // then persists as `.leaf(nil)` (a stray session on next launch) and
+                    // skews the pane index ⌘I uses. A Kill isn't undoable; Detach keeps its undo.
+                    self.undoManager?.removeAllActions(withTarget: self)
                 }
             )
             return
@@ -372,8 +443,7 @@ final class ForkWindowController: TerminalController {
     func runPaneCommand(_ cmd: HoverCommand) {
         guard let surface = focusedSurface, let ref = registry.refs[surface.id],
               let host = registry.host(id: ref.hostID) else { return }
-        // OSC 7 (real-time, needs shell integration) › CCProbe poll (3s lag, no integration needed).
-        let paneCwd = surface.pwd ?? registry.ccLive[ref.hostID]?[ref.key]?.cwd
+        let paneCwd = paneCwd(surface)
         // `.local` executes on the Mac: a remote pane's cwd is remote-controlled (OSC 7 can
         // simply claim `localhost`; the CC probe's cwd field isn't validated at all) and
         // must not steer what a local tool opens or operates on. Remote panes degrade to
@@ -403,9 +473,42 @@ final class ForkWindowController: TerminalController {
             // derived name from validated refs so the new (non-external) ref stays `isValid`.
             let seed = ref.isValid ? ref.name : nil
             let new = SessionRef(hostID: host.id, name: registry.uniqueAutoName(derivedFrom: seed))
-            _ = completeSplit(at: surface, direction: .right, host: host, ref: new,
-                              initialCmd: argv)
+            if completeSplit(at: surface, direction: .right, host: host, ref: new,
+                             initialCmd: argv, cwd: paneCwd) != nil {
+                toolPanes.insert(new)
+            }
         }
+    }
+
+    /// Where a pane "is", best source first: OSC 7 (real-time; local panes only — Ghostty
+    /// drops OSC 7 whose host isn't the Mac, so this is always nil on ssh hosts) › the CC
+    /// probe (3s lag; only while an agent runs there) › the zmx daemon's own tracking from
+    /// the last poll (every session on every host, zmx ≥0.8). All three are
+    /// pane-controlled text: fine for display and for steering a command on the pane's *own*
+    /// host, never for a local tool acting on a remote pane's say-so (`runPaneCommand`).
+    func paneCwd(_ surface: Ghostty.SurfaceView) -> String? {
+        if let pwd = surface.pwd { return pwd }
+        guard let ref = registry.refs[surface.id] else { return nil }
+        return registry.ccLive[ref.hostID]?[ref.key]?.cwd
+            ?? registry.zmxCwd[ref.hostID]?[ref.key]?.cwd
+    }
+
+    /// Sessions created by `runPaneCommand(.pane)` — a split that exists to run one tool
+    /// (`lazygit`, `jj log`). When the tool exits the session is over, so the pane closes
+    /// like a stock Ghostty split would instead of turning into a "press ⏎ to reattach"
+    /// placeholder whose ⏎ creates a junk login-shell session under the throwaway name.
+    private var toolPanes: Set<SessionRef> = []
+
+    /// If `dead` is a finished tool pane: unbind it (so callers route it to a silent
+    /// close) and best-effort kill its session — the tool exiting normally already ended
+    /// it, but an ssh drop mid-tool would otherwise orphan a managed session nobody will
+    /// ever reattach. Returns whether it was one.
+    private func retireToolPane(_ dead: Ghostty.SurfaceView) -> Bool {
+        guard let ref = registry.refs[dead.id], toolPanes.remove(ref) != nil else { return false }
+        stopObservingProgress(dead.id)
+        registry.unbind(surface: dead.id)
+        if let host = registry.host(id: ref.hostID) { killSessions([ref], on: host, quiet: true) }
+        return true
     }
 
 
@@ -857,27 +960,64 @@ final class ForkWindowController: TerminalController {
         }
     }
 
-    /// Fire-and-track kills: a kill that silently didn't run (host briefly unreachable)
-    /// leaves the remote session — and any agent inside it — running forever while the tab
-    /// is already gone, so failures get a log line instead of vanishing into `try?`.
-    /// One verification `list` after the batch: zmx kill of a *wedged* daemon exits 0
-    /// without killing — exit status alone can't distinguish "killed" from "daemon ignored
-    /// it", only the session's absence from the next list can.
-    private func killSessions(_ refs: [SessionRef], on host: ForkHost) {
+    /// Fire-and-track kills. The caller has already closed the tab/pane — the user chose
+    /// Kill and the UI shows "killed" — so a kill that *didn't* happen (host briefly
+    /// unreachable, timeout, unresponsive daemon) leaves a session, and any agent inside it,
+    /// running with no sidebar row pointing at it. That must not be a log line only: the
+    /// survivors are reported once per batch as a banner that opens the Hosts sheet.
+    ///
+    /// Success is decided by one verification `list` after the batch, not by exit status:
+    /// zmx's kill dispatch still exits 0 when a *listed* session's kill failed, and a
+    /// timed-out kill is "sent, not confirmed" (the Kill message is already in the daemon's
+    /// socket; a busy daemon may act on it seconds later). Present = answered rows **plus**
+    /// `err=` rows — a daemon that stopped answering is exactly the one a kill bounces off,
+    /// and it used to be invisible here because those rows were dropped at parse.
+    /// `quiet`: housekeeping kills (finished tool panes) log but never notify.
+    private func killSessions(_ refs: [SessionRef], on host: ForkHost, quiet: Bool = false) {
+        // Names as the sidebar shows them, captured now — the tab is gone by banner time.
+        var shown: [SessionRef: String] = [:]
+        for ref in refs {
+            let alias = registry.tabs.lazy.first { $0.tree.leafRefs.contains(ref) }?.paneLabels[ref.key]
+            shown[ref] = stripControl(alias ?? ref.name, max: 64)
+        }
         Task {
+            var unsure: Set<SessionRef> = []
             for ref in refs {
-                do { try await ZmxAdapter.kill(host: host, ref: ref) } catch {
+                do {
+                    if try await ZmxAdapter.kill(host: host, ref: ref) == .unconfirmed { unsure.insert(ref) }
+                } catch {
+                    unsure.insert(ref)
                     ForkBootstrap.logger.error(
-                        "zmx kill \(stripControl(ref.name, max: 64), privacy: .public) on \(host.label, privacy: .public) failed: \(String(describing: error), privacy: .public)")
+                        "zmx kill \(stripControl(ref.name, max: 64), privacy: .public) on \(host.label, privacy: .public) failed: \(error is CancellationError ? "timed out (sent, not confirmed)" : String(describing: error), privacy: .public)")
                 }
             }
-            guard let after = await ZmxAdapter.list(host: host) else { return }
-            let alive = Set((after.managed + after.external).map { SessionRef(
-                hostID: host.id, name: $0.name, external: $0.external).key })
-            for ref in refs where alive.contains(ref.key) {
-                ForkBootstrap.logger.error(
-                    "zmx kill \(stripControl(ref.name, max: 64), privacy: .public) on \(host.label, privacy: .public): session still listed after kill (unresponsive daemon?)")
+            /// Who is still there? nil list = couldn't look, so everything that didn't
+            /// positively succeed stays suspect.
+            func survivors() async -> [SessionRef] {
+                guard let after = await ZmxAdapter.list(host: host) else {
+                    return refs.filter(unsure.contains)
+                }
+                let present = after.presentKeys(hostID: host.id)
+                return refs.filter { present.contains($0.key) }
             }
+            var alive = await survivors()
+            if !alive.isEmpty {
+                // A timed-out kill often lands a moment later; look once more before
+                // telling the user it didn't.
+                try? await Task.sleep(for: .seconds(4))
+                alive = await survivors()
+            }
+            guard !alive.isEmpty else { return }
+            for ref in alive {
+                ForkBootstrap.logger.error(
+                    "zmx kill \(stripControl(ref.name, max: 64), privacy: .public) on \(host.label, privacy: .public): session still present after kill")
+            }
+            guard !quiet else { return }
+            let names = alive.compactMap { shown[$0] }.joined(separator: ", ")
+            ForkNotify.shared.post(
+                host: host.id,
+                title: "Kill didn't land on \(stripControl(host.label, max: 64))",
+                body: "\(names) — still running. Click to open Hosts.")
         }
     }
 
@@ -1388,6 +1528,10 @@ final class ForkWindowController: TerminalController {
         // guard as `runPaneCommand`).
         let seed = registry.refs[oldView.id].flatMap { $0.isValid ? $0.name : nil }
         let placeholder = registry.uniqueAutoName(derivedFrom: seed)
+        // ⌘D starts the new session where the focused pane is, like a stock split (or
+        // `tmux split-window -c`). Captured now, before the sheet takes focus. Only matters
+        // when the picker *creates* — zmx ignores the client's cwd when attaching existing.
+        let inherit = config?.workingDirectory ?? paneCwd(oldView)
         pendingSplit = (oldView, direction)
         presentSheet(size: .init(width: 400, height: 300)) { [weak self] in
             NewSessionView(
@@ -1396,9 +1540,11 @@ final class ForkWindowController: TerminalController {
                 onSubmit: { ref, smartJump, named in
                     guard let self, let p = self.pendingSplit else { return }
                     self.pendingSplit = nil
+                    // Smart jump picks its own directory; don't fight it.
                     let view = self.completeSplit(
                         at: p.at, direction: p.dir, host: host, ref: ref,
-                        initialCmd: smartJump ? ZmxAdapter.smartJumpCmd(name: ref.name) : nil)
+                        initialCmd: smartJump ? ZmxAdapter.smartJumpCmd(name: ref.name) : nil,
+                        cwd: smartJump ? nil : inherit)
                     // Typed name = id + initial alias (queued for when the session lists).
                     if view != nil, named { self.registry.seedAlias(ref) }
                     self.endSheet()
@@ -1412,9 +1558,9 @@ final class ForkWindowController: TerminalController {
     private func completeSplit(
         at oldView: Ghostty.SurfaceView,
         direction: SplitTree<Ghostty.SurfaceView>.NewDirection,
-        host: ForkHost, ref: SessionRef, initialCmd: [String]? = nil
+        host: ForkHost, ref: SessionRef, initialCmd: [String]? = nil, cwd: String? = nil
     ) -> Ghostty.SurfaceView? {
-        let cfg = ZmxAdapter.surfaceConfig(host: host, ref: ref, initialCmd: initialCmd)
+        let cfg = ZmxAdapter.surfaceConfig(host: host, ref: ref, initialCmd: initialCmd, cwd: cwd)
         guard let view = super.newSplit(at: oldView, direction: direction, baseConfig: cfg) else { return nil }
         registry.bind(surface: view.id, to: ref)
         observeProgress(view)
