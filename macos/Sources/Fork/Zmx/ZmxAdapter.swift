@@ -5,12 +5,12 @@ import Foundation
 enum ZmxAdapter {
     /// Absolute local path to `zmx`. Spotlight/Dock launches inherit launchd's minimal
     /// PATH, and Ghostty runs commands via `bash --noprofile --norc`, so bare `zmx` fails.
-    /// Resolved once: env override → current PATH (usually already enriched by install()'s
-    /// login-PATH export) → common install dirs → bare `zmx`. (A login-shell probe used to
-    /// sit last: it blocked main for up to 2s inside this swift_once on exactly the launches
-    /// where it was least likely to answer in time, and the bare-name fallback self-heals
-    /// anyway — control commands run via `/usr/bin/env` and surfaces inherit the app env,
-    /// so both pick up the background PATH refresh seconds later.)
+    /// Resolved once: env override → current PATH (usually already enriched by
+    /// `ForkBootstrap.prepareEnvironment`'s cached login-PATH export) → common install dirs →
+    /// bare `zmx`. (A login-shell probe used to sit last: it blocked main for up to 2s inside
+    /// this swift_once on exactly the launches where it was least likely to answer in time.
+    /// The bare-name fallback no longer self-heals within the launch — the env is frozen at
+    /// `ghostty_init`, so the background PATH refresh only feeds the next launch's cache.)
     static let localZmx: String = {
         let fm = FileManager.default
         let env = ProcessInfo.processInfo.environment
@@ -393,7 +393,10 @@ enum ZmxAdapter {
         // there's no error text to lose; `tidy` is for the ssh-drop / killed-client exits
         // where zmx's own restore never ran.)
         let tidy = "\\033[?1049l\\033[<99u\\033[?25h\\033[?1000l\\033[?1002l\\033[?1003l\\033[?1006l\\033[?2004l\\033[0m\\033]9;4;0\\007"
-        return shq(["sh", "-c", """
+        // `/bin/sh`, not `sh`: this is the *local* pty's own command (libghostty runs it as
+        // `bash -c "exec -l …"`), and the placeholder is the pane of last resort — it must
+        // come up even when the pane's PATH is broken, which is exactly when it's needed.
+        return shq(["/bin/sh", "-c", """
             state() { \
             if out=$(\(probe) 2>/dev/null); then \
             if printf '%s\\n' "$out" | grep -qF -- \(needle); \
