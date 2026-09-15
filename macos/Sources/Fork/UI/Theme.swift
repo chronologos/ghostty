@@ -30,12 +30,20 @@ enum Theme {
     // continuous fade) for the same reason Pebble is seeded: rows redraw on every probe
     // tick, and a creeping value reads as activity.
     private static func age(_ d: Date?) -> TimeInterval { d.map { Date().timeIntervalSince($0) } ?? .infinity }
-    /// Short-term trail on the row background — "where was I just now". Tighter breakpoints
-    /// than `ForkTokens.spineHeat` (5m/15m, not 5m/1h): after an hour this is history, not a
-    /// trail. Sits below `selectedRow` (clay 0.20/0.14) so selection stays the strongest wash.
-    static func afterglow(_ d: Date?) -> Color {
-        let a = age(d)
-        return a < 300 ? clay.opacity(0.09) : a < 900 ? clay.opacity(0.045) : .clear
+    /// Short-term trail on the row background — "where was I just now". Keyed on the pane's
+    /// *rank* in the visit order (`SessionRegistry.trailRanks`: 0 = the pane you just left),
+    /// not its age: the old 5m/15m buckets lit every row touched while cycling through a
+    /// fleet, which is exactly when the trail is needed and exactly when it then said nothing.
+    /// Three steps and out. This is the only clay *fill* on a sidebar row — the focused row
+    /// is a neutral lift plus a clay leading bar (`ForkTokens.focusedRow`) — so "here" and
+    /// "just was" can't be mistaken for two strengths of the same thing.
+    static func afterglow(rank: Int?) -> Color {
+        switch rank {
+        case 0: clay.opacity(0.10)
+        case 1: clay.opacity(0.06)
+        case 2: clay.opacity(0.03)
+        default: .clear
+        }
     }
     /// Whole-row content opacity for the long tail. `cutoff` is the focus-mode cutoff in
     /// seconds — "asleep" reuses the user's own definition of "too old to care about".
