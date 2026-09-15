@@ -235,6 +235,14 @@ struct TransportTests {
         #expect(cmd.contains(#"\033[?1049l"#))
     }
 
+    /// The placeholder is the pane of last resort, so its interpreter can't depend on the
+    /// pane's PATH: with a broken env `exec -l sh` died ("exec: sh: not found"), the
+    /// replacement placeholder died the same way, and the pane could never be closed.
+    @Test func detachedScriptInterpreterIsAbsolute() {
+        let ref = SessionRef(hostID: "local", name: "s")
+        #expect(ZmxAdapter.detachedScript(host: .local, ref: ref).hasPrefix("'/bin/sh' '-c' '"))
+    }
+
     @Test func restoreCmdCCNameQuoted() {
         let argv = ZmxAdapter.restoreCmd(ccName: "a';id;'b")
         #expect(argv[0] == "sh" && argv[1] == "-c")
