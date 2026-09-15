@@ -7,9 +7,10 @@ fail() { echo "fork-check: FAIL — $1" >&2; exit 1; }
 warn() { echo "fork-check: WARN — $1" >&2; warned=1; }
 warned=0
 
-# --- Seams: exactly two `// [fork]` lines outside Fork/ -------------------------------
+# --- Seams: exactly three `// [fork]` lines outside Fork/ -----------------------------
+seams=3
 seam_count=$( { rg -c --no-filename '\[fork\]' macos/Sources --glob '!**/Fork/**' || true; } | awk '{s+=$1} END{print s+0}')
-[[ "$seam_count" -eq 2 ]] || fail "expected 2 [fork] seam lines outside Fork/, found $seam_count"
+[[ "$seam_count" -eq "$seams" ]] || fail "expected $seams [fork] seam lines outside Fork/, found $seam_count"
 
 # --- Upstream symbols the fork references by name ------------------------------------
 # Format: <regex> <TAB> <expected location>. Each is searched in its expected location
@@ -65,6 +66,20 @@ deleg_ln=$(rg -n 'center\.delegate = self' "$ad" | head -1 | cut -d: -f1 || true
 [[ -n "$seam_ln" && -n "$deleg_ln" && "$seam_ln" -lt "$deleg_ln" ]] \
   || fail "ForkBootstrap.install must precede UN delegate assignment in $ad (seam:${seam_ln:-?} deleg:${deleg_ln:-?})"
 
+# Env-before-snapshot ordering: `ghostty_init` snapshots the C `environ` array as a slice,
+# and every surface's env is built from that snapshot. A setenv after it leaves the
+# snapshot dangling (panes spawn with an empty env — no PATH, no SSH_AUTH_SOCK). So seam #3
+# must run before `ghostty_init`, and nothing under Fork/ may touch the env anywhere else.
+mn=macos/Sources/App/main.swift
+prep_ln=$(rg -n 'ForkBootstrap\.prepareEnvironment' "$mn" | head -1 | cut -d: -f1 || true)
+init_ln=$(rg -n 'ghostty_init\(' "$mn" | head -1 | cut -d: -f1 || true)
+[[ -n "$prep_ln" && -n "$init_ln" && "$prep_ln" -lt "$init_ln" ]] \
+  || fail "ForkBootstrap.prepareEnvironment must precede ghostty_init in $mn (seam:${prep_ln:-?} init:${init_ln:-?})"
+stray_env=$(rg -n '\b(un)?setenv\(|\bputenv\(' macos/Sources/Fork --glob '*.swift' --glob '!ForkBootstrap.swift' || true)
+[[ -z "$stray_env" ]] \
+  || fail "process-env mutation outside ForkBootstrap.prepareEnvironment (it would dangle libghostty's environ snapshot):
+$stray_env"
+
 # progress-style gate: upstream gates OSC 9;4 progress reports on this config option.
 # If the gate moves/renames, every fork status dot, settle banner, and badge count reads
 # permanently idle — with zero compile errors.
@@ -95,7 +110,7 @@ if [[ -d "$fw" && "${FORK_CHECK_SKIP_XCFW:-0}" != "1" ]]; then
 fi
 
 if [[ "$warned" -eq 1 ]]; then
-  echo "fork-check: OK (with warnings) — 2 seams, $sym_count upstream symbols present"
+  echo "fork-check: OK (with warnings) — $seams seams, $sym_count upstream symbols present"
 else
-  echo "fork-check: OK — 2 seams, $sym_count upstream symbols present"
+  echo "fork-check: OK — $seams seams, $sym_count upstream symbols present"
 fi

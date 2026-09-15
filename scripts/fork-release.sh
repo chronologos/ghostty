@@ -8,6 +8,18 @@ cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 IDENTITY="${FORK_SIGN_IDENTITY:-ghostty-fork-dev}"
 
+# Preflight: can Xcode run at all? An App Store auto-update (they follow macOS updates)
+# swaps in a new Xcode whose license hasn't been agreed to and whose first-launch tasks
+# haven't run, and from then on every xcodebuild exits 69. The zig build below is the worst
+# place to find that out: its xcframework step *captures* xcodebuild's stderr and drops it
+# (XCFrameworkStep.zig), and has already `rm -rf`'d the old framework by then — so all you
+# see is "process exited with code 69" and a repo with no GhosttyKit.xcframework. Ask
+# xcodebuild directly, before anything is deleted; it says what's wrong in plain words.
+xcodebuild -license check \
+  || { echo "fork-release: Xcode license not accepted — run: sudo xcodebuild -license accept" >&2; exit 1; }
+xcodebuild -checkFirstLaunchStatus \
+  || { echo "fork-release: Xcode first-launch tasks pending — run: sudo xcodebuild -runFirstLaunch" >&2; exit 1; }
+
 # Skip the xcframework freshness check — the zig build right below regenerates it.
 FORK_CHECK_SKIP_XCFW=1 ./scripts/fork-check.sh
 

@@ -148,7 +148,7 @@ struct ZmxListRowTests {
 /// The placeholder script, *run* — against a stub `ssh` on PATH — so the three states, the
 /// loop, and every quoting level are exercised as the shell sees them.
 struct DetachedScriptExecutionTests {
-    /// Runs `script` (a full `'sh' '-c' '…'` command line) with `stdin`, a stub `ssh` that
+    /// Runs `script` (a full `'/bin/sh' '-c' '…'` command line) with `stdin`, a stub `ssh` that
     /// answers the list probe from `list` (nil = probe fails) and "attaches" by exiting 7.
     private func run(_ script: String, list: String?, stdin: String) throws -> String {
         let dir = URL(fileURLWithPath: "/tmp/zf-\(UUID().uuidString.prefix(8))")

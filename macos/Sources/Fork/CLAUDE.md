@@ -7,7 +7,7 @@ section numbers as historical anchors).
 
 ## Principles
 
-1. **Upstream-rebaseable.** The diff against `ghostty-org/ghostty` is exactly two
+1. **Upstream-rebaseable.** The diff against `ghostty-org/ghostty` is exactly three
    `// [fork]` seam lines plus `Fork/**`. `jj rebase -b fork -d main@upstream` must
    stay mechanical — see [seam policy](#upstream-seam-policy).
 2. **zmx-native.** Every pane is `zmx attach <session>`; there is no non-zmx mode.
@@ -56,15 +56,16 @@ sidebar and a registry; it does not reimplement splits.
 
 ## Upstream seam policy
 
-Exactly **two** `// [fork]` lines outside `Fork/`:
+Exactly **three** `// [fork]` lines outside `Fork/`:
 
 | File | Seam |
 |---|---|
+| `macos/Sources/App/main.swift` | `ForkBootstrap.prepareEnvironment()` — *before* `ghostty_init`, which snapshots `environ` (see the env gotcha below) |
 | `macos/Sources/App/AppDelegate.swift` | `ForkBootstrap.install(ghostty:)` — in `applicationWillFinishLaunching` (near-frozen upstream; don't move it back into the churn-heavy `applicationDidFinishLaunching`) |
 | `macos/Sources/Features/Terminal/TerminalController.swift` | `if let c = ForkBootstrap.intercept(...) { return c }` |
 
 `fork-check.sh` enforces this. New behavior goes in `Fork/` via subclassing/overrides — never
-by editing upstream. If a hook genuinely doesn't exist, add a third seam *and bump the count
+by editing upstream. If a hook genuinely doesn't exist, add another seam *and bump the count
 in fork-check.sh in the same commit*.
 
 ## Layout
@@ -72,9 +73,11 @@ in fork-check.sh in the same commit*.
 ```
 Fork/
   ForkBootstrap.swift          enabled flag (env GHOSTTY_FORK=1), seam entry points;
-                               exports the login-shell PATH at install (cached + background
-                               refresh — GUI launches get launchd's bare PATH, which breaks
-                               ssh ProxyCommand wrappers resolved by name); scrubs the zmx
+                               `prepareEnvironment` (pre-`ghostty_init`, the only place the
+                               process env is ever mutated) exports the cached login-shell
+                               PATH (GUI launches get launchd's bare PATH, which breaks
+                               ssh ProxyCommand wrappers resolved by name; `install`
+                               refreshes the cache in the background) and scrubs the zmx
                                env vars that would change what our own commands mean
                                (`ZMX_SESSION`, `ZMX_SESSION_PREFIX`) and sets
                                `ZMX_NO_DETACH_KEY`
@@ -194,6 +197,19 @@ shadows upstream's `undo` alias (Config.zig:6934); ⌘Z remains undo.
   `$surfaceTree` uses `.debounce(80ms, .main)` — async delivery so `bind()` completes before
   `persistActive` projects, *and* divider-drag (per-frame `splitDidResize`) doesn't storm
   the sidebar.
+- **The process env is frozen at `ghostty_init`.** Since the Zig 0.16 port libghostty
+  snapshots the C `environ` array as a slice and builds every surface's env from it. A
+  `setenv` after that (a new variable reallocs the array, a longer value reallocs the
+  string) leaves the snapshot dangling: `createMap` fails, `Surface.zig` falls back to an
+  **empty** env, and the log fills with `error getting env map for surface
+  err=error.OutOfMemory`. Panes then carry only `PATH=<app>/Contents/MacOS` — `zmx attach`
+  (absolute path) still works, which hides it, while ssh panes and anything resolved by
+  name die at exec, and new sessions are created without `SSH_AUTH_SOCK`/`TMPDIR`/`LANG`.
+  Whether freed memory still reads back intact is the allocator's call, so it can stay
+  latent for months and appear with an OS update. Every mutation goes in
+  `ForkBootstrap.prepareEnvironment` (seam #3, before `ghostty_init`); `fork-check.sh`
+  fails on a `setenv`/`unsetenv`/`putenv` anywhere else under `Fork/`. Need a different
+  env for one child? Pass `Process.environment` / `SurfaceConfiguration.environmentVariables`.
 - `GHOSTTY_FORK_ZMX=/path` overrides zmx resolution; `GHOSTTY_FORK=0` disables the
   whole fork (the per-feature `GHOSTTY_FORK_NO_*` bisect toggles were removed).
 - **zmx reads the *client's* environment, and every pane inherits the app's.**
@@ -202,10 +218,10 @@ shadows upstream's `undo` alias (Config.zig:6934); ⌘Z remains undo.
   pane's client onto the new name. Running the app binary from a fork pane would kill
   every new local pane and hijack the pane you launched from; `ZMX_SESSION_PREFIX` would
   silently file every managed session as external. `ForkBootstrap.scrubZmxEnvironment`
-  unsets both at install. The same function sets `ZMX_NO_DETACH_KEY=1`: ctrl+\ is zmx's
-  in-band detach key, which in a fork pane blanks it into the placeholder and makes
-  SIGQUIT undeliverable — the fork owns detach (⌘W). Remote attaches get it via
-  `Transport.wrap`'s env prefix.
+  unsets both (from `prepareEnvironment`, pre-`ghostty_init`). The same function sets
+  `ZMX_NO_DETACH_KEY=1`: ctrl+\ is zmx's in-band detach key, which in a fork pane blanks
+  it into the placeholder and makes SIGQUIT undeliverable — the fork owns detach (⌘W).
+  Remote attaches get it via `Transport.wrap`'s env prefix.
 - **A session name is not opaque to zmx.** A trailing `*` makes `zmx kill`/`wait`/`tail` a
   *prefix match* while `attach` reads it literally — so a session literally named `dev*`
   exists, lists, and would turn the Kill button into "kill everything starting with dev"
@@ -338,7 +354,7 @@ local), not the internal hash id. `mode` (unknown values — including the remov
   No-ops on a tab whose `liveTabs` entry hasn't been built yet (cold-restored, never
   activated).
 - `local` — fire-and-forget `Process` on the mac via `/usr/bin/env`; PATH is the
-  login-shell PATH exported at install (launchd's bare PATH if that probe failed), so
+  cached login-shell PATH exported at launch (launchd's bare PATH if there's no cache yet), so
   most tools resolve by name; an absolute path is still the safe choice for anything
   exotic. For panes on **remote** hosts `{cwd}` degrades to `.` — a remote-controlled cwd
   must not steer what a local tool opens or operates on; only `pane` mode (or panes on
@@ -428,12 +444,13 @@ A terminal that runs arbitrary shells will trip every macOS privacy surface. Thr
 
 ## Known limitations
 
-- Launch applies the *cached* login-shell PATH instantly and refreshes the cache via a
-  background probe (15s bound — heavy rc inits measured at 2-4s defeat any short inline
-  probe; `ForkBootstrap.exportLoginShellPATH`). The first-ever launch has no cache, so
-  ProxyCommand-by-name hosts may stay unreachable until the background probe lands
-  (seconds). `ZmxAdapter.localZmx` no longer probes the login shell: env override → PATH →
-  the hardcoded dir list → bare `zmx` (which self-heals once the PATH refresh lands). Set
+- Launch applies the *cached* login-shell PATH instantly (pre-`ghostty_init`) and refreshes
+  the cache via a background probe (15s bound — heavy rc inits measured at 2-4s defeat any
+  short inline probe; `ForkBootstrap.refreshLoginPATHCache`). The refresh is cache-only —
+  the env is frozen once libghostty has snapshotted it — so a changed login PATH applies
+  at the *next* launch, and the first-ever launch (no cache) runs on launchd's bare PATH:
+  ProxyCommand-by-name hosts stay unreachable until a relaunch. `ZmxAdapter.localZmx` no
+  longer probes the login shell: env override → PATH → the hardcoded dir list → bare `zmx`. Set
   `GHOSTTY_FORK_ZMX=/abs/path` for an install somewhere exotic.
 - **The pane can't tell why its zmx client ended** — shell `exit`, ssh drop, detach and a
   kill from another Mac are all exit 0. So the placeholder *asks* (`zmx list` over the

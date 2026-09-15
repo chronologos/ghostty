@@ -3,7 +3,7 @@ import AppKit
 import os
 
 /// Entry point for the zmx-sidebar fork. All fork code lives under `macos/Sources/Fork/`;
-/// upstream files carry exactly two `// [fork]` seam lines that call into here.
+/// upstream files carry exactly three `// [fork]` seam lines that call into here.
 /// See `do_not_commit/ghostty-fork/SPEC.md`.
 enum ForkBootstrap {
     static let logger = Logger(subsystem: "com.mitchellh.ghostty", category: "fork")
@@ -30,14 +30,10 @@ enum ForkBootstrap {
     /// `center.delegate = self`.
     static func install(ghostty: Ghostty.App) {
         guard enabled else { return }
-        // GUI launches inherit launchd's bare PATH (/usr/bin:/bin:/usr/sbin:/sbin). Anything
-        // the fork spawns that resolves helpers by *name* — ssh ProxyCommand wrappers in
-        // ~/.ssh/config above all — fails with "command not found" unless a ControlMaster
-        // socket already happens to exist, which reads as "host unreachable" / instantly-dead
-        // panes on a cold morning. Apply last launch's cached login PATH now (instant, before
-        // the zmx probe below and any surface spawn), then refresh it in the background.
-        exportLoginShellPATH()
-        scrubZmxEnvironment()
+        // The environment itself was set up by `prepareEnvironment` (seam #3, before
+        // `ghostty_init`); from here on it is read-only. This only refreshes the cache the
+        // *next* launch will apply.
+        refreshLoginPATHCache()
         // Force `localZmx` resolution now (a few `stat`s — it no longer shells out), so the
         // resolved path is in the log next to the PATH it was resolved against.
         logger.info("fork enabled — zmx: \(ZmxAdapter.localZmx, privacy: .public)")
@@ -65,6 +61,33 @@ enum ForkBootstrap {
             SessionRegistry.shared.flushPaneExit()
             SessionRegistry.shared.saveNow()
         } }
+    }
+
+    /// Seam #3 — called from `main.swift` *before* `ghostty_init`. Every process-environment
+    /// mutation the fork makes lives here and nowhere else.
+    ///
+    /// Why this can't wait for `install`: since the Zig 0.16 port, `ghostty_init` snapshots
+    /// the C `environ` array as a slice (pointer + length — `main_c.zig`, `global.syncEnviron`)
+    /// and builds every surface's env from that snapshot. A `setenv` after the snapshot that
+    /// adds a variable reallocs the array, and one that grows a value reallocs the string, so
+    /// the snapshot dangles: `createMap` reads freed memory, fails, and `Surface.zig` falls
+    /// back to an *empty* env ("error getting env map for surface err=error.OutOfMemory").
+    /// Panes then run with `PATH=<app>/Contents/MacOS` and nothing else — `zmx attach`
+    /// survives (absolute path), while ssh panes and the detached placeholder die at exec.
+    /// Whether the freed memory still happens to read back intact is up to the allocator,
+    /// which is how this stayed latent until an OS update. So: mutate first, snapshot second,
+    /// and never `setenv`/`unsetenv` again for the life of the process.
+    static func prepareEnvironment() {
+        guard enabled else { return }
+        // GUI launches inherit launchd's bare PATH (/usr/bin:/bin:/usr/sbin:/sbin). Anything
+        // the fork spawns that resolves helpers by *name* — ssh ProxyCommand wrappers in
+        // ~/.ssh/config above all — fails with "command not found" unless a ControlMaster
+        // socket already happens to exist, which reads as "host unreachable" / instantly-dead
+        // panes on a cold morning. Apply last launch's cached login PATH now (instant, before
+        // the zmx probe in `install` and any surface spawn); `install` refreshes the cache
+        // in the background.
+        exportCachedLoginPATH()
+        scrubZmxEnvironment()
     }
 
     /// zmx reads three variables from the *client's* environment that change what the
@@ -109,21 +132,28 @@ enum ForkBootstrap {
     /// inits measured at 2-4s mean it burned its full bound at every launch *and* came back
     /// empty, silently leaving the export absent — the "cold morning unreachable" failure
     /// this function exists to prevent.
-    private static func exportLoginShellPATH() {
+    ///
+    /// Phase 1, pre-`ghostty_init` (see `prepareEnvironment`).
+    private static func exportCachedLoginPATH() {
         let launchdPATH = ProcessInfo.processInfo.environment["PATH"] ?? ""
         if let cached = UserDefaults.standard.string(forKey: cachedLoginPATHKey), cached.contains("/") {
             setenv("PATH", mergedPATH(login: cached, current: launchdPATH), 1)
         }
+    }
+
+    /// Phase 2, from `install`: cache-only. The refreshed PATH used to be `setenv`'d live as
+    /// well; that is exactly the post-snapshot mutation `prepareEnvironment` rules out (and
+    /// panes stopped seeing it once libghostty began snapshotting `environ`), so a changed
+    /// login PATH now takes effect at the next launch.
+    private static func refreshLoginPATHCache() {
+        let applied = ProcessInfo.processInfo.environment["PATH"] ?? ""
         DispatchQueue.global(qos: .utility).async {
             guard let login = loginShellPATH(timeout: 15), login.contains("/") else { return }
-            let merged = mergedPATH(login: login, current: launchdPATH)
-            // setenv on main: children snapshot env at spawn, so anything launched before
-            // the refresh lands just keeps the cached view (good enough — it was last
-            // launch's answer).
-            DispatchQueue.main.async {
-                setenv("PATH", merged, 1)
-                UserDefaults.standard.set(login, forKey: cachedLoginPATHKey)
-                logger.info("fork PATH: \(merged, privacy: .public)")
+            let stale = UserDefaults.standard.string(forKey: cachedLoginPATHKey) != login
+            UserDefaults.standard.set(login, forKey: cachedLoginPATHKey)
+            logger.info("fork PATH: \(applied, privacy: .public)")
+            if stale {
+                logger.notice("login-shell PATH changed — applies at next launch: \(login, privacy: .public)")
             }
         }
     }
