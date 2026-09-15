@@ -93,11 +93,21 @@ final class ForkWindowController: TerminalController {
     /// but if its `sh` does (^D at the prompt, SIGHUP), it must get a fresh placeholder,
     /// not a silent close. Every cycle is gated on a keypress, so there is no respawn loop
     /// to protect against; ⌘⇧W is the exit.
+    ///
+    /// The one exception: a placeholder that died the instant it was spawned never ran its
+    /// script at all (its `sh` couldn't exec — a broken pane env). Its replacement would die
+    /// the same way, and since any-key and ⌘W on an exited surface both land here, the pane
+    /// could then never be closed. That one is not replaced: the caller falls through to
+    /// its dead-leaf path, which drops the pane like a Detach (the session is untouched).
     private func makeDetachedPlaceholder(for dead: Ghostty.SurfaceView) -> Ghostty.SurfaceView? {
         guard dead.processExited,
               let ref = registry.refs[dead.id],
               let host = registry.host(id: ref.hostID),
               let app = ghostty.app else { return nil }
+        if stillborn.contains(dead.id) {
+            ForkBootstrap.logger.error("placeholder for \(ref.name, privacy: .public) died at spawn — not respawning")
+            return nil
+        }
         let owner = registry.tabs.lazy.first { $0.tree.leafRefs.contains(ref) }
         var cfg = Ghostty.SurfaceConfiguration()
         cfg.command = ZmxAdapter.detachedScript(host: host, ref: ref,
@@ -105,6 +115,13 @@ final class ForkWindowController: TerminalController {
                                                 ccName: owner?.ccNames[ref.key])
         let placeholder = Ghostty.SurfaceView(app, baseConfig: cfg)
         placeholders.insert(placeholder.id)
+        // Checked a beat after spawn rather than timed at close: an instant death parks the
+        // surface on upstream's "press any key" bar, so the close can come minutes later.
+        // A healthy script is sitting in `read` by now (or in the attach ⏎ started).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self, weak placeholder] in
+            guard let self, let placeholder, placeholder.processExited else { return }
+            self.stillborn.insert(placeholder.id)
+        }
         // Tear the dead surface down BEFORE binding its replacement: with the placeholder
         // already bound to the same ref, `isLastSurface` sees a sibling, the `.detached`
         // phase-reset never fires, and a pane that died mid-turn keeps a wedged `.working`
@@ -120,6 +137,10 @@ final class ForkWindowController: TerminalController {
     /// Surfaces that were created as detached placeholders (they *become* the live pane on
     /// ⏎, so membership alone doesn't mean "currently detached" — pair it with liveness).
     private var placeholders: Set<UUID> = []
+
+    /// Placeholders found already exited a second after they were spawned — the script
+    /// never ran. `makeDetachedPlaceholder` won't replace these.
+    private var stillborn: Set<UUID> = []
 
     /// Placeholder panes on this host that are sitting at their prompt while the session
     /// is still running — what a VPN flap or a wake-from-sleep leaves behind. Only
@@ -190,7 +211,8 @@ final class ForkWindowController: TerminalController {
             } catch {}
         }
 
-        // An unbound dead leaf (Kill unbinds first; externals) — close silently. PR23 dropped the
+        // An unbound dead leaf (Kill unbinds first; externals), or a stillborn placeholder
+        // `makeDetachedPlaceholder` declined to replace — close silently. PR23 dropped the
         // `withConfirmation` gate on the branches below, so without this a background
         // pty death would pop the Detach/Kill sheet for an already-exited process.
         // Root case must route to `closeForkTab` — `super` on root → `closeWindow(nil)`.
