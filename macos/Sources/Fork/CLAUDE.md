@@ -127,18 +127,34 @@ Fork/
                                via UserDefaults ForkSidebarWidth; ⌘⇧B hide/show restores it)
     SidebarView.swift          host sections (drag-reorder); per-pane rows show paneLabel ›
                                surface.title › ref.name; optional tab-title heading + collapse
-                               chevron; ⌘I/⌘⇧I → inline rename; tag pills; single density (no
+                               chevron; ⌘I/⌘⇧I → inline rename; one layout rule per side —
+                               the leading gutter is *identity* (a multi-pane tab's panes hang
+                               on one plain string, a pane's tag is a filled bead threaded on
+                               it at the title line; the tag's name slides in as a sticker on
+                               hover only), the trailing edge is *state* (rail, liveness cue,
+                               watch) — so a red tag can't read as an alarm; single density (no
                                compact toggle): unread CC status text is bright + up to 3
                                lines, read text (exit-stamped ccSeenDetail) demotes to one
-                               tertiary line; solo ⌥-hold ≥0.5s reveals all (and pops the
+                               tertiary line; a CC name that only repeats the row's title is
+                               dropped; a row CC has nothing to say about shows the session's
+                               where-line instead (`SessionNameLabel.whereLine`: daemon cwd ·
+                               creating cmd), and with neither there is no second line;
+                               solo ⌥-hold ≥0.5s reveals all (and pops the
                                cheatsheet — one peek, one threshold), ⌥⌥ marks all
-                               read; recency = afterglow wash (<15m) + doze opacity (>1h /
-                               past focus cutoff; never on unread/blocked rows) + the peek
-                               ledger's age line; resting the cursor on a row ≥ Theme.peekDelay
+                               read; the focused row is a *shape* — neutral lift
+                               (`ForkTokens.focusedRow`) + clay leading bar + medium-weight
+                               title — so the only clay fill is the afterglow trail, which is
+                               rank-based (`SessionRegistry.trailRanks`: the 3 panes you were
+                               in before this one, within the hour; an age bucket lit every
+                               row passed while cycling); recency otherwise = doze opacity
+                               (>1h / past focus cutoff; never on unread/blocked rows) + the
+                               peek ledger's age line; resting the cursor on a row ≥ Theme.peekDelay
                                exhales it open into the PanePeek ledger (state+age / DIR / ZMX
                                lines + un-clamped status text — replaced the row tooltip);
-                               focus mode wraps each tab
-                               in a ForkCard with a ⌘N + HostDot + host-label caption row
+                               focus mode wraps each tab in a ForkCard whose ⌘N + pin … HostDot
+                               + host-label caption rides on the tab's heading line (a headless
+                               tab keeps a caption row of its own — its only tab-level
+                               right-click target)
     OptionGesture.swift        OptionGestureRecognizer — the *only* ⌥-hold / ⌥⌥ recognizer
                                (extracted ViewModifier; SidebarView binds revealAll/onPeek/
                                onSweep). Solo-⌥ 0.5s peek drives the sidebar reveal and the
