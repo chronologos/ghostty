@@ -67,6 +67,14 @@ struct ForkTokens: Equatable {
         return hostColor(ForkHost.pair(h.slot).a)
     }
 
+    /// The focused sidebar row's background: a *neutral* lift, a step above `hover`, in the
+    /// text color rather than clay. The sidebar's clay fill belongs to the afterglow trail
+    /// alone (`Theme.afterglow(rank:)`); the focused row says "here" with this lift, a clay
+    /// leading bar and a heavier title — a different shape, not a stronger shade of the same
+    /// wash. (`selectedRow` stays clay for list selection in the palettes and pickers, where
+    /// there is no trail to collide with.)
+    var focusedRow: Color { text.opacity(0.09) }
+
     /// Spine heat — recency as a fade on the de-emphasized text color. `nil` is *ancient*
     /// (the opposite default from `Theme.doze`, which treats never-touched as awake).
     func spineHeat(_ d: Date?) -> Color {
