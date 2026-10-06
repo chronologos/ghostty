@@ -35,6 +35,11 @@ GHOSTTY_FORK=1 open macos/build/Debug/Ghostty.app
 cd macos && xcodebuild test -scheme Ghostty -destination 'platform=macOS' \
   -only-testing:GhosttyTests/TransportTests
 
+# Look at the sidebar without quitting the running app: renders the real SidebarView
+# offscreen over a seeded registry (3 themes, focus mode, the narrow floor, every lamp)
+cd macos && TEST_RUNNER_FORK_SNAPSHOT_DIR=/tmp/shots xcodebuild test -scheme Ghostty \
+  -destination 'platform=macOS' -only-testing:GhosttyTests/SidebarSnapshotTests
+
 # Seam + symbol invariants — run after every rebase
 ./scripts/fork-check.sh
 
@@ -125,36 +130,57 @@ Fork/
                                presentation; ⌘W Detach/Kill routing; kill verification;
                                sidebar width = drag the right edge (248pt floor, persisted
                                via UserDefaults ForkSidebarWidth; ⌘⇧B hide/show restores it)
-    SidebarView.swift          host sections (drag-reorder); per-pane rows show paneLabel ›
+    SidebarView.swift          flat, opaque, cut-cornered: nothing in it is translucent, so every
+                               state is a *shape* or a *color role*, never an alpha. Sits on
+                               the terminal's own background (`ForkTokens.ground`), divided
+                               from the grid by a rule. One module per host (drag-reorder): a
+                               `Chamfer` frame holding a title strip (host square · NAME · hatch
+                               filler · ⌘⌥N; click = collapse, no chevron — and nothing on it
+                               that needs explaining: an "H-01" index and a bare tab count were
+                               tried and cut) and the rows; a host with no live surface gets the quiet frame.
+                               Hairline between tabs, none between one tab's panes — the rule
+                               *is* the grouping. Per-pane rows show paneLabel ›
                                surface.title › ref.name; optional tab-title heading + collapse
                                chevron; ⌘I/⌘⇧I → inline rename; one layout rule per side —
-                               the leading gutter is *identity* (a multi-pane tab's panes hang
-                               on one plain string, a pane's tag is a filled bead threaded on
-                               it at the title line; the tag's name slides in as a sticker on
-                               hover only), the trailing edge is *state* (rail, liveness cue,
-                               watch) — so a red tag can't read as an alarm; single density (no
+                               the leading gutter is *identity* (the tag, a filled
+                               square at the title line, its name sliding in on hover only),
+                               the trailing edge is *state* (`Lamp`s)
+                               — so a red tag can't read as an alarm. `Lamp` is the one state
+                               carrier (rows, collapsed headers, host strip, footer): filled =
+                               wants your eyes (red blocked, bright finished), outline = armed
+                               or in progress (filling = working, dot = watched, red =
+                               not responding), gray = nobody home (bars = detached, hatch =
+                               ended). Kinds differ in shape, never hue alone — on a black- or
+                               white-text theme `text` == `bright`. Every row has one, lit or
+                               not; watched gets its own lamp beside the main one because it
+                               coexists with working. Blocked is steady, not blinking, and its
+                               question is bright, not red (several at once = wall of alarm).
+                               Single density (no
                                compact toggle): unread CC status text is bright + up to 3
                                lines, read text (exit-stamped ccSeenDetail) demotes to one
-                               tertiary line; a CC name that only repeats the row's title is
+                               inactive line; a CC name that only repeats the row's title is
                                dropped; a row CC has nothing to say about shows the session's
                                where-line instead (`SessionNameLabel.whereLine`: daemon cwd ·
                                creating cmd), and with neither there is no second line;
                                solo ⌥-hold ≥0.5s reveals all (and pops the
                                cheatsheet — one peek, one threshold), ⌥⌥ marks all
-                               read; the focused row is a *shape* — neutral lift
-                               (`ForkTokens.focusedRow`) + clay leading bar + medium-weight
-                               title — so the only clay fill is the afterglow trail, which is
-                               rank-based (`SessionRegistry.trailRanks`: the 3 panes you were
-                               in before this one, within the hour; an age bucket lit every
-                               row passed while cycling); recency otherwise = doze opacity
-                               (>1h / past focus cutoff; never on unread/blocked rows) + the
+                               read; the focused row is a *shape* — bright cut-corner outline +
+                               bold bright title (hover = the same outline in the rule color);
+                               recency = sleep (text goes
+                               `inactive` past the focus cutoff; never on unread/blocked rows) + the
                                peek ledger's age line; resting the cursor on a row ≥ Theme.peekDelay
                                exhales it open into the PanePeek ledger (state+age / DIR / ZMX
                                lines + un-clamped status text — replaced the row tooltip);
                                focus mode wraps each tab in a ForkCard whose ⌘N + pin … HostDot
                                + host-label caption rides on the tab's heading line (a headless
                                tab keeps a caption row of its own — its only tab-level
-                               right-click target)
+                               right-click target). Toolbar = worded keys (`KeyCap`), on =
+                               inverse video. Footer = the lamps' legend and the fleet's tally
+                               (blocked / done / busy / off), always on screen; zero = unlit;
+                               drops its words at the narrow floor (`ViewThatFits`). Hidden
+                               sidebar (⌘⇧B / HIDE) leaves one `SidebarRevealKey` ("SHOW") where
+                               the toolbar's first key was.
+                               `polls: false` is for offscreen renders only
     OptionGesture.swift        OptionGestureRecognizer — the *only* ⌥-hold / ⌥⌥ recognizer
                                (extracted ViewModifier; SidebarView binds revealAll/onPeek/
                                onSweep). Solo-⌥ 0.5s peek drives the sidebar reveal and the
@@ -164,12 +190,19 @@ Fork/
                                nearest hue so a slot keeps its color, or the wheel if the
                                theme can't make a legible one) + the `\.forkTokens` env key
                                + ForkThemed, the one
-                               place ForkTheme is observed. `resolve` declines a theme when
+                               place ForkTheme is observed. Two families: the alpha-based
+                               roles the palette/sheets/pickers still use over a material, and
+                               the sidebar's four flat ones — `ground` (= bg), `rule` (bg→fg
+                               at 0.4: the FF→66 ratio, so a flat primary lands on its dark
+                               partner exactly), `inactive` (neutral gray: losing the hue is
+                               what says "not live"), `bright` (white/black by polarity).
+                               `resolve` declines a theme when
                                Increase Contrast is on or the bg's polarity fights the
                                window appearance the material is drawn from
-    Theme.swift                theme-*independent* tokens (clay/blocked/error/…), peek
-                               tokens (peekRule/peekDelay/exhale/settle), Pebble, HandCut,
-                               ForkCard
+    Theme.swift                theme-*independent* tokens (clay/blocked/error/…), recency rule
+                               (asleep), peek
+                               tokens (peekRule/peekDelay/exhale/settle), shapes: Chamfer + Hatch
+                               (sidebar), Pebble + HandCut (palette, sheets), ForkCard
     TagEditView.swift          tag popover (text + 8 hue swatches); opened from the pane
                                context menu's Tag submenu ("New Tag…")
     NewSessionView.swift       two-stage new-session palette (⌘T / ⌘⇧T / sidebar ＋ /
@@ -417,7 +450,7 @@ these five exercise the upstream contracts the fork leans on hardest):
 4. ⌘W on one pane of a multi-pane tab → per-pane Detach/Kill sheet; ⌘W on the last pane →
    tab-level sheet (close-routing contract — upstream is actively refactoring its close
    path, and a reroute leaves ⌘W closing the window with no sheet).
-5. Run a long command (or a CC turn) → rail goes working → settles → banner fires → dock
+5. Run a long command (or a CC turn) → lamp fills (working) → settles → banner fires → dock
    badge counts it (progressReport / `progress-style` gate / UN / badge contracts in one
    pass — all of these break silently).
 

@@ -18,7 +18,20 @@ struct ForkTokens: Equatable {
     var chipBg: Color
     var cardBorder: Color
     var selectedRow: Color
-    var hostCardBg: Color
+
+    // MARK: Sidebar — flat roles. Every one is opaque: the sidebar sits on `ground`, so a
+    // translucent color would only be a slower way to write a mix, and it would stop being
+    // the same color the moment two of them overlapped.
+    /// The sidebar's backdrop: the terminal's own background, so sidebar and grid are one
+    /// surface divided by a rule rather than a panel bolted on beside it.
+    var ground: Color
+    /// Quiet hairlines (between tabs, unlit lamps, the sidebar's edge). `text` is the loud one.
+    var rule: Color
+    /// Read, asleep, detached, ended: a neutral gray, not a dimmer `text` — losing the hue is
+    /// what says "not live".
+    var inactive: Color
+    /// The one step above `text`: the focused row, unread status text, a finished lamp.
+    var bright: Color
 
     /// The un-themed ramp — used until a config lands, and for any theme whose own colors
     /// can't produce a legible one (see ``ForkTheme/hostRamp(from:)``). Lives here rather than
@@ -50,8 +63,10 @@ struct ForkTokens: Equatable {
         cardBorder: Color.secondary.opacity(0.15),
         selectedRow: Theme.appearanceAdaptive(light: NSColor(Theme.clay).withAlphaComponent(0.20),
                                               dark: NSColor(Theme.clay).withAlphaComponent(0.14)),
-        hostCardBg: Theme.appearanceAdaptive(light: .controlBackgroundColor.withAlphaComponent(0.6),
-                                             dark: .black.withAlphaComponent(0.18)),
+        ground: Color(nsColor: .windowBackgroundColor),
+        rule: Color(nsColor: .separatorColor),
+        inactive: .secondary,
+        bright: .primary,
         hostRamp: Self.wheel)
 
     // MARK: Derived roles
@@ -65,23 +80,6 @@ struct ForkTokens: Equatable {
     func hostAccent(_ h: ForkHost?) -> Color {
         guard let h else { return textSecondary }
         return hostColor(ForkHost.pair(h.slot).a)
-    }
-
-    /// The focused sidebar row's background: a *neutral* lift, a step above `hover`, in the
-    /// text color rather than clay. The sidebar's clay fill belongs to the afterglow trail
-    /// alone (`Theme.afterglow(rank:)`); the focused row says "here" with this lift, a clay
-    /// leading bar and a heavier title — a different shape, not a stronger shade of the same
-    /// wash. (`selectedRow` stays clay for list selection in the palettes and pickers, where
-    /// there is no trail to collide with.)
-    var focusedRow: Color { text.opacity(0.09) }
-
-    /// Spine heat — recency as a fade on the de-emphasized text color. `nil` is *ancient*
-    /// (the opposite default from `Theme.doze`, which treats never-touched as awake).
-    func spineHeat(_ d: Date?) -> Color {
-        let age = d.map { Date().timeIntervalSince($0) } ?? .infinity
-        return age < 300 ? textSecondary
-             : age < 3600 ? textSecondary.opacity(0.6)
-             : textSecondary.opacity(0.35)
     }
 }
 
@@ -102,7 +100,7 @@ extension EnvironmentValues {
 ///
 /// It resolves the palette here, rather than in ``ForkTheme``, because two of the three inputs
 /// are properties of *this view's* window, not of the app: `colorScheme` is the hosting view's
-/// own `NSAppearance` — the thing that actually colors the material behind the sidebar — and
+/// own `NSAppearance` — the thing that actually colors the material behind a fork view — and
 /// `colorSchemeContrast` is Increase Contrast. Reading them as environment values means
 /// SwiftUI re-runs this body when either moves, so no `NSApp` KVO or workspace notification is
 /// needed, and the polarity test can't be answered with some other window's appearance.
@@ -180,8 +178,8 @@ final class ForkTheme: ObservableObject {
     /// 2. **Increase Contrast is on.** A user who asked the OS for maximum contrast is asking
     ///    us not to art-direct their chrome; system label colors are what respond to that
     ///    setting, and a frozen `fg.opacity(0.3)` is what doesn't.
-    /// 3. **The background's polarity disagrees with the appearance.** The sidebar's backdrop
-    ///    is `.ultraThinMaterial`, whose scrim comes from the window's `NSAppearance` — so a
+    /// 3. **The background's polarity disagrees with the appearance.** The palette's and the
+    ///    sheets' backdrop is a material, whose scrim comes from the window's `NSAppearance` — so a
     ///    foreground borrowed from a background of the *other* polarity would be painted onto
     ///    a surface it was never guaranteed to contrast against.
     ///
@@ -215,10 +213,13 @@ final class ForkTheme: ObservableObject {
             cardBorder: c.opacity(0.08),  // secondaryLabelColor 0.549 × 0.15 (dark; 0.075 light)
             selectedRow: Color(nsColor: NSColor(Theme.clay)
                 .withAlphaComponent(isLight ? 0.20 : 0.14)),
-            // The terminal background, washed over the material. Alpha differs by polarity
-            // because the material underneath is not neutral: a dark background only has to
-            // deepen it, a light one has to lift it much harder to read as raised at all.
-            hostCardBg: Color(nsColor: bg).opacity(isLight ? 0.6 : 0.18),
+            ground: Color(nsColor: bg),
+            // 40% of the way from the background to the foreground. Not a taste number: it is
+            // the ratio between a saturated primary and its dark partner (FF → 66), so on a
+            // flat primary theme the rule lands exactly on that partner.
+            rule: Color(nsColor: bg.mixed(0.4, toward: fg)),
+            inactive: Color(white: isLight ? 0.4 : 0.6),
+            bright: isLight ? .black : .white,
             hostRamp: hostRamp(from: palette))
     }
 
@@ -320,6 +321,15 @@ final class ForkTheme: ObservableObject {
 }
 
 extension NSColor {
+    /// Plain per-component mix in sRGB. Not `blended(withFraction:of:)`, which goes through
+    /// calibrated RGB and comes back a shade off — this has to land on exact values.
+    func mixed(_ t: CGFloat, toward other: NSColor) -> NSColor {
+        guard let a = usingColorSpace(.sRGB), let b = other.usingColorSpace(.sRGB) else { return other }
+        func m(_ x: CGFloat, _ y: CGFloat) -> CGFloat { x + (y - x) * t }
+        return NSColor(srgbRed: m(a.redComponent, b.redComponent), green: m(a.greenComponent, b.greenComponent),
+                       blue: m(a.blueComponent, b.blueComponent), alpha: 1)
+    }
+
     /// HSB components, converted to sRGB first. `hueComponent` &c. trap on a color whose space
     /// isn't RGB-backed, and these run over whatever the user's theme file contained.
     var hsbSafe: (h: CGFloat, s: CGFloat, b: CGFloat) {

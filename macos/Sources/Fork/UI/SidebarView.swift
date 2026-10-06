@@ -8,6 +8,9 @@ struct SidebarView: View {
     @Environment(\.forkTokens) private var tokens
 
     weak var controller: ForkWindowController?
+    /// Off only for offscreen renders (`SidebarSnapshotTests`): mounting the view must not be
+    /// what starts `zmx list` and ssh against whatever hosts the registry was seeded with.
+    var polls = true
     @EnvironmentObject private var registry: SessionRegistry
     @State private var renameText: String = ""
     @State private var draggingTab: TabModel.ID?
@@ -34,34 +37,28 @@ struct SidebarView: View {
     private var recentTags: ArraySlice<PaneTag> { registry.recentTags.prefix(5) }
 
     // MARK: Row gutter geometry
-    // One layout rule per side: the *leading* gutter is identity (which tab's panes hang
-    // together, which tag a pane wears), the *trailing* edge is state (rail, liveness cue,
-    // watch). Left to right inside the gutter: the focused row's clay bar (0–2.5), the tab's
-    // string with tag beads threaded on it (centred on `stringX`), then the title. The
-    // heading's chevron column and the focus caption's indent are this same width, so chips,
-    // chevrons and titles share one left edge.
-    static let gutter: CGFloat = 14
-    /// Centre line of the string and its beads — clear of the 2.5pt focus bar on one side
-    /// and the title on the other.
-    static let stringX: CGFloat = 8
+    // One layout rule per side: the *leading* gutter is identity (which tag a pane
+    // wears), the *trailing* edge is state (lamps). Which panes hang
+    // together is said by the rules instead: a hairline between tabs, none between the panes
+    // of one tab. The heading's chevron column and the focus caption's indent are this same
+    // width, so chips, chevrons and titles share one left edge.
+    static let gutter: CGFloat = 16
+    /// Centre line of the tag.
+    static let tagX: CGFloat = 8
     static let bead: CGFloat = 7
-    /// The title line's centre, measured from the row's top. A multi-line row is content-
-    /// tall, so its 13pt title (≈16pt line) sits flush at the top; a title-only row is the
-    /// 28pt minimum with the title centred in it. Same numbers the `StatusRail` has always
-    /// been placed by (top-pad 4 + 20pt tall = centred on 14).
-    static let titleCenterTop: CGFloat = 8
-    static let titleCenterSolo: CGFloat = 14
+    /// The title line's centre, measured from the top of the title block: a 14pt title is a
+    /// ≈17pt line. The tag and the lamps are both placed by it.
+    static let titleCenterTop: CGFloat = 8.5
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            Divider().padding(.horizontal, 8)
             ScrollView {
                 // Eager VStack: lazy materialisation made the overlay scroller jump
                 // because each `hostSection` is variable-height and the content-size
                 // estimate corrected on every scroll. Sidebar row counts are small
                 // enough that rendering all of them is cheaper than the instability.
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 8) {
                     if focusMode {
                         focusSection
                     } else {
@@ -70,16 +67,20 @@ struct SidebarView: View {
                         }
                     }
                 }
-                .padding(.vertical, 8)
+                .padding(.bottom, 8)
                 .background(OverlayScroller())
             }
+            footer
         }
-        .background(.ultraThinMaterial)
+        // The terminal's own background, not a material: sidebar and grid are one surface,
+        // divided by a rule.
+        .background(tokens.ground)
+        .overlay(alignment: .trailing) { tokens.rule.frame(width: 1) }
         // Polling (zmx list → aliases + reachability) starts with the sidebar regardless of
         // the CC toggle; the toggle only decides whether the loop also runs the CC probe.
         // Probe flag first so the poll's first reconcile already sees it.
-        .task { registry.setCCProbeEnabled(showCC); registry.setPolling(true) }
-        .onChange(of: showCC) { registry.setCCProbeEnabled($0) }
+        .task { if polls { registry.setCCProbeEnabled(showCC); registry.setPolling(true) } }
+        .onChange(of: showCC) { if polls { registry.setCCProbeEnabled($0) } }
         .modifier(OptionGestureRecognizer(window: { controller?.window },
                                           revealAll: $revealAll,
                                           onPeek: { controller?.setCheatsheet($0) },
@@ -101,19 +102,15 @@ struct SidebarView: View {
 
     private var header: some View {
         HStack(spacing: 4) {
-            iconButton("plus", help: "New tab") { controller?.showSessionPicker() }
-            iconButton("server.rack", help: "Hosts") { controller?.showHostsSheet() }
-            iconButton("sidebar.left", help: "Hide sidebar") { controller?.toggleSidebar() }
-            iconButton(filterTagged ? "tag.fill" : "tag",
-                       help: filterTagged ? "Show all" : "Tagged only",
-                       tint: filterTagged ? Theme.clay : nil) {
+            key("+ NEW", help: "New tab") { controller?.showSessionPicker() }
+            key("HOSTS", help: "Hosts") { controller?.showHostsSheet() }
+            key("HIDE", help: "Hide sidebar") { controller?.toggleSidebar() }
+            key("TAGS", on: filterTagged, help: filterTagged ? "Show all" : "Tagged only") {
                 withAnimation(.snappy(duration: 0.12)) { filterTagged.toggle() }
             }
-            // Not `iconButton` — macOS `Button` swallows mouseDown so `.onLongPressGesture`
-            // on it never fires. Plain Image + tap/long-press composes exclusively.
-            Image(systemName: "scope").font(.system(size: 13))
-                .foregroundStyle(focusMode ? Theme.clay : tokens.textSecondary)
-                .frame(width: 24, height: 24).contentShape(Rectangle())
+            // Not `key` — macOS `Button` swallows mouseDown so `.onLongPressGesture`
+            // on it never fires. Plain cap + tap/long-press composes exclusively.
+            KeyCap(label: "FOCUS", on: focusMode, font: mono(10))
                 .onTapGesture {
                     withAnimation(.snappy(duration: 0.12)) { focusMode.toggle() }
                 }
@@ -128,29 +125,60 @@ struct SidebarView: View {
                 }
                 .help(focusMode ? "All hosts"
                                 : "Focus (last \(Int(cutoffHours))h) — long-press to adjust")
-                .modifier(HoverHighlight())
             // "CC", matching every other surface (tooltips, cheatsheet, host sheet) — this
             // toggle was the one label spelling the name out.
-            iconButton("sparkle",
-                       help: showCC ? "Hide CC session status" : "Show CC session status",
-                       tint: showCC ? Theme.clay : nil) {
+            key("CC", on: showCC, help: showCC ? "Hide CC session status" : "Show CC session status") {
                 withAnimation(.snappy(duration: 0.12)) { showCC.toggle() }
             }
-            Spacer()
         }
-        .padding(.horizontal, 10).padding(.vertical, 6)
+        .padding(8)
     }
 
-    private func iconButton(_ icon: String, help: String, tint: Color? = nil,
-                            perform: @escaping () -> Void) -> some View {
-        Button(action: perform) {
-            Image(systemName: icon).font(.system(size: 13))
-                .foregroundStyle(tint ?? tokens.textSecondary)
-                .frame(width: 24, height: 24)
-                .contentShape(Rectangle())
+    /// A toolbar key. Words rather than symbols: six glyphs had to be learned, and a toggle's
+    /// "on" was a tint. Here on is inverse video.
+    private func key(_ label: String, on: Bool = false, help: String,
+                     perform: @escaping () -> Void) -> some View {
+        Button(action: perform) { KeyCap(label: label, on: on, font: mono(10)) }
+            .buttonStyle(.plain)
+            .help(help)
+    }
+
+    // MARK: Footer — the lamps' legend, which is also the fleet's tally: the rows scroll, this
+    // doesn't, so "is anything waiting on me" has an answer that is always on screen.
+
+    private var footer: some View {
+        // A Set: the same session can be attached in two tabs, and it is one session.
+        let refs = Set(registry.tabs.flatMap(\.tree.leafRefs))
+        func count(_ s: PaneState) -> Int { refs.lazy.filter { registry.dot(ref: $0) == s }.count }
+        let off = registry.hosts.reduce(0) {
+            $0 + (controller?.detachedPlaceholders(on: $1.id).count ?? 0)
         }
-        .buttonStyle(.plain)
-        .modifier(HoverHighlight())
+        func row(words: Bool) -> some View {
+            HStack(spacing: 0) {
+                tally(.blocked, words ? "BLOCKED" : nil, count(.blocked), help: PaneState.blocked.help)
+                Spacer(minLength: 8)
+                tally(.finished, words ? "DONE" : nil, count(.waiting), help: PaneState.waiting.help)
+                Spacer(minLength: 8)
+                tally(.working, words ? "BUSY" : nil, count(.working), help: PaneState.working.help)
+                Spacer(minLength: 8)
+                tally(.detached, words ? "OFF" : nil, off, help: "Detached — sessions still running")
+            }
+        }
+        // At the sidebar's narrow floor the words don't fit; a truncated "BLOCKED…" is worse
+        // than none, and the lamps are the same ones the rows wear.
+        return ViewThatFits(in: .horizontal) { row(words: true); row(words: false) }
+        .padding(.horizontal, 10).padding(.vertical, 7)
+        .overlay(alignment: .top) { tokens.rule.frame(height: 1) }
+    }
+
+    /// Zero is an unlit lamp: a red square that is always lit beside "BLOCKED 0" is a false
+    /// alarm, however useful as a legend.
+    private func tally(_ kind: Lamp.Kind, _ word: String?, _ n: Int, help: String) -> some View {
+        HStack(spacing: 5) {
+            Lamp(n > 0 ? kind : .unlit)
+            Text(word.map { "\($0) \(n)" } ?? "\(n)").font(mono(10)).kerning(0.5).fixedSize()
+                .foregroundStyle(n > 0 ? tokens.text : tokens.inactive)
+        }
         .help(help)
     }
 
@@ -163,11 +191,11 @@ struct SidebarView: View {
         let tabs = focusTabs
         // Own VStack so `.animation(value:)` sees the row positions it lays out;
         // attaching to the outer body VStack would also animate host-mode reflow.
-        return VStack(alignment: .leading, spacing: 4) {
+        return VStack(alignment: .leading, spacing: 6) {
             if tabs.isEmpty {
                 Label(filterTagged ? "No tagged panes" : "Nothing in the last \(Int(cutoffHours))h",
                       systemImage: filterTagged ? "tag.slash" : "moon.zzz")
-                    .font(mono(12)).foregroundStyle(tokens.textSecondary)
+                    .font(mono(13)).foregroundStyle(tokens.inactive)
                     .padding(.horizontal, 16).padding(.top, 12)
             } else {
                 ForEach(Array(tabs.enumerated()), id: \.element.id) { i, tab in
@@ -188,7 +216,7 @@ struct SidebarView: View {
                             }
                             // Same insets as `tabHeading` and the rows: gutter on the left,
                             // the state-rail column on the right.
-                            .padding(.leading, Self.gutter).padding(.trailing, 12)
+                            .padding(.leading, Self.gutter).padding(.trailing, 8)
                             .contentShape(Rectangle())
                             .contextMenu { tabContextMenu(tab) }
                         }
@@ -213,13 +241,14 @@ struct SidebarView: View {
 
     /// Focus-mode card caption, trailing half: which host this card lives on. The dot holds
     /// its size; the label gives way first when a long heading needs the room (the heading is
-    /// already tinted in the host's accent, so the name is the most redundant thing on the line).
+    /// right there, and the square still says which host, so the name is the most redundant thing
+    /// on the line).
     @ViewBuilder
     private func focusCaptionHost(_ tab: TabModel) -> some View {
         let host = registry.host(id: tab.hostID)
-        HostDot(host: host, size: 7)
+        HostDot(host: host, size: 7, square: true)
         Text(host?.label ?? "—")
-            .font(mono(10)).foregroundStyle(tokens.textSecondary).lineLimit(1)
+            .font(mono(11)).foregroundStyle(tokens.inactive).lineLimit(1)
     }
 
     /// Does this tab draw a `tabHeading`? Only when its title says more than its first
@@ -236,27 +265,15 @@ struct SidebarView: View {
         }
     }
 
-    /// Worst-child rollup for collapsed headers — compact dot/spinner; the per-row indicator
-    /// is `StatusRail` (right-edge anchored, doesn't fit inline here).
-    /// Same encoding as the rail: stroked = finished-unread, solid red = blocked, motion =
-    /// working. (A *solid* accent dot for waiting inverted the rail's solid-means-working.)
+    /// Worst-child rollup for collapsed headers — the same `Lamp` the rows wear, so there is
+    /// one encoding to learn (the old inline dot had to re-state the rail's in a second shape).
     @ViewBuilder
-    private func stateDot(_ s: PaneState?, accent: Color) -> some View {
-        switch s {
-        case .blocked: Circle().fill(Theme.blocked).frame(width: 6, height: 6).help(PaneState.blocked.help)
-        case .waiting:
-            Circle().strokeBorder(accent, lineWidth: 1)
-                .frame(width: 6, height: 6).help(PaneState.waiting.help)
-        case .working: ProgressView().controlSize(.mini).scaleEffect(0.6)
-        case nil: EmptyView()
-        }
+    private func stateLamp(_ s: PaneState?) -> some View {
+        if let s { Lamp(s).help(s.help) }
     }
 
     private func keyHint(_ chord: String) -> some View {
-        Text(chord)
-            .font(mono(9, .semibold)).foregroundStyle(tokens.textSecondary)
-            .padding(.horizontal, 4).padding(.vertical, 1)
-            .background(tokens.chipBg, in: RoundedRectangle(cornerRadius: 3))
+        Text(chord).font(mono(10, .semibold)).foregroundStyle(tokens.text)
     }
 
     // MARK: Host section
@@ -268,38 +285,45 @@ struct SidebarView: View {
         // Filter-on + no tagged tabs on this host → hide the whole section so the
         // sidebar isn't cluttered with empty host cards.
         if !(filterTagged && tabs.isEmpty) {
-            hostHeader(host, tabs: tabs)
-            if host.expanded {
-                if !tabs.isEmpty {
-                    hostBody(tabs: tabs)
-                } else {
-                    // Expanded host, zero tabs: without this the chevron rotates and nothing
-                    // appears — the section reads as broken rather than empty.
-                    Text("No sessions — right-click the host to create one")
-                        .font(mono(10)).foregroundStyle(tokens.textTertiary)
-                        .padding(.horizontal, 26).padding(.vertical, 2)
+            // One module per host: a cut-corner frame holding a title strip and the rows. A
+            // host with no live surface gets the quiet line — the frame is the host's lamp.
+            let line = registry.isConnected(host.id) ? tokens.text : tokens.rule
+            VStack(alignment: .leading, spacing: 0) {
+                hostHeader(host, tabs: tabs)
+                if host.expanded {
+                    line.frame(height: 1)
+                    if !tabs.isEmpty {
+                        hostBody(tabs: tabs)
+                    } else {
+                        // Expanded host, zero tabs: without this the module opens onto nothing
+                        // and the section reads as broken rather than empty.
+                        Text("No sessions — right-click the host to create one")
+                            .font(mono(11)).foregroundStyle(tokens.inactive)
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                    }
                 }
             }
+            .clipShape(Chamfer())
+            .overlay(Chamfer().strokeBorder(line, lineWidth: 1))
+            .padding(.horizontal, 8)
         }
     }
 
     private func hostHeader(_ host: ForkHost, tabs: [TabModel]) -> some View {
         let connected = registry.isConnected(host.id)
+        let index = registry.hosts.firstIndex { $0.id == host.id }
         return Button {
             withAnimation(.snappy(duration: 0.15)) { registry.setExpanded(host.id, !host.expanded) }
         } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(tokens.textSecondary)
-                    .rotationEffect(.degrees(host.expanded ? 90 : 0))
-                    .frame(width: 10)
-                HostDot(host: host, size: 10)
-                    .opacity(connected ? 1 : 0.3)
-                    .frame(width: 14)
-                Text(host.label)
-                    .font(mono(13, .medium))
-                    .foregroundStyle(connected ? tokens.text : tokens.textSecondary)
+            HStack(spacing: 6) {
+                // No chevron: a collapsed module is a strip with nothing under it. And nothing
+                // on the strip that has to be explained: it once led with a part-number-style
+                // "H-01" and ended with a bare tab count, and neither said what it was.
+                HostDot(host: host, size: 8, square: true)
+                Text(host.label.uppercased())
+                    .font(mono(11, .bold)).kerning(1).lineLimit(1)
+                    .foregroundStyle(connected ? tokens.text : tokens.inactive)
+                    .layoutPriority(1)
                 if let since = registry.hostUnreachableSince[host.id] {
                     // Transport-level cue (zmx list failing), distinct from the dot's
                     // "no live surface" dimming — without it, hours-old CC status on a
@@ -307,40 +331,37 @@ struct SidebarView: View {
                     // The reason matters: "zmx list timed out" (a few sessions not answering)
                     // and "ssh couldn't connect" send the user to different places.
                     let why = registry.hostUnreachableWhy[host.id].map { " — \($0)" } ?? ""
-                    Image(systemName: "wifi.slash")
-                        .font(.system(size: 9)).foregroundStyle(tokens.textSecondary)
+                    Lamp(.unresponsive)
                         .help("No answer since \(since.formatted(date: .omitted, time: .shortened))\(why). Status shown may be stale.")
                 } else if let n = controller?.detachedPlaceholders(on: host.id).count, n > 0 {
                     // After a VPN flap / wake every ssh pane here is sitting at its reattach
                     // prompt while the sessions are fine — say so without making the user
                     // click through tabs to find out. The action is in the context menu.
-                    HStack(spacing: 2) {
-                        Image(systemName: "pause.circle").font(.system(size: 9))
-                        Text("\(n)").font(mono(9, .semibold))
+                    HStack(spacing: 3) {
+                        Lamp(.detached)
+                        Text("\(n)").font(mono(10, .semibold))
                     }
-                    .foregroundStyle(tokens.textSecondary)
+                    .foregroundStyle(tokens.inactive)
                     .help("\(n) pane\(n == 1 ? "" : "s") detached — sessions still running. Right-click → Reattach.")
                 }
-                Spacer()
+                // The filler gives way first: a long host name or a narrow sidebar squeezes it
+                // to nothing before anything that says something.
+                Hatch().stroke(connected ? tokens.text : tokens.rule, lineWidth: 1)
+                    .frame(minWidth: 0, maxWidth: .infinity).frame(height: 8).clipped()
                 if !host.expanded {
-                    // Roll up over the same filtered set the rows render (and the count
-                    // shows) — with the tag filter on, a hidden untagged tab's state must
-                    // not drive a dot that points at something the user can't see.
-                    stateDot(tabs.lazy.compactMap { registry.rollup(tab: $0) }.max(),
-                             accent: tokens.hostAccent(host))
-                        .padding(.trailing, 6)
+                    // Roll up over the same filtered set the rows render — with the tag filter on, a hidden untagged tab's state must
+                    // not drive a lamp that points at something the user can't see.
+                    stateLamp(tabs.lazy.compactMap { registry.rollup(tab: $0) }.max())
                 }
-                if let i = registry.hosts.firstIndex(where: { $0.id == host.id }), i < 9 {
-                    keyHint("⌘⌥\(i + 1)")
+                if let index, index < 9 {
+                    keyHint("⌘⌥\(index + 1)")
                 }
-                Text("\(tabs.count)").font(mono(11)).foregroundStyle(tokens.textSecondary)
             }
-            .padding(.horizontal, 4).padding(.vertical, 6)
+            .padding(.horizontal, 10).frame(height: 24)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .modifier(HoverHighlight())
-        .padding(.horizontal, 8)
         .onDrag {
             draggingTab = nil; draggingHost = host.id
             return NSItemProvider(object: host.id as NSString)
@@ -369,10 +390,16 @@ struct SidebarView: View {
     private func hostBody(tabs: [TabModel]) -> some View {
         // Normal mode is positional — the row's visual index *is* the ⌘N index — so per-tab
         // digit hints are dropped here; ⌘⌥N on the host header is the non-obvious one.
-        VStack(alignment: .leading, spacing: 2) {
-            ForEach(tabs) { tab in tabRow(tab) }
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(tabs.enumerated()), id: \.element.id) { i, tab in
+                // The rule is the grouping: between tabs, never between one tab's panes.
+                VStack(alignment: .leading, spacing: 0) {
+                    if i > 0 { tokens.rule.frame(height: 1) }
+                    tabRow(tab)
+                }
+            }
         }
-        .modifier(ForkCard(fill: tokens.hostCardBg, hPad: 8))
+        .padding(4)
         .transition(.opacity)
     }
 
@@ -403,7 +430,6 @@ struct SidebarView: View {
                     // would mis-pair duplicate-ref tabs (PR26) permanently.
                     paneRow(tab, index: i, ref: ref,
                             surface: i < surfaces.count ? surfaces[i] : nil,
-                            spine: allRefs.count > 1 ? (i == 0, i == allRefs.count - 1) : nil,
                             active: active)
                 }
             }
@@ -418,7 +444,6 @@ struct SidebarView: View {
 
     private func tabHeading(_ tab: TabModel, renaming: Bool, active: Bool,
                             paneCount: Int, focusIndex: Int? = nil) -> some View {
-        let accent = tokens.hostAccent(registry.host(id: tab.hostID))
         let toggle = {
             withAnimation(.snappy(duration: 0.15)) {
                 registry.setCollapsed(tab.id, !tab.collapsed)
@@ -427,9 +452,9 @@ struct SidebarView: View {
         return HStack(spacing: 0) {
             Button(action: toggle) {
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 9, weight: .semibold)).foregroundStyle(tokens.textSecondary)
+                    .font(.system(size: 9, weight: .semibold)).foregroundStyle(tokens.inactive)
                     .rotationEffect(.degrees(tab.collapsed ? 0 : 90))
-                    .frame(width: 14, height: 20, alignment: .leading)
+                    .frame(width: Self.gutter, height: 18, alignment: .leading)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -440,27 +465,27 @@ struct SidebarView: View {
                     .padding(.trailing, 6)
             }
             if renaming {
-                renameField(seed: tab.title, font: mono(11, .semibold))
+                renameField(seed: tab.title, font: mono(12, .semibold))
             } else {
                 Text(tab.title.uppercased())
-                    .font(mono(10, .semibold)).kerning(0.6).lineLimit(1)
-                    .foregroundStyle(accent.opacity(active ? 1 : 0.6))
+                    .font(mono(10, .semibold)).kerning(1.2).lineLimit(1)
+                    .foregroundStyle(active ? tokens.text : tokens.inactive)
                     // The title keeps its width; the host label on the same line truncates
                     // first (see `focusCaptionHost`).
                     .layoutPriority(1)
             }
             Spacer(minLength: 6)
             if tab.collapsed {
-                stateDot(registry.rollup(tab: tab), accent: accent)
+                stateLamp(registry.rollup(tab: tab))
                     .padding(.trailing, 6)
-                Text("\(paneCount)").font(mono(10)).foregroundStyle(tokens.textTertiary)
+                Text("\(paneCount)").font(mono(11)).foregroundStyle(tokens.inactive)
                     .padding(.trailing, focusIndex == nil ? 0 : 6)
             }
             if focusIndex != nil {
                 HStack(spacing: 6) { focusCaptionHost(tab) }
             }
         }
-        .padding(.top, 4).padding(.trailing, 12).frame(height: 20)
+        .padding(.top, 2).padding(.trailing, 8).frame(height: 18)
         .contentShape(Rectangle())
         .onTapGesture {
             if tab.collapsed { toggle() }
@@ -536,23 +561,19 @@ struct SidebarView: View {
     }
 
     private func paneRow(_ tab: TabModel, index: Int, ref: SessionRef,
-                         surface: Ghostty.SurfaceView?,
-                         spine: (first: Bool, last: Bool)?, active: Bool) -> some View {
+                         surface: Ghostty.SurfaceView?, active: Bool) -> some View {
         let focused = active && (registry.focusedPaneIndex.map { $0 == index } ?? (index == 0))
         let userLabel = tab.paneLabels[ref.key]
         let tag = tab.paneTags[ref.key]
         let renaming = registry.renaming == .pane(tab.id, name: ref.key)
         let live = showCC ? registry.ccLive[tab.hostID]?[ref.key] : nil
-        let accent = tokens.hostAccent(registry.host(id: tab.hostID))
         let dot = registry.dot(ref: ref)
-        // Rail-tooltip + red-subtitle text: "what is it waiting for" is the triage answer
+        // Lamp-tooltip + question text: "what is it waiting for" is the triage answer
         // for a blocked pane. Scoped to .blocked — a stale `needs` on a working pane reads
         // as a false alarm. Shared with `ccLine` so the two can't derive differently.
         let blockedDetail = dot == .blocked ? live?.attention : nil
         let cue = zmxCue(ref, hydrated: surface != nil)
-        // Recency lives in three carriers, not a column: afterglow on the row background
-        // (the short-term "where was I just now" trail — user focus only, or every agent
-        // turn fleet-wide would keep half the sidebar lit), doze opacity (the long tail —
+        // Recency lives in two carriers, not a column: sleep (the long tail —
         // also counts CC activity while the probe is on, so a pane an agent grinds on
         // overnight doesn't render dusty), and an exact-age line in the hover peek that
         // names its source ("CC turned" vs "you were here" — they can differ by hours on
@@ -574,16 +595,15 @@ struct SidebarView: View {
             || (detail != nil && detail == registry.ccSeenDetail[tab.hostID]?[ref.key])
         let unread = detail != nil && !caughtUp
         let read = detail != nil && caughtUp
-        // The row's second line, decided up front because the gutter needs to know whether
-        // there is one (it moves the title's centre — see `Spine.titleY`). What CC says wins;
+        // The row's second line. What CC says wins;
         // a row CC has nothing to say about shows where the session is sitting (the daemon's
         // cwd, plus the command it was created to run) — the same line the ⌘T picker prints,
         // so a plain shell's second line says something instead of holding an empty band.
         // With neither, there is no second line and the row is its 28pt minimum.
         // `cached` only for placeholder rows (no surface yet) — on a hydrated pane where CC
         // has exited it'd show the dead session's name as stale. `surface.title` is read
-        // un-observed (only `PaneLabel` subscribes): it feeds the repeated-name check and the
-        // gutter geometry alone, and a row re-renders on every probe publish anyway.
+        // un-observed (only `PaneLabel` subscribes): it feeds the repeated-name check
+        // alone, and a row re-renders on every probe publish anyway.
         let shownTitle = PaneLabel.displayed(userLabel: userLabel, title: surface?.title ?? "",
                                              fallback: ref.name)
         let ccText = showCC ? ccLabel(live: live,
@@ -592,63 +612,61 @@ struct SidebarView: View {
                                       attention: blockedDetail) : nil
         let whereText = showCC && ccText == nil
             ? registry.zmxCwd[tab.hostID]?[ref.key].flatMap(SessionNameLabel.whereLine) : nil
-        // showCC off: `PaneLabel` prints the session id under a title that differs from it.
-        let twoLine = showCC ? (ccText != nil || whereText != nil)
-                             : (surface != nil && shownTitle != ref.name)
-        // tick: glow decay, doze, and the peek age all derive from wall-clock age — without
-        // a clock, a row nothing else re-renders (showCC off, no focus changes) would hold
-        // a stale glow indefinitely.
+        // tick: sleep and the peek age both derive from wall-clock age — without
+        // a clock, a row nothing else re-renders (showCC off, no focus changes) would never
+        // fall asleep.
         return Hovering(tick: 60) { hovered, peek in
+            // Long-tail recency: past the focus cutoff a row sleeps, and its text goes to the
+            // inactive gray. Never asleep: the active tab (literally on screen), hovered rows
+            // (hover means you're trying to read it), blocked rows (a pane asking for you
+            // must not be the faintest row in the sidebar), and rows with unread status text
+            // (sleep keys on *your* visits, so it would gray hardest exactly the catch-up
+            // content the unread model exists to surface). The ⌥ reveal deliberately does
+            // NOT wake a row or brighten read text — it only un-clamps the line count, so
+            // holding ⌥ reads as "more of the same sidebar", not a different one.
+            let asleep = !(active || hovered || dot == .blocked || unread)
+                && Theme.asleep(lastSeen(),
+                                cutoff: SessionRegistry.focusCutoffSeconds(hours: cutoffHours))
+            // A session with nobody home reads inactive whatever its age.
+            let gone = cue.map { $0.lamp != .unresponsive } ?? false
+            let tint = focused ? tokens.bright : (asleep || gone) ? tokens.inactive : tokens.text
             HStack(spacing: 0) {
-                // Leading gutter = identity: the tab's string (which panes belong together)
-                // and, threaded on it, this pane's tag bead (drawn from the title block
-                // below, so it sits on the title line whatever the row's height). The
-                // trailing edge is state only — rail, liveness cue, watch.
-                Group {
-                    if let spine {
-                        // Hovering's 60s tick is the clock here too (spineHeat buckets at
-                        // 5m/1h, so minute granularity is plenty).
-                        Spine(first: spine.first, last: spine.last,
-                              titleY: twoLine || peek ? Self.titleCenterTop : Self.titleCenterSolo)
-                            .stroke(active ? tokens.spineHeat(tab.lastActive.values.max())
-                                           : tokens.spineHeat(nil), lineWidth: 1)
-                    } else {
-                        Color.clear
-                    }
-                }
-                .frame(width: Self.gutter)
+                // Leading gutter = identity: this pane's tag (drawn from the title
+                // block below, so it sits on the title line whatever the row's height).
+                // The trailing edge is state only — lamps.
+                Color.clear.frame(width: Self.gutter)
                 // Content column: the original row line + (when peeked) the ledger below it.
-                // Nested inside the spine's HStack so the tree line stretches over the
-                // expanded height — the spine must not gap when a row exhales open — while
-                // the eye/tag pill keep centering on the title block only.
+                // `.top`: lamps and the tag sticker stay level with the title line however
+                // many lines the status text below it wraps to.
                 VStack(alignment: .leading, spacing: 0) {
-                    HStack(spacing: 0) {
+                    HStack(alignment: .top, spacing: 0) {
                         VStack(alignment: .leading, spacing: 0) {
                             Group {
                                 if renaming {
-                                    renameField(seed: userLabel ?? ref.name, font: mono(13))
+                                    renameField(seed: userLabel ?? ref.name, font: mono(14))
                                 } else if let surface {
                                     PaneLabel(surface: surface, userLabel: userLabel, fallback: ref.name,
-                                              active: active, focused: focused,
+                                              tint: tint, struck: cue?.lamp == .ended, focused: focused,
                                               suppressSubtitle: showCC, fontFamily: fontFamily)
                                 } else {
                                     Text(userLabel ?? ref.name)
-                                        .font(mono(13, focused ? .medium : .regular)).lineLimit(1)
-                                        .foregroundStyle(active ? tokens.text : tokens.textSecondary)
+                                        .font(mono(14, focused ? .bold : .regular)).lineLimit(1)
+                                        .strikethrough(cue?.lamp == .ended)
+                                        .foregroundStyle(tint)
                                 }
                             }
-                            // The tag bead: a filled pebble on the gutter's string, level with
+                            // The tag: a filled square in the gutter, level with
                             // the title. It used to be a hollow ring in the trailing column,
-                            // beside the state rail — where a red tag read as an alarm (red is
+                            // beside the state indicator — where a red tag read as an alarm (red is
                             // `Theme.blocked`'s color, and that column is where alarms live).
                             // Hung off the title as an overlay rather than laid out in the
                             // gutter so it tracks the title line exactly: rows are 1–4 lines
                             // tall and only the title knows where its own centre is.
                             .overlay(alignment: .topLeading) {
                                 if let tag {
-                                    Pebble(tagHue: tag.hue).fill(Theme.tag(tag.hue))
+                                    Rectangle().fill(Theme.tag(tag.hue))
                                         .frame(width: Self.bead, height: Self.bead)
-                                        .offset(x: Self.stringX - Self.gutter - Self.bead / 2,
+                                        .offset(x: Self.tagX - Self.gutter - Self.bead / 2,
                                                 y: Self.titleCenterTop - Self.bead / 2)
                                         .help(tag.text)
                                 }
@@ -663,38 +681,44 @@ struct SidebarView: View {
                                            read: read, unclamped: peek)
                                 } else if let whereText {
                                     // `.head`: the leaf of a path is the part that identifies it.
-                                    Text(whereText).font(mono(10)).lineLimit(1).truncationMode(.head)
-                                        .foregroundStyle(tokens.textTertiary)
+                                    Text(whereText).font(mono(11)).lineLimit(1).truncationMode(.head)
+                                        .foregroundStyle(tokens.inactive)
                                 }
                             }
                         }
-                        Spacer()
-                        if let cue {
-                            Image(systemName: cue.icon)
-                                .font(.system(size: 11)).foregroundStyle(tokens.textSecondary)
-                                .padding(.trailing, 4)
-                                .help(cue.help)
-                        }
-                        if registry.panes[ref]?.watched == true {
-                            Image(systemName: "eye")
-                                .font(.system(size: 11)).foregroundStyle(tokens.textSecondary)
-                                .padding(.trailing, 4)
-                                .help("Watching — ⌘⌥A to disarm")
-                        }
-                        // The tag's *name* — hover only. At rest the tag is the bead in the
-                        // leading gutter and this column holds nothing but state; the sticker
+                        Spacer(minLength: 6)
+                        // The tag's *name* — hover only. At rest the tag is the square in the
+                        // leading gutter and this column holds nothing but state; the label
                         // slides in while you're actually pointing at the row, which is when
                         // "which tag is that color" is the question.
                         if let tag, hovered {
-                            let c = Theme.tag(tag.hue)
-                            Text(tag.text).font(mono(9, .medium))
-                                .foregroundStyle(c).fixedSize()
-                                .padding(.horizontal, 5).padding(.vertical, 2)
-                                .background(c.opacity(0.12), in: Capsule())
-                                .rotationEffect(.degrees(-2.5)) // sticker tilt
+                            Text(tag.text.uppercased()).font(mono(10, .bold)).kerning(0.5)
+                                .foregroundStyle(tokens.ground).fixedSize()
+                                .padding(.horizontal, 4).padding(.vertical, 1)
+                                .background(Theme.tag(tag.hue))
                                 .transition(.opacity.combined(with: .move(edge: .trailing)))
-                                .padding(.trailing, 6)
+                                .padding(.trailing, 6).padding(.top, 1)
                         }
+                        // One lamp per fact, rightmost = the row's main one, so the right edge
+                        // reads as a column. Every row has it, lit or not: an unlit lamp is
+                        // what makes a lit one legible as "on". Watching is its own lamp because
+                        // it is armed on panes that are busy — the two have to coexist.
+                        HStack(spacing: 3) {
+                            if registry.panes[ref]?.watched == true {
+                                Lamp(.watching).help("Watching — ⌘⌥A to disarm")
+                            }
+                            if let cue, dot != nil { Lamp(cue.lamp).help(cue.help) }
+                            if let dot {
+                                Lamp(dot).help(dot == .blocked ? blockedDetail ?? dot.help : dot.help)
+                            } else if let cue {
+                                Lamp(cue.lamp).help(cue.help)
+                            } else {
+                                // Unlit on the focused row too: its outline and title already
+                                // say "here", and a lit lamp means "wants your eyes".
+                                Lamp(.unlit)
+                            }
+                        }
+                        .padding(.top, Self.titleCenterTop - Lamp.size / 2)
                     }
                     .animation(.snappy(duration: 0.15), value: hovered)
                     // Peek ledger — suppressed while renaming (growth under a focused text
@@ -704,7 +728,7 @@ struct SidebarView: View {
                             ccStamp().map { "CC turned \($0.shortAge) ago" },
                             (focused ? nil : tab.lastActive[ref.key]).map { "you were here \($0.shortAge) ago" },
                         ].compactMap { $0 }
-                        PanePeek(state: dot, accent: accent,
+                        PanePeek(state: dot,
                                  // CC's cwd (where the agent works) › the zmx daemon's own
                                  // tracking — the only source for a plain shell on an ssh
                                  // host, and it works with the CC toggle off.
@@ -724,52 +748,16 @@ struct SidebarView: View {
                     }
                 }
             }
-            // Long-tail recency: untouched-for-an-hour rests, past the focus cutoff sleeps.
-            // Content only — selection/glow backgrounds and the StatusRail overlay keep full
-            // strength. Never dozed: the active tab (literally on screen), hovered rows
-            // (hover means you're trying to read it), blocked rows (a pane asking for you
-            // must not be the faintest row in the sidebar), and rows with unread status text
-            // (doze keys on *your* visits, so it would dim hardest exactly the catch-up
-            // content the unread model exists to surface). The ⌥ reveal deliberately does
-            // NOT lift doze or brighten read text — it only un-clamps the line count, so
-            // holding ⌥ reads as "more of the same sidebar", not a different one.
-            .opacity(active || hovered || dot == .blocked || unread
-                     ? 1
-                     : Theme.doze(lastSeen(),
-                                  cutoff: SessionRegistry.focusCutoffSeconds(hours: cutoffHours)))
-            .padding(.trailing, 12).frame(minHeight: 28)
-            // "Here" is a shape, not a shade: neutral lift + clay leading bar (+ the heavier
-            // title above). The clay *fill* is the trail's alone, so the focused row can't
-            // read as just the most recent glow.
-            .background(
-                focused ? tokens.focusedRow : hovered ? tokens.hover : .clear,
-                in: RoundedRectangle(cornerRadius: 5))
-            // Separate layer so hover ADDS to a trail row's glow instead of swapping it for
-            // a weaker gray wash. Ranked inside the row's clock (`Hovering`'s tick) so a
-            // trail entry ages out of `trailWindow` without waiting for some other publish.
-            .background(Theme.afterglow(rank: focused ? nil : registry.trailRanks()[
-                            .init(tab: tab.id, pane: ref.key)]),
-                        in: RoundedRectangle(cornerRadius: 5))
-            .overlay(alignment: .leading) {
-                if focused {
-                    RoundedRectangle(cornerRadius: 1.25).fill(Theme.clay)
-                        .frame(width: 2.5).padding(.vertical, 4)
-                }
-            }
-            // Anchored to the row (not the content flow) so it reads as a right border,
-            // not a pill competing with the tag circle for the same slot. `.topTrailing`
-            // (top-pad 4 + rail height 20 = optically centered in the standard 28pt row)
-            // so the rail stays beside the title line when the peek ledger grows the row —
-            // a state pill floating mid-ledger would read as a bullet point.
-            .overlay(alignment: .topTrailing) {
-                StatusRail(state: dot, accent: accent, blockedDetail: blockedDetail)
-                    .padding(.top, 4)
-            }
+            .padding(.trailing, 7).padding(.vertical, 2).frame(minHeight: 30)
+            // "Here" is a shape, not a shade: a bright cut-corner outline (+ the heavier,
+            // brighter title above). Hover is the same outline in the quiet rule color.
+            .overlay(Chamfer(cut: 5).strokeBorder(
+                focused ? tokens.bright : hovered ? tokens.rule : .clear, lineWidth: 1))
             .contentShape(Rectangle())
             // Hover peek — formerly a multi-line `.help` tooltip here, now the in-row
             // PanePeek ledger (rest the cursor `Theme.peekDelay` to open). Everything the
             // one-line subtitle elides — state, the full detail/question, cwd, identity,
-            // age — lives there instead. Child `.help`s (rail, tag pill) still win over
+            // age — lives there instead. Child `.help`s (lamps, tag) still win over
             // their own rects.
         }
         .onTapGesture { controller?.activate(tab: tab.id, paneIndex: index) }
@@ -808,16 +796,16 @@ struct SidebarView: View {
     ///   Covers the placeholder at its prompt *and* a pane whose client was switched to
     ///   another session in-band (`zmx attach other` typed inside it) — either way the
     ///   thing this row names has nobody attached.
-    private func zmxCue(_ ref: SessionRef, hydrated: Bool) -> (icon: String, word: String, help: String)? {
+    private func zmxCue(_ ref: SessionRef, hydrated: Bool) -> (lamp: Lamp.Kind, word: String, help: String)? {
         switch registry.liveness[ref] {
         case .ended:
-            ("stop.circle", "ENDED",
+            (.ended, "ENDED",
              "This zmx session is gone — its shell exited, or it was killed. Reattaching starts a fresh shell under the same name.")
         case .unresponsive(let err):
-            ("exclamationmark.circle", "NOT RESPONDING",
+            (.unresponsive, "NOT RESPONDING",
              "The zmx daemon didn't answer (\(err)). The session is very likely still alive, just busy.")
         case .listed(let clients) where clients == 0 && hydrated:
-            ("pause.circle", "DETACHED",
+            (.detached, "DETACHED",
              "No zmx client is attached to this session — the pane is at its reattach prompt, or its client switched to another session.")
         default: nil
         }
@@ -850,14 +838,14 @@ struct SidebarView: View {
     /// Pinned-tab badge — tilted like an actual push-pin.
     private func pinBadge(size: CGFloat) -> some View {
         Image(systemName: "pin.fill")
-            .font(.system(size: size)).foregroundStyle(tokens.textSecondary)
+            .font(.system(size: size)).foregroundStyle(tokens.inactive)
             .rotationEffect(.degrees(-18))
     }
 
-    /// CC subtitle — status lives in the right-edge rail; recency is the row's afterglow /
-    /// doze and the hover peek's age line.
-    /// Blocked: the question CC is asking, in bright `tokens.text` (the red lives in the
-    /// rail). Otherwise `name · detail` is a live
+    /// CC subtitle — status lives in the right-edge lamp; recency is the row's
+    /// sleep and the hover peek's age line.
+    /// Blocked: the question CC is asking, in `tokens.bright` (the red lives in the
+    /// lamp). Otherwise `name · detail` is a live
     /// activity feed (what the session is, what it's doing / last did), falling back to
     /// cwd basename, then the cached last-seen name for placeholder rows. Unread text is
     /// secondary and wraps to 3 lines so the activity is readable in place; `read` text
@@ -890,10 +878,10 @@ struct SidebarView: View {
         // `Font.smallCaps()` to use. Color stays with the line (secondary unread / tertiary
         // read or cached) so "dim = read" remains one rule.
         func name(_ n: String) -> Text {
-            Text(n.uppercased()).font(mono(10, .medium)).kerning(0.5)
+            Text(n.uppercased()).font(mono(11, .medium)).kerning(0.5)
         }
         // `cached` is for the CC-exited case only; a running-but-unnamed session must not
-        // fall through to the previous session's name in `tokens.textSecondary` (live) styling.
+        // fall through to the previous session's name in live styling.
         if let attention { return Text(attention) }
         guard let live else {
             return cached.flatMap { echoesTitle($0) ? nil : name($0) }
@@ -924,24 +912,22 @@ struct SidebarView: View {
                         attention: String?, read: Bool, unclamped: Bool) -> some View {
         // The question renders bright, not red: with several agents blocked at once a
         // 3-line red paragraph per row reads as a wall of alarm. Red stays on the
-        // StatusRail bar; the question earns attention by being the only `tokens.text`
-        // subtitle text in the sidebar.
-        let style: AnyShapeStyle = attention != nil ? AnyShapeStyle(tokens.text)
-            : (read || live == nil) ? AnyShapeStyle(tokens.textTertiary)
-            : AnyShapeStyle(tokens.textSecondary)
+        // lamp; the question and unread status text share `tokens.bright` ("look here"),
+        // and the lamp beside them says which of the two it is.
+        let style = (attention == nil && (read || live == nil)) ? tokens.inactive : tokens.bright
         return label
             // `attention == nil`: the read-state belongs to the detail text only — a blocked
             // question must keep its 3 lines even when the unrelated detail counts as read
             // (⌥⌥ sweep, unchanged-detail exit-stamp, question arriving while focused).
             // `live == nil`: a cached placeholder name stays one line, keeping cold-restored
             // rows as uniform as the old fixed-height slot did.
-            // `!revealAll`: ⌥-hold lifts only this clamp — tertiary color and doze stay, so
+            // `!revealAll`: ⌥-hold lifts only this clamp — the inactive color and sleep stay, so
             // the peek expands the text without re-skinning the sidebar.
             // `unclamped` (row peek open): lifts the cap to 8 — enough for any real status
             // text/question, but bounded so a pathological multi-paragraph probe string
             // can't spring the row over the whole sidebar (the old floating tooltip had no
             // layout impact; an in-row expansion does).
-            .font(mono(11))
+            .font(mono(12))
             .lineLimit(unclamped ? 8
                        : ((read && !revealAll) || live == nil) && attention == nil ? 1 : 3)
             // vertical: true — claim the wrapped height even when the layout pass proposes
@@ -1006,9 +992,12 @@ private struct PaneLabel: View {
     @ObservedObject var surface: Ghostty.SurfaceView
     let userLabel: String?
     let fallback: String
-    let active: Bool
-    /// The pane keyboard focus is in — a half-step heavier title, part of the focused row's
-    /// "here" shape (see `ForkTokens.focusedRow`).
+    /// Decided by the row (bright / text / inactive) — it knows about sleep and liveness.
+    let tint: Color
+    /// The session has ended: the name is crossed out, not just grayed.
+    let struck: Bool
+    /// The pane keyboard focus is in — a heavier title, part of the focused row's
+    /// "here" shape along with its outline.
     let focused: Bool
     let suppressSubtitle: Bool
     let fontFamily: String?
@@ -1027,11 +1016,12 @@ private struct PaneLabel: View {
     var body: some View {
         let label = Self.displayed(userLabel: userLabel, title: surface.title, fallback: fallback)
         return VStack(alignment: .leading, spacing: 0) {
-            Text(label).font(forkMono(13, focused ? .medium : .regular, fontFamily)).lineLimit(1)
-                .foregroundStyle(active ? tokens.text : tokens.textSecondary)
+            Text(label).font(forkMono(14, focused ? .bold : .regular, fontFamily)).lineLimit(1)
+                .strikethrough(struck)
+                .foregroundStyle(tint)
             if !suppressSubtitle && label != fallback {
-                Text(fallback).font(forkMono(10, .regular, fontFamily)).lineLimit(1)
-                    .foregroundStyle(tokens.textTertiary)
+                Text(fallback).font(forkMono(11, .regular, fontFamily)).lineLimit(1)
+                    .foregroundStyle(tokens.inactive)
             }
         }
     }
@@ -1064,7 +1054,7 @@ private struct OverlayScroller: NSViewRepresentable {
 /// The intent timer restarts on every hover edge, so mouse traversal and scrolling (rows
 /// sliding under a still cursor re-enter hover) never pop rows open in passing.
 /// `tick` also re-evaluates the content on a periodic clock — the row's chrome derives from
-/// wall-clock age (afterglow / doze / peek age) and would otherwise go stale when nothing
+/// wall-clock age (sleep / peek age) and would otherwise go stale when nothing
 /// else triggers a render.
 private struct Hovering<Content: View>: View {
     @State private var hovered = false
@@ -1132,7 +1122,6 @@ private struct PanePeek: View {
     @Environment(\.forkTokens) private var tokens
 
     let state: PaneState?
-    let accent: Color
     let cwd: String?
     /// ENDED / DETACHED / NOT RESPONDING from the last poll, nil when healthy.
     var zmxState: String? = nil
@@ -1155,10 +1144,10 @@ private struct PanePeek: View {
 
     private var stateLine: (label: String, tint: Color) {
         switch state {
-        case .working: ("WORKING", accent)
+        case .working: ("WORKING", tokens.text)
         case .blocked: ("NEEDS YOU", Theme.blocked)
-        case .waiting: ("UNREAD", accent)
-        case nil:      (((rawStatus?.isEmpty == false ? rawStatus! : "idle").uppercased(), tokens.textSecondary))
+        case .waiting: ("UNREAD", tokens.bright)
+        case nil:      (((rawStatus?.isEmpty == false ? rawStatus! : "idle").uppercased(), tokens.inactive))
         }
     }
 
@@ -1168,8 +1157,8 @@ private struct PanePeek: View {
         let whoWhen = [ccName, age].compactMap { $0 }.filter { !$0.isEmpty }
             .joined(separator: " · ")
         VStack(alignment: .leading, spacing: 3) {
-            // The rule draws left→right in clay — the expansion's one signature beat.
-            Rectangle().fill(Theme.peekRule).frame(height: 1)
+            // The rule draws left→right — the expansion's one signature beat.
+            Rectangle().fill(tokens.rule).frame(height: 1)
                 .scaleEffect(x: revealed ? 1 : 0.001, anchor: .leading)
                 .animation(.smooth(duration: 0.3).delay(0.02), value: revealed)
                 .padding(.bottom, 2)
@@ -1177,10 +1166,10 @@ private struct PanePeek: View {
             // Empty-but-non-nil cwd (probe quirk) must not render a dangling DIR label —
             // the old tooltip's `.filter { !$0.isEmpty }` did this job.
             if let cwd, !cwd.isEmpty {
-                line(1, label: "DIR", tint: tokens.textSecondary, value: cwd)
+                line(1, label: "DIR", tint: tokens.inactive, value: cwd)
             }
             line(cwd?.isEmpty == false ? 2 : 1, label: "ZMX",
-                 tint: zmxState == nil ? tokens.textSecondary : tokens.text,
+                 tint: zmxState == nil ? tokens.inactive : tokens.text,
                  value: "\(session) @ \(host)" + (zmxState.map { " · \($0.lowercased())" } ?? ""))
         }
         .padding(.top, 5).padding(.bottom, 6)
@@ -1193,15 +1182,15 @@ private struct PanePeek: View {
     private func line(_ i: Int, label: String, tint: Color, value: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text(label)
-                .font(forkMono(8.5, .semibold, fontFamily)).kerning(0.8)
+                .font(forkMono(9.5, .semibold, fontFamily)).kerning(0.8)
                 .foregroundStyle(tint)
                 // lineLimit, not wrap: a wide window-title-font face can push "NEEDS YOU"
                 // (or a raw probe status) past the column — truncate, never two-line.
                 .lineLimit(1)
-                .frame(width: 58, alignment: .leading)
+                .frame(width: 64, alignment: .leading)
             Text(value)
-                .font(forkMono(10, .regular, fontFamily))
-                .foregroundStyle(tokens.textSecondary)
+                .font(forkMono(11, .regular, fontFamily))
+                .foregroundStyle(tokens.text)
                 .lineLimit(1).truncationMode(.middle)
         }
         // Cascade: each line fades in and settles down 4pt, 45ms apart — one orchestrated
@@ -1225,49 +1214,111 @@ extension PaneState {
     }
 }
 
-/// Right-edge status pill — reads as a vertical heatmap down the sidebar; host-accent hue so
-/// busy rows also signal *which* host. `PaneMachine.dot` is the single source of truth
+/// One square lamp per fact about a session. Replaces four separate carriers — the right-edge
+/// rail, the liveness symbols, the watch eye and the collapsed-header dot — with one shape in
+/// one place, so the right edge reads as a column and there is a single encoding to learn:
+/// filled = wants your eyes, outline = armed or in progress, gray = nobody home. The kinds differ
+/// in *shape*, never in hue alone: on a theme whose text is already black or white,
+/// `text` and `bright` are the same color.
+/// `PaneMachine.dot` is still the single source of truth for the first three
 /// (probe `status` feeds it via `.probe(busy:)`), so `tempo`-vs-`status` can't render
 /// contradictory indicators on one row.
-private struct StatusRail: View {
-    let state: PaneState?
-    let accent: Color
-    /// CC's `needs`/`waitingFor` when known — nil with showCC off (rail renders regardless).
-    var blockedDetail: String? = nil
+struct Lamp: View {
+    enum Kind: Equatable {
+        case unlit, working, finished, blocked, detached, ended, unresponsive, watching
+    }
+    static let size: CGFloat = 10
+
+    @Environment(\.forkTokens) private var tokens
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let kind: Kind
+
+    init(_ kind: Kind) { self.kind = kind }
+    init(_ state: PaneState) {
+        switch state {
+        case .working: kind = .working
+        case .waiting: kind = .finished
+        case .blocked: kind = .blocked
+        }
+    }
+
     var body: some View {
-        // Help is per-state so a working/waiting/empty rail doesn't claim "needs input".
         Group {
-            switch state {
-            case .working: Pulsing { RoundedRectangle(cornerRadius: 1.5).fill(accent) }
-            case .waiting:
-                RoundedRectangle(cornerRadius: 1.5).strokeBorder(accent, lineWidth: 1)
-                    .help(PaneState.waiting.help)
-            case .blocked:
-                RoundedRectangle(cornerRadius: 1.5).fill(Theme.blocked)
-                    .help(blockedDetail ?? PaneState.blocked.help)
-            case nil:      Color.clear
+            switch kind {
+            case .unlit: Rectangle().strokeBorder(tokens.rule, lineWidth: 1)
+            case .finished: Rectangle().fill(tokens.bright)
+            // Steady, not blinking: with several agents blocked at once a column of flashing
+            // red is the wall of alarm the plain question text was chosen to avoid.
+            case .blocked: Rectangle().fill(Theme.blocked)
+            case .working:
+                Rectangle().strokeBorder(tokens.text, lineWidth: 1)
+                    .overlay(alignment: .leading) { filling.padding(1) }
+            case .detached:
+                HStack(spacing: 2) {
+                    tokens.inactive.frame(width: 3)
+                    tokens.inactive.frame(width: 3)
+                }
+            case .ended:
+                Hatch(pitch: 3).stroke(tokens.inactive, lineWidth: 1).clipped()
+                    .overlay(Rectangle().strokeBorder(tokens.inactive, lineWidth: 1))
+            case .unresponsive: Rectangle().strokeBorder(Theme.blocked, lineWidth: 1)
+            case .watching:
+                Rectangle().strokeBorder(tokens.text, lineWidth: 1)
+                    .overlay(tokens.text.frame(width: 4, height: 4))
             }
         }
-        // `.id` forces a view swap on state change so the new pill springs in (scale+fade)
-        // instead of teleporting — a small "hey, this row changed" beat. Keyed on `state`,
-        // so the per-tick re-renders that don't change state animate nothing.
-        .id(state)
-        .transition(.scale(scale: 0.3).combined(with: .opacity))
-        .animation(.bouncy(duration: 0.35, extraBounce: 0.15), value: state)
-        .frame(width: 3, height: 20)
+        .frame(width: Self.size, height: Self.size)
+    }
+
+    /// The only motion in the sidebar: the lamp fills left to right in eight steps a second,
+    /// like a block cursor walking ▏▎▍▌▋▊▉█. Stepped off the wall clock rather than animated,
+    /// so every busy lamp is in phase and a re-render can't restart it. Mounted only while
+    /// working.
+    @ViewBuilder private var filling: some View {
+        let full = Self.size - 2
+        if reduceMotion {
+            tokens.text.frame(width: full / 2)
+        } else {
+            TimelineView(.periodic(from: .now, by: 0.125)) { ctx in
+                let step = Int(ctx.date.timeIntervalSinceReferenceDate * 8) % 8 + 1
+                tokens.text.frame(width: full * CGFloat(step) / 8)
+            }
+        }
     }
 }
 
-/// `.symbolEffect(.pulse)` is macOS 14+; this is the 13-safe equivalent. Mounted only while
-/// the pulsing state applies, so `@State on` resets on re-mount.
-private struct Pulsing<Content: View>: View {
-    @State private var on = false
-    @ViewBuilder let content: Content
+/// The hidden sidebar's way back: the toolbar's own key cap, where the toolbar's first key
+/// was. (It used to be a bare `sidebar.left` symbol — the last of the icon toolbar, and the
+/// only thing on screen once the sidebar was gone.) Floats over the terminal, which is why
+/// `KeyCap` fills with `ground` rather than nothing.
+struct SidebarRevealKey: View {
+    let fontFamily: String?
+    let action: () -> Void
     var body: some View {
-        content.opacity(on ? 1 : 0.45)
-            .onAppear {
-                withAnimation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true)) { on = true }
-            }
+        Button(action: action) {
+            KeyCap(label: "SHOW", font: forkMono(10, .regular, fontFamily)).frame(width: 48)
+        }
+        .buttonStyle(.plain)
+        .help("Show sidebar (⌘⇧B)")
+    }
+}
+
+/// A toolbar key's face. Separate from the `Button` that usually wraps it because the focus
+/// key can't be one (see `header`).
+struct KeyCap: View {
+    @Environment(\.forkTokens) private var tokens
+    let label: String
+    var on = false
+    let font: Font
+    @State private var hovered = false
+    var body: some View {
+        Text(label).font(font).kerning(0.4).lineLimit(1).minimumScaleFactor(0.75)
+            .foregroundStyle(on ? tokens.ground : tokens.text)
+            .padding(.horizontal, 3).frame(maxWidth: .infinity).frame(height: 22)
+            .background(on ? tokens.text : tokens.ground, in: Chamfer(cut: 5))
+            .overlay(Chamfer(cut: 5).strokeBorder(hovered ? tokens.bright : tokens.text, lineWidth: 1))
+            .contentShape(Rectangle())
+            .onHover { hovered = $0 }
     }
 }
 
@@ -1276,32 +1327,8 @@ private struct HoverHighlight: ViewModifier {
     @State private var hovered = false
     func body(content: Content) -> some View {
         content
-            .background(hovered ? tokens.hover : .clear,
-                        in: RoundedRectangle(cornerRadius: 5))
+            .background(hovered ? tokens.rule : .clear)
             .onHover { hovered = $0 }
-    }
-}
-
-/// The string a multi-pane tab's rows hang on: one vertical hairline down the gutter, from
-/// the first pane's title to the last pane's title. It used to be a tree (┌ ├ └, a branch per
-/// row) — the only line art in the sidebar, for a grouping the tab heading and the shared
-/// card already state. A plain string says "these belong together" with a third of the ink,
-/// leaves the gutter's left edge to the focused row's clay bar, and gives tag beads something
-/// to sit on.
-private struct Spine: Shape {
-    var first: Bool
-    var last: Bool
-    /// Where the title line's centre is, from the row's top. NOT the rect's midY: the peek
-    /// ledger / multi-line CC text grow the row downward, and the string must start and stop
-    /// at the *title* (where the bead sits) rather than in the middle of the extra content.
-    var titleY: CGFloat
-    func path(in r: CGRect) -> Path {
-        var p = Path()
-        let x = r.minX + SidebarView.stringX
-        let y = min(r.midY, titleY)
-        p.move(to: .init(x: x, y: first ? y : r.minY))
-        p.addLine(to: .init(x: x, y: last ? y : r.maxY))
-        return p
     }
 }
 
@@ -1350,10 +1377,14 @@ struct HostDot: View {
 
     let slot: Int
     var size: CGFloat = 10
+    /// The sidebar's cut: same color pair, plain square. The sheets keep the pebble.
+    var square = false
 
     init(slot: Int, size: CGFloat = 10) { self.slot = slot; self.size = size }
     /// nil → secondary placeholder dot (focus-mode badge for an unknown host).
-    init(host: ForkHost?, size: CGFloat = 10) { self.slot = host?.slot ?? -1; self.size = size }
+    init(host: ForkHost?, size: CGFloat = 10, square: Bool = false) {
+        self.slot = host?.slot ?? -1; self.size = size; self.square = square
+    }
 
     /// The dot's silhouette — selection rings overlay this same shape so they hug the pebble
     /// outline. Keep the slot→seed mapping here only.
@@ -1361,7 +1392,7 @@ struct HostDot: View {
 
     var body: some View {
         let (a, b) = ForkHost.pair(slot)
-        Self.outline(slot: slot)
+        (square ? AnyShape(Rectangle()) : AnyShape(Self.outline(slot: slot)))
             .fill(slot < 0 ? AnyShapeStyle(tokens.textSecondary) : AnyShapeStyle(LinearGradient(
                 stops: [.init(color: tokens.hostColor(a), location: 0.5),
                         .init(color: tokens.hostColor(b), location: 0.5)],
