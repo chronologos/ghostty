@@ -8,7 +8,7 @@ struct SidebarView: View {
     @Environment(\.forkTokens) private var tokens
 
     weak var controller: ForkWindowController?
-    /// Off only for offscreen renders (`SidebarSnapshotTests`): mounting the view must not be
+    /// Off only for offscreen renders (`ForkSnapshotTests`): mounting the view must not be
     /// what starts `zmx list` and ssh against whatever hosts the registry was seeded with.
     var polls = true
     @EnvironmentObject private var registry: SessionRegistry
@@ -31,7 +31,7 @@ struct SidebarView: View {
     /// registry residence churned the debounce-save sink on every popover open/close.
     @State private var taggingPane: (tab: TabModel.ID, key: String)?
 
-    private var fontFamily: String? { controller?.ghostty.config.forkFontFamily }
+    @Environment(\.forkFontFamily) private var fontFamily
     private func mono(_ s: CGFloat, _ w: Font.Weight = .regular) -> Font { forkMono(s, w, fontFamily) }
 
     private var recentTags: ArraySlice<PaneTag> { registry.recentTags.prefix(5) }
@@ -117,11 +117,14 @@ struct SidebarView: View {
                 .onLongPressGesture(minimumDuration: 0.4) { showCutoffPopover = true }
                 .popover(isPresented: $showCutoffPopover, arrowEdge: .top) {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Show tabs from last \(Int(cutoffHours))h — older panes dim").font(.caption)
-                        Slider(value: $cutoffHours, in: 1...64, step: 1).frame(width: 180)
-                        Toggle("Sort by most recent", isOn: $sortMRU)
-                            .font(.caption).toggleStyle(.checkbox)
-                    }.padding(12)
+                        Text("Show tabs from last \(Int(cutoffHours))h — older panes go gray")
+                        Slider(value: $cutoffHours, in: 1...64, step: 1).frame(width: 220)
+                        Toggle("Sort by most recent", isOn: $sortMRU).toggleStyle(.checkbox)
+                    }
+                    .font(mono(11)).foregroundStyle(tokens.text).tint(tokens.text)
+                    .padding(12)
+                    // Scaled past the edges so the popover's arrow takes the color too.
+                    .background(tokens.ground.scaleEffect(1.5))
                 }
                 .help(focusMode ? "All hosts"
                                 : "Focus (last \(Int(cutoffHours))h) — long-press to adjust")
@@ -193,8 +196,7 @@ struct SidebarView: View {
         // attaching to the outer body VStack would also animate host-mode reflow.
         return VStack(alignment: .leading, spacing: 6) {
             if tabs.isEmpty {
-                Label(filterTagged ? "No tagged panes" : "Nothing in the last \(Int(cutoffHours))h",
-                      systemImage: filterTagged ? "tag.slash" : "moon.zzz")
+                Text(filterTagged ? "No tagged panes" : "Nothing in the last \(Int(cutoffHours))h")
                     .font(mono(13)).foregroundStyle(tokens.inactive)
                     .padding(.horizontal, 16).padding(.top, 12)
             } else {
@@ -236,7 +238,7 @@ struct SidebarView: View {
     private func focusCaptionLeading(_ tab: TabModel, index i: Int) -> some View {
         // No empty pill on rows 10+ — the Spacer handles alignment.
         if i < 9 { keyHint("⌘\(i + 1)") }
-        if tab.pinned { pinBadge(size: 8) }
+        if tab.pinned { pinBadge() }
     }
 
     /// Focus-mode card caption, trailing half: which host this card lives on. The dot holds
@@ -246,7 +248,7 @@ struct SidebarView: View {
     @ViewBuilder
     private func focusCaptionHost(_ tab: TabModel) -> some View {
         let host = registry.host(id: tab.hostID)
-        HostDot(host: host, size: 7, square: true)
+        HostDot(host: host, size: 7)
         Text(host?.label ?? "—")
             .font(mono(11)).foregroundStyle(tokens.inactive).lineLimit(1)
     }
@@ -269,7 +271,7 @@ struct SidebarView: View {
     /// one encoding to learn (the old inline dot had to re-state the rail's in a second shape).
     @ViewBuilder
     private func stateLamp(_ s: PaneState?) -> some View {
-        if let s { Lamp(s).help(s.help) }
+        if let s { Lamp(state: s).help(s.help) }
     }
 
     private func keyHint(_ chord: String) -> some View {
@@ -319,7 +321,7 @@ struct SidebarView: View {
                 // No chevron: a collapsed module is a strip with nothing under it. And nothing
                 // on the strip that has to be explained: it once led with a part-number-style
                 // "H-01" and ended with a bare tab count, and neither said what it was.
-                HostDot(host: host, size: 8, square: true)
+                HostDot(host: host, size: 8)
                 Text(host.label.uppercased())
                     .font(mono(11, .bold)).kerning(1).lineLimit(1)
                     .foregroundStyle(connected ? tokens.text : tokens.inactive)
@@ -451,8 +453,7 @@ struct SidebarView: View {
         }
         return HStack(spacing: 0) {
             Button(action: toggle) {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 9, weight: .semibold)).foregroundStyle(tokens.inactive)
+                PromptMark(size: 10)
                     .rotationEffect(.degrees(tab.collapsed ? 0 : 90))
                     .frame(width: Self.gutter, height: 18, alignment: .leading)
                     .contentShape(Rectangle())
@@ -709,7 +710,7 @@ struct SidebarView: View {
                             }
                             if let cue, dot != nil { Lamp(cue.lamp).help(cue.help) }
                             if let dot {
-                                Lamp(dot).help(dot == .blocked ? blockedDetail ?? dot.help : dot.help)
+                                Lamp(state: dot).help(dot == .blocked ? blockedDetail ?? dot.help : dot.help)
                             } else if let cue {
                                 Lamp(cue.lamp).help(cue.help)
                             } else {
@@ -835,11 +836,9 @@ struct SidebarView: View {
         }
     }
 
-    /// Pinned-tab badge — tilted like an actual push-pin.
-    private func pinBadge(size: CGFloat) -> some View {
-        Image(systemName: "pin.fill")
-            .font(.system(size: size)).foregroundStyle(tokens.inactive)
-            .rotationEffect(.degrees(-18))
+    /// Pinned-tab badge.
+    private func pinBadge() -> some View {
+        Text("PIN").kerning(0.5).font(mono(9, .bold)).foregroundStyle(tokens.inactive)
     }
 
     /// CC subtitle — status lives in the right-edge lamp; recency is the row's
@@ -1025,25 +1024,6 @@ private struct PaneLabel: View {
             }
         }
     }
-}
-
-/// Force the enclosing `NSScrollView` to overlay (slim, auto-fading) scrollers even when
-/// the system preference is "Always". The legacy 15pt gutter eats ~8% of a 200pt sidebar.
-/// AppKit resets `scrollerStyle` on `preferredScrollerStyleDidChange` (mouse hot-plug),
-/// hence the observer. Registration leaks for app lifetime — sidebar is a singleton.
-private struct OverlayScroller: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView {
-        let v = NSView()
-        DispatchQueue.main.async { [weak v] in
-            v?.enclosingScrollView?.scrollerStyle = .overlay
-        }
-        NotificationCenter.default.addObserver(
-            forName: NSScroller.preferredScrollerStyleDidChangeNotification,
-            object: nil, queue: .main
-        ) { [weak v] _ in v?.enclosingScrollView?.scrollerStyle = .overlay }
-        return v
-    }
-    func updateNSView(_: NSView, context: Context) {}
 }
 
 /// Row-local hover scope. Hover changes re-render `content(hovered, peek)` only — not
@@ -1234,7 +1214,7 @@ struct Lamp: View {
     let kind: Kind
 
     init(_ kind: Kind) { self.kind = kind }
-    init(_ state: PaneState) {
+    init(state: PaneState) {
         switch state {
         case .working: kind = .working
         case .waiting: kind = .finished
@@ -1292,7 +1272,7 @@ struct Lamp: View {
 /// only thing on screen once the sidebar was gone.) Floats over the terminal, which is why
 /// `KeyCap` fills with `ground` rather than nothing.
 struct SidebarRevealKey: View {
-    let fontFamily: String?
+    @Environment(\.forkFontFamily) private var fontFamily
     let action: () -> Void
     var body: some View {
         Button(action: action) {
@@ -1349,16 +1329,6 @@ private struct ReorderDelegate<ID: Equatable>: DropDelegate {
     func performDrop(info: DropInfo) -> Bool { dragging = nil; return true }
 }
 
-/// User's configured terminal face (so the sidebar reads as part of the grid, not a bolt-on
-/// SwiftUI panel); falls back to system mono. `fixedSize` so Dynamic Type doesn't reflow.
-fileprivate func forkMono(_ size: CGFloat, _ weight: Font.Weight = .regular,
-                          _ family: String?) -> Font {
-    if let family, !family.isEmpty {
-        return .custom(family, fixedSize: size).weight(weight)
-    }
-    return .system(size: size, weight: weight, design: .monospaced)
-}
-
 extension Ghostty.Config {
     /// `font-family` is a `RepeatableString` whose C-API path (`c_get.zig:79`) returns
     /// `false` for non-packed structs without `cval()`, so it can't be read here without an
@@ -1368,32 +1338,22 @@ extension Ghostty.Config {
     var forkFontFamily: String? { windowTitleFontFamily }
 }
 
-/// Split-pebble host marker. Hard-stop gradient at 0.5 for a clean half; same-color stops
-/// render solid (diagonal-slot case — first N hosts) so no `a==b` branch needed. The slot
-/// also seeds `Pebble`, so each host's dot has its own slightly-irregular silhouette —
-/// shape becomes a second recognition cue alongside the color pair.
+/// Split-square host marker. Hard-stop gradient at 0.5 for a clean half; same-color stops
+/// render solid (diagonal-slot case — first N hosts) so no `a==b` branch needed.
 struct HostDot: View {
     @Environment(\.forkTokens) private var tokens
 
     let slot: Int
     var size: CGFloat = 10
-    /// The sidebar's cut: same color pair, plain square. The sheets keep the pebble.
-    var square = false
 
     init(slot: Int, size: CGFloat = 10) { self.slot = slot; self.size = size }
-    /// nil → secondary placeholder dot (focus-mode badge for an unknown host).
-    init(host: ForkHost?, size: CGFloat = 10, square: Bool = false) {
-        self.slot = host?.slot ?? -1; self.size = size; self.square = square
-    }
-
-    /// The dot's silhouette — selection rings overlay this same shape so they hug the pebble
-    /// outline. Keep the slot→seed mapping here only.
-    static func outline(slot: Int) -> Pebble { Pebble(seed: slot) }
+    /// nil → inactive placeholder (focus-mode badge for an unknown host).
+    init(host: ForkHost?, size: CGFloat = 10) { self.slot = host?.slot ?? -1; self.size = size }
 
     var body: some View {
         let (a, b) = ForkHost.pair(slot)
-        (square ? AnyShape(Rectangle()) : AnyShape(Self.outline(slot: slot)))
-            .fill(slot < 0 ? AnyShapeStyle(tokens.textSecondary) : AnyShapeStyle(LinearGradient(
+        Rectangle()
+            .fill(slot < 0 ? AnyShapeStyle(tokens.inactive) : AnyShapeStyle(LinearGradient(
                 stops: [.init(color: tokens.hostColor(a), location: 0.5),
                         .init(color: tokens.hostColor(b), location: 0.5)],
                 startPoint: .leading, endPoint: .trailing)))

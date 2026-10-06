@@ -197,17 +197,23 @@ struct NewSessionView: View {
     /// auto placeholder, not an attach), so the controller seeds it as the alias too.
     let onSubmit: (SessionRef, _ smartJump: Bool, _ named: Bool) -> Void
     let onCancel: () -> Void
+    /// How stage 2 learns what's on the host. Injected only by offscreen renders.
+    let lister: ZmxAdapter.Lister
 
     @State private var m: NewSessionMachine
     @FocusState private var focused: Bool
+
+    static let size = CGSize(width: 480, height: 340)
 
     init(title: String? = nil,
          host: ForkHost,
          locked: Bool = false,
          placeholder: String,
+         lister: @escaping ZmxAdapter.Lister = ZmxAdapter.liveLister,
          onSubmit: @escaping (SessionRef, Bool, Bool) -> Void,
          onCancel: @escaping () -> Void) {
         self.title = title
+        self.lister = lister
         self.onSubmit = onSubmit
         self.onCancel = onCancel
         self._m = State(initialValue: .init(host: host, locked: locked, placeholder: placeholder))
@@ -218,18 +224,14 @@ struct NewSessionView: View {
     // MARK: body
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if let title {
-                Text(title).font(.system(size: 11)).foregroundStyle(tokens.textSecondary)
-                    .padding(.bottom, 8)
-            }
-            field
-            Theme.peekRule.frame(height: 1).padding(.vertical, 10)
-            list.frame(maxHeight: .infinity)
-            footer.padding(.top, 10)
+        Panel(title: title ?? "New session", chord: m.locked ? "⌘D" : "⌘T") {
+            field.padding(.horizontal, 14).frame(height: 44)
+            PanelRule()
+            list.padding(6).frame(maxHeight: .infinity)
+            PanelRule()
+            footer.padding(.horizontal, 14).padding(.vertical, 6)
         }
-        .padding(14)
-        .frame(width: 400, height: 300)
+        .frame(width: Self.size.width, height: Self.size.height)
         // Window-level fallbacks so ⏎/Esc still work if focus ever leaves the field
         // (hazard #8 — a sheet refactor that drops these regresses silently).
         // Disabled while the field IS focused: commit() isn't idempotent (host-stage ⏎
@@ -248,7 +250,7 @@ struct NewSessionView: View {
         // toggles the id and retries the fetch.
         .task(id: m.stage) {
             guard m.stage == .session else { return }
-            let r = await ZmxAdapter.listResult(host: m.host)
+            let r = await lister(m.host)
             guard !Task.isCancelled else { return }
             m.setRecents(r, reroll: { registry.uniqueAutoName() })
         }
@@ -257,28 +259,25 @@ struct NewSessionView: View {
     // MARK: field
 
     private var field: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
+            if m.stage == .host { PromptMark(size: 15) }
             if m.stage == .session {
                 // Host chip — the committed stage-1 choice. Tappable (back to host pick)
                 // unless host-locked.
-                HStack(spacing: 5) {
+                HStack(spacing: 6) {
                     HostDot(host: m.host, size: 8)
-                    Text(m.host.label).font(.system(size: 12))
-                    if !m.locked {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(tokens.textTertiary)
-                    }
+                    Text(m.host.label.uppercased()).kerning(0.6).foregroundStyle(tokens.text).forkFont(10, .bold)
                 }
-                .padding(.horizontal, 8).padding(.vertical, 4)
-                .background(tokens.chipBg, in: Capsule())
+                .padding(.horizontal, 7).frame(height: 20)
+                .overlay(Chamfer(cut: 4).strokeBorder(m.locked ? tokens.rule : tokens.text, lineWidth: 1))
+                .contentShape(Rectangle())
                 .onTapGesture { m.back() }
                 .transition(.opacity.combined(with: .move(edge: .leading)))
             }
             TextField("", text: $m.query,
-                      prompt: Text(m.stage == .host ? "host" : m.placeholder))
+                      prompt: Text(m.stage == .host ? "host" : m.placeholder).foregroundColor(tokens.inactive))
                 .textFieldStyle(.plain)
-                .font(.system(size: 14, design: m.stage == .session ? .monospaced : .default))
+                .forkFont(15).foregroundStyle(tokens.bright).tint(tokens.text)
                 .focused($focused)
                 .onSubmit { commit(false) }
                 // Field-level ⇧⏎ — the footer button's keyboardShortcut covers mouse +
@@ -318,8 +317,9 @@ struct NewSessionView: View {
                         ForEach(Array(hosts.enumerated()), id: \.element.id) { i, h in
                             row(selected: i == m.sel, action: { m.advance(to: h) }) {
                                 HostDot(host: h, size: 8)
-                                    .opacity(registry.isConnected(h.id) ? 1 : 0.35)
-                                Text(h.label).font(.system(size: 13))
+                                Text(h.label).forkFont(13, i == m.sel ? .bold : .regular)
+                                    .foregroundStyle(i == m.sel ? tokens.bright
+                                                     : registry.isConnected(h.id) ? tokens.text : tokens.inactive)
                             }
                         }
                     case .session:
@@ -329,7 +329,7 @@ struct NewSessionView: View {
                                 VStack(alignment: .leading, spacing: 0) {
                                     SessionNameLabel(entry: e)
                                     if let t = registry.tabTitle(for: e.name, external: e.external, on: m.host.id) {
-                                        Text(t).font(.system(size: 10)).foregroundStyle(tokens.textSecondary)
+                                        Text(t).foregroundStyle(tokens.inactive).forkFont(10)
                                     }
                                 }
                                 Spacer()
@@ -349,6 +349,7 @@ struct NewSessionView: View {
                         }
                     }
                 }
+                .background(OverlayScroller())
             }
             .onChange(of: m.sel) { s in
                 switch m.stage {
@@ -369,8 +370,7 @@ struct NewSessionView: View {
             HStack(spacing: 8) { content() }
                 .padding(.horizontal, 8).padding(.vertical, 5)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(selected ? tokens.selectedRow : .clear,
-                            in: RoundedRectangle(cornerRadius: 5))
+                .panelRow(selected: selected)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -378,7 +378,7 @@ struct NewSessionView: View {
 
     @ViewBuilder private var emptyState: some View {
         if m.stage == .host, hosts.isEmpty {
-            Text("No host matches").font(.system(size: 11)).foregroundStyle(tokens.textSecondary)
+            Text("No host matches").foregroundStyle(tokens.inactive).forkFont(11)
         } else if m.stage == .session, m.sessions.isEmpty, m.unresponsive.isEmpty, m.recents != nil {
             // "Couldn't reach" ≠ "No sessions" — a failed query must not imply the host is
             // empty; ⏎ still works (the new pane will surface the ssh error itself). And say
@@ -387,10 +387,10 @@ struct NewSessionView: View {
             Text(m.failure.map { "No list from \(m.host.label) — \($0.summary). ⏎ still creates" }
                  ?? (m.query.isEmpty ? "No sessions on \(m.host.label)" : "No match — ⏎ creates"))
                 .multilineTextAlignment(.center)
-                .font(.system(size: 11)).foregroundStyle(tokens.textSecondary)
+                .foregroundStyle(tokens.inactive).forkFont(11)
                 .padding(.horizontal, 20)
         } else if m.stage == .session, m.recents == nil {
-            ProgressView().controlSize(.small)
+            Lamp(.working)
         }
     }
 
@@ -400,34 +400,23 @@ struct NewSessionView: View {
         HStack(spacing: 12) {
             switch m.stage {
             case .host:
-                hint("⏎ / tab", "select").opacity(hosts.isEmpty ? 0.35 : 1)
+                KeyHint("⏎ / tab", "select", enabled: !hosts.isEmpty)
             case .session:
-                hint("⏎", m.sel > 0 ? "attach" : "create")
-                    .opacity(m.sel > 0 || m.nameValid ? 1 : 0.35)
+                KeyHint("⏎", m.sel > 0 ? "attach" : "create", enabled: m.sel > 0 || m.nameValid)
                 // Clickable + window-level shortcut so ⇧⏎ works on macOS 13 (where
                 // backport.onKeyPress is a no-op) and via mouse. NOT `.disabled` — a
                 // disabled button's shortcut is inert, so ⇧⏎ would fall through to
                 // onSubmit (plain create); commit(true) already beeps when ineligible.
-                Button { commit(true) } label: { hint("⇧⏎", "create @ z") }
+                Button { commit(true) } label: { KeyHint("⇧⏎", "create @ z", enabled: m.canSmartJump) }
                     .buttonStyle(.plain)
                     .keyboardShortcut(.return, modifiers: .shift)
-                    .opacity(m.canSmartJump ? 1 : 0.35)
                     .help(m.canSmartJump
                           ? "Create with the shell started at the z-jump directory for this name"
                           : "Needs a new, valid name (and no row selected)")
-                if !m.locked { hint("⌫", "host") }
+                if !m.locked { KeyHint("⌫", "host") }
             }
             Spacer()
-            hint("esc", "cancel")
-        }
-        .font(.system(size: 10)).foregroundStyle(tokens.textSecondary)
-    }
-
-    private func hint(_ key: String, _ label: String) -> some View {
-        HStack(spacing: 4) {
-            Text(key).padding(.horizontal, 4).padding(.vertical, 1)
-                .background(tokens.chipBg, in: RoundedRectangle(cornerRadius: 3))
-            Text(label)
+            KeyHint("esc", "cancel")
         }
     }
 

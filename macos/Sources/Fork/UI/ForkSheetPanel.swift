@@ -1,14 +1,15 @@
 #if os(macOS)
 import AppKit
 
-/// Sheet window that handles ⌘V/C/X/A/Z directly. Ghostty's MainMenu Paste item
-/// (action `paste:`, target First Responder) walks the chain past the sheet to
+/// The borderless child window every fork `Panel` floats in (`presentSheet`). Handles
+/// ⌘V/C/X/A/Z directly: Ghostty's MainMenu Paste item
+/// (action `paste:`, target First Responder) walks the chain past the panel to
 /// `mainWindow.firstResponder` — the parent window's `SurfaceView`, which implements
 /// `paste:` (`SurfaceView_AppKit.swift:1550`) and swallows it. Intercepting here at
 /// `performKeyEquivalent` reaches the field editor before the menu does.
 final class ForkSheetPanel: NSWindow {
-    // Borderless windows refuse key by default; ⌘K presents this with `.borderless`
-    // and needs keyboard focus for the query field. Harmless for the sheet path.
+    // Borderless windows refuse key by default, and every panel needs the keyboard: a query
+    // field, or a confirm's ⏎ / K / Esc.
     override var canBecomeKey: Bool { true }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {

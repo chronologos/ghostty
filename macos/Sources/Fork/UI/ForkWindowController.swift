@@ -294,7 +294,7 @@ final class ForkWindowController: TerminalController {
         super.closeSurface(node, withConfirmation: false)
     }
 
-    /// ⌘W sheet: Detach (⏎, default) / Kill (K or a second ⌘W, destructive) / Cancel (Esc).
+    /// ⌘W panel: Detach (⏎, default) / Kill (K or a second ⌘W, destructive) / Cancel (Esc).
     private func confirmDetachOrKill(
         messageText: String,
         informativeText: String,
@@ -304,45 +304,41 @@ final class ForkWindowController: TerminalController {
         onKill: @escaping () -> Void
     ) {
         guard let window else { onDetach(); return }
-        // A sheet is already up (⌘T/⌘D/Hosts panel, or an earlier close-confirm): a second
-        // beginSheetModal on the same window queues *invisibly* behind it — nothing appears,
-        // then a surprise close-confirm pops after the first sheet ends, where a reflexive ⏎
-        // closes a tab the user never asked about. Refuse instead.
+        // Something is already up (⌘T/⌘D/Hosts panel, an earlier close-confirm, or one of
+        // upstream's sheets): a close-confirm that waited its turn would pop as a surprise
+        // after the first one ends, where a reflexive ⏎ closes a tab the user never asked
+        // about. Refuse instead.
         guard sheetPanel == nil, window.attachedSheet == nil else { NSSound.beep(); return }
-        let alert = NSAlert()
-        alert.messageText = messageText
-        alert.informativeText = informativeText + "\n\n⏎ Detach · K or ⌘W Kill · Esc Cancel"
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Detach")
-        let kill = alert.addButton(withTitle: killTitle)
-        kill.keyEquivalent = "k"
-        kill.hasDestructiveAction = true
-        kill.isEnabled = killEnabled
-        alert.addButton(withTitle: "Cancel")
-        // ⌘W,⌘W = Kill: the second ⌘W lands on the alert panel (now key), where it would
+        // ⌘W,⌘W = Kill: the second ⌘W lands on the panel (now key), where it would
         // otherwise just beep — treating it as "yes, really close it" keeps the whole
-        // gesture on one chord. A button only carries one keyEquivalent, so K stays the
-        // labelled shortcut and this monitor adds the ⌘W alias for the sheet's lifetime.
-        let wMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { ev in
-            // `!isARepeat`: the alias must be a second deliberate press — a *held* ⌘W
-            // auto-repeats into the just-presented sheet and would fire Kill (and then
-            // chain into the next pane's sheet) with no chance to Esc.
-            guard ev.window === alert.window,
-                  !ev.isARepeat,
-                  ev.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
-                  ev.charactersIgnoringModifiers?.lowercased() == "w",
-                  kill.isEnabled else { return ev }
-            kill.performClick(nil)
-            return nil
-        }
-        alert.beginSheetModal(for: window) { resp in
-            wMonitor.map(NSEvent.removeMonitor)
-            alert.window.orderOut(nil)
-            switch resp {
-            case .alertFirstButtonReturn: onDetach()
-            case .alertSecondButtonReturn: onKill()
-            default: break
-            }
+        // gesture on one chord. It has to be a second deliberate press: a *held* ⌘W
+        // auto-repeats into the just-presented panel and would fire Kill (and then chain
+        // into the next pane's panel) with no chance to Esc — `ConfirmView.choice` refuses
+        // repeats for every key.
+        presentConfirm(title: "Close", chord: "⌘W", headline: messageText, detail: informativeText, choices: [
+            .init(label: "Detach", chord: "⏎", kind: .primary, keys: [.return]) { [weak self] in
+                self?.endSheet(); onDetach()
+            },
+            .init(label: killTitle, chord: "K · ⌘W", kind: .destructive,
+                  keys: [.init(characters: "k"), .init(characters: "w", modifiers: .command)],
+                  enabled: killEnabled) { [weak self] in
+                self?.endSheet(); onKill()
+            },
+        ])
+    }
+
+    /// The fork's alert. Cancel (Esc) is appended here so no caller can forget it; losing key
+    /// cancels too, like every other panel.
+    private func presentConfirm(title: String, chord: String? = nil, headline: String, detail: String,
+                                choices: [ConfirmView.Choice]) {
+        let all = choices + [.init(label: "Cancel", chord: "esc", keys: [.escape]) { [weak self] in self?.endSheet() }]
+        presentSheet(size: nil, onKey: { ev in
+            guard let c = ConfirmView.choice(for: ev.charactersIgnoringModifiers, modifiers: ev.modifierFlags,
+                                             isRepeat: ev.isARepeat, in: all) else { return false }
+            c.action()
+            return true
+        }) {
+            ConfirmView(title: title, chord: chord, headline: headline, detail: detail, choices: all)
         }
     }
 
@@ -881,19 +877,17 @@ final class ForkWindowController: TerminalController {
         // One misclick on a context menu otherwise erases every tab/label/tag for the host
         // and the debounced autosave makes it durable within a second (zmx sessions survive,
         // the sidebar organisation doesn't). Same idiom as `confirmKill`.
-        guard let window, tabCount > 0 else { performRemoveHost(id); return }
-        let alert = NSAlert()
-        alert.messageText = "Remove \(host.label)?"
-        alert.informativeText = "Removes \(tabCount) tab\(tabCount == 1 ? "" : "s") from the sidebar. zmx sessions keep running on the host."
-        alert.addButton(withTitle: "Remove")
-        alert.addButton(withTitle: "Cancel")
-        alert.alertStyle = .warning
-        // The Hosts panel is itself a sheet on this window — a second sheet on the same
-        // window queues invisibly behind it, so present on whatever is frontmost.
-        alert.beginSheetModal(for: window.attachedSheet ?? window) { [weak self] resp in
-            guard resp == .alertFirstButtonReturn else { return }
-            self?.performRemoveHost(id)
-        }
+        guard window != nil, tabCount > 0 else { performRemoveHost(id); return }
+        // Reached from the sidebar's context menu or from inside the Hosts panel. One panel at
+        // a time, so the question replaces Hosts rather than stacking on it — its edits are
+        // already saved, and the host it was showing is the one about to go.
+        endSheet()
+        presentConfirm(
+            title: "Remove host", headline: "Remove \(host.label)?",
+            detail: "Removes \(tabCount) tab\(tabCount == 1 ? "" : "s") from the sidebar. zmx sessions keep running on the host.",
+            choices: [.init(label: "Remove", chord: "⏎", kind: .destructive, keys: [.return]) { [weak self] in
+                self?.endSheet(); self?.performRemoveHost(id)
+            }])
     }
 
     private func performRemoveHost(_ id: ForkHost.ID) {
@@ -945,20 +939,17 @@ final class ForkWindowController: TerminalController {
     }
 
     func confirmKill(_ tab: TabModel) {
-        guard let window, let host = registry.host(id: tab.hostID) else { return }
+        guard window != nil, let host = registry.host(id: tab.hostID) else { return }
         let refs = killableRefs(for: tab)
         guard !refs.isEmpty else { closeForkTab(tab.id); return }
-        let alert = NSAlert()
-        alert.messageText = "Kill \(refs.count) zmx session\(refs.count == 1 ? "" : "s")?"
-        alert.informativeText = refs.map(\.name).joined(separator: ", ")
-        alert.addButton(withTitle: "Kill")
-        alert.addButton(withTitle: "Cancel")
-        alert.alertStyle = .warning
-        alert.beginSheetModal(for: window) { [weak self] resp in
-            guard resp == .alertFirstButtonReturn else { return }
-            self?.killSessions(refs, on: host)
-            self?.closeForkTab(tab.id)
-        }
+        presentConfirm(
+            title: "Kill", headline: "Kill \(refs.count) zmx session\(refs.count == 1 ? "" : "s")?",
+            detail: refs.map(\.name).joined(separator: ", "),
+            choices: [.init(label: "Kill", chord: "⏎", kind: .destructive, keys: [.return]) { [weak self] in
+                self?.endSheet()
+                self?.killSessions(refs, on: host)
+                self?.closeForkTab(tab.id)
+            }])
     }
 
     /// Is any *other* visible fork window still open? Gates singleton teardown (the poll)
@@ -1162,6 +1153,8 @@ final class ForkWindowController: TerminalController {
 
     private var sheetPanel: NSWindow?
     private var sheetResignSub: Any?
+    /// The panel's key monitor; lives exactly as long as it does.
+    private var sheetMonitor: Any?
 
     /// Two-stage new-session palette. ⌘T / ⌘⇧T / sidebar ＋ open it unlocked (host
     /// filterable, defaults to the active host); the host-row context menu opens it
@@ -1169,7 +1162,7 @@ final class ForkWindowController: TerminalController {
     func showSessionPicker(lockedTo host: ForkHost? = nil) {
         let h = host ?? registry.activeHost ?? .local
         let placeholder = registry.uniqueAutoName()
-        presentSheet(size: .init(width: 400, height: 300)) { [weak self] in
+        presentSheet(size: NewSessionView.size) { [weak self] in
             NewSessionView(
                 host: h, locked: host != nil, placeholder: placeholder,
                 onSubmit: { ref, smartJump, named in
@@ -1185,7 +1178,7 @@ final class ForkWindowController: TerminalController {
     }
 
     func showHostsSheet(select: ForkHost.ID? = nil) {
-        presentSheet(size: .init(width: 640, height: 560)) { [weak self] in
+        presentSheet(size: HostsView.size) { [weak self] in
             HostsView(select: select,
                       onRemove: { id in self?.removeHost(id) },
                       onDone: { self?.endSheet() })
@@ -1193,44 +1186,47 @@ final class ForkWindowController: TerminalController {
     }
 
     func showPanePalette() {
-        // `ForkPaletteCard` is a self-chromed card (material bg + HandCut stroke + shadow)
-        // that fills the panel, so the panel's size IS the palette's size: scale it with
-        // the window (~45% wide / ~60% tall, clamped to stay usable on small windows and
+        // `ForkPaletteCard` fills the panel, so the panel's size IS the palette's size: scale it
+        // with the window (~45% wide / ~60% tall, clamped to stay usable on small windows and
         // readable on huge ones). Upstream's `CommandPaletteView` is deliberately not used
         // here — it hard-caps at 500pt wide with a 200pt option table (~4 rows) no matter
         // what frame it's given.
-        // Presented as a borderless child window, not a sheet: macOS sheets wrap content
-        // in a system `NSVisualEffectView` that `backgroundColor = .clear` can't suppress.
         // The min(…, win - 24) outer clamp keeps the borderless child window inside its
         // parent on tiny windows — a floating overhang past the window edge reads as a
         // detached alien panel (and steals clicks from whatever's behind).
         let win = window?.frame.size ?? .init(width: 1280, height: 800)
         let size = CGSize(width: min(max(560, win.width * 0.45), 880, win.width - 24),
                           height: min(max(420, win.height * 0.60), 980, win.height - 24))
-        presentSheet(size: size, bare: true) { [weak self] in
+        presentSheet(size: size) { [weak self] in
             ForkPanePalette(controller: self, onDone: { self?.endSheet() })
         }
     }
 
     func showScrollbackSearch() {
-        presentSheet(size: .init(width: 600, height: 420)) { [weak self] in
+        presentSheet(size: ScrollbackSearchView.size) { [weak self] in
             ScrollbackSearchView(controller: self, onDone: { self?.endSheet() })
         }
     }
 
-    private func presentSheet<V: View>(size: CGSize, bare: Bool = false,
+    /// Every fork surface that floats over the terminal goes through here, as a borderless
+    /// child window — never a sheet: macOS sheets wrap content in a system
+    /// `NSVisualEffectView` with its own rounded mask that `backgroundColor = .clear` can't
+    /// suppress, and `Panel` draws its own cut-corner frame. One at a time; losing key closes
+    /// it, and so does Esc. `size` nil = as tall as the content wants at its own fixed width
+    /// (confirms, whose text varies). `onKey` sees the panel's key presses first; true = handled.
+    private func presentSheet<V: View>(size: CGSize?, onKey: ((NSEvent) -> Bool)? = nil,
                                        @ViewBuilder _ content: () -> V) {
         guard let window, sheetPanel == nil else { return }
         let host = NSHostingController(rootView: ForkThemed { content().environmentObject(registry) })
-        host.sizingOptions = []  // honor `size`, not SwiftUI's ideal — else padding/shadow inflate the panel
+        let size = size ?? host.view.fittingSize
+        host.sizingOptions = []  // honor `size`, not SwiftUI's ideal
         host.view.frame = .init(origin: .zero, size: size)
         let panel = ForkSheetPanel(contentViewController: host)
         sheetPanel = panel
-        guard bare else { window.beginSheet(panel); return }
         panel.styleMask = .borderless
         panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = false  // CommandPaletteView draws its own
+        panel.backgroundColor = .clear   // the cut corners show the terminal through
+        panel.hasShadow = false
         let parent = window.frame
         panel.setFrameOrigin(.init(x: parent.midX - size.width / 2,
                                    y: parent.midY - size.height / 2))
@@ -1239,6 +1235,20 @@ final class ForkWindowController: TerminalController {
         sheetResignSub = NotificationCenter.default.addObserver(
             forName: NSWindow.didResignKeyNotification, object: panel, queue: .main
         ) { [weak self] _ in self?.endSheet() }
+        // The panel's one key monitor, for its lifetime (`endSheet` removes it). Esc is handled
+        // here, once, rather than left to each view's `cancelAction`/`onExitCommand`: whether
+        // those fire depends on what, if anything, is first responder in a borderless window.
+        // Safe beside `navMonitor` and the ⌥ recognizer: both ignore events whose window isn't
+        // the main one, so swallowing here hides nothing from them.
+        sheetMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self, weak panel] ev in
+            guard let self, let panel, ev.window === panel else { return ev }
+            if onKey?(ev) == true { return nil }
+            // Esc inside an input-method composition cancels the composition, not the panel.
+            guard ev.keyCode == 53, (panel.firstResponder as? NSTextView)?.hasMarkedText() != true
+            else { return ev }
+            self.endSheet()
+            return nil
+        }
     }
 
     private func endSheet() {
@@ -1247,12 +1257,12 @@ final class ForkWindowController: TerminalController {
             NotificationCenter.default.removeObserver(sub)
             sheetResignSub = nil
         }
-        if panel.isSheet {
-            window?.endSheet(panel)
-        } else {
-            window?.removeChildWindow(panel)
-            panel.orderOut(nil)
-        }
+        sheetMonitor.map(NSEvent.removeMonitor)
+        sheetMonitor = nil
+        // A split picker that goes away by losing key never ran its `onCancel`.
+        pendingSplit = nil
+        window?.removeChildWindow(panel)
+        panel.orderOut(nil)
         sheetPanel = nil
     }
 
@@ -1351,7 +1361,7 @@ final class ForkWindowController: TerminalController {
         ])
 
         let reveal = NSHostingView(rootView: ForkThemed {
-            SidebarRevealKey(fontFamily: ghostty.config.forkFontFamily) { [weak self] in self?.toggleSidebar() }
+            SidebarRevealKey { [weak self] in self?.toggleSidebar() }
         })
         reveal.isHidden = true
         reveal.translatesAutoresizingMaskIntoConstraints = false
@@ -1553,7 +1563,7 @@ final class ForkWindowController: TerminalController {
         // when the picker *creates* — zmx ignores the client's cwd when attaching existing.
         let inherit = config?.workingDirectory ?? paneCwd(oldView)
         pendingSplit = (oldView, direction)
-        presentSheet(size: .init(width: 400, height: 300)) { [weak self] in
+        presentSheet(size: NewSessionView.size) { [weak self] in
             NewSessionView(
                 title: "Split on \(host.label)",
                 host: host, locked: true, placeholder: placeholder,

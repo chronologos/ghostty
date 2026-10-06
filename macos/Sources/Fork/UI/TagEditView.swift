@@ -20,29 +20,32 @@ struct TagEditView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            TextField("tag", text: $text)
-                .textFieldStyle(.roundedBorder)
+            TextField("", text: $text, prompt: Text("tag").foregroundColor(tokens.inactive))
+                .panelField()
                 .onSubmit { if !trimmed.isEmpty { onCommit(PaneTag(text: trimmed, hue: hue)) } }
             HStack(spacing: 6) {
                 ForEach(Self.hues, id: \.self) { h in
-                    let pebble = Pebble(tagHue: h)
-                    pebble
-                        .fill(Theme.tag(h))
+                    Theme.tag(h)
                         .frame(width: 18, height: 18)
-                        .overlay(pebble.strokeBorder(tokens.text, lineWidth: hue == h ? Theme.ringWidth : 0))
+                        // Ring outside the swatch, on the ground, so it reads on every hue.
+                        .padding(3)
+                        .overlay(Rectangle().strokeBorder(hue == h ? tokens.bright : .clear, lineWidth: 1))
                         .onTapGesture { hue = h }
                 }
             }
             HStack {
-                Button("Clear") { onCommit(nil) }
+                Button("Clear") { onCommit(nil) }.buttonStyle(PanelButtonStyle())
                 Spacer()
                 Button("Set") { onCommit(PaneTag(text: trimmed, hue: hue)) }
+                    .buttonStyle(PanelButtonStyle(kind: .primary, chord: "⏎"))
                     .keyboardShortcut(.defaultAction)
                     .disabled(trimmed.isEmpty)
             }
         }
         .padding(12)
-        .frame(width: 200)
+        .frame(width: 252)
+        // Scaled past the edges so the popover's arrow takes the color too.
+        .background(tokens.ground.scaleEffect(1.5))
     }
 }
 #endif
