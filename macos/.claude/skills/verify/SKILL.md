@@ -28,10 +28,10 @@ quit the running one first, or the launch is a no-op.
 terminal (System Settings → Privacy & Security → Accessibility). Without it,
 `System Events got an error: osascript is not allowed to send keystrokes. (1002)`.
 
-**Looking at the sidebar** doesn't need the app: `SidebarSnapshotTests` renders the real
-`SidebarView` offscreen to PNGs (command in `Fork/CLAUDE.md` § Build & test). Use it for any
-visual change. It shows layout and color only — no hover, peek, drag, live surfaces or the
-configured font — so it narrows what the user has to check, it doesn't replace them.
+**Looking at a fork view** doesn't need the app: `ForkSnapshotTests` renders the real sidebar
+and every panel offscreen to PNGs (command in `Fork/CLAUDE.md` § Build & test). Use it for any
+visual change. It shows layout and color only — no hover, peek, drag, keys, live surfaces —
+so it narrows what the user has to check, it doesn't replace them.
 
 No XCUITest harness exists for Fork views yet. Until one does, GUI-seam changes
 (palette key handling, sheet focus, sidebar drag) are user-driven: build, hand

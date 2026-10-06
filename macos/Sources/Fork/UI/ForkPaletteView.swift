@@ -88,7 +88,7 @@ struct ForkPanePalette: View {
     }
 }
 
-/// Fork-owned palette chrome: query field › option list › count footer in a HandCut card
+/// Fork-owned palette chrome: query field › option list › count footer in a `Panel`
 /// that fills whatever frame the presenting panel gives it (the panel scales with the
 /// window — see `showPanePalette`). Keyboard contract matches upstream's palette: ↑↓ and
 /// ⌃P/⌃N move, ⏎ runs, Esc closes, typing filters with first-match auto-select.
@@ -116,7 +116,7 @@ private struct ForkPaletteCard: View {
 
     var body: some View {
         let items = filtered
-        VStack(spacing: 0) {
+        Panel(title: "Go to", chord: "⌘K") {
             // Keyboard nav mirrors upstream's CommandPaletteQuery exactly: hidden
             // `Color.clear`-labeled buttons (an EmptyView label can be optimized out of
             // the hierarchy, killing the shortcuts) catch ↑↓/⌃P/⌃N when focus is outside
@@ -138,11 +138,11 @@ private struct ForkPaletteCard: View {
                 .accessibilityHidden(true)
 
                 HStack(spacing: 10) {
-                    Image(systemName: "rectangle.split.3x1.fill")
-                        .font(.system(size: 14)).foregroundStyle(tokens.textSecondary)
-                    TextField("Jump to pane or run a command…", text: $query)
+                    PromptMark(size: 15)
+                    TextField("", text: $query,
+                              prompt: Text("Jump to pane or run a command…").foregroundColor(tokens.inactive))
                         .textFieldStyle(.plain)
-                        .font(.system(size: 18, weight: .light))
+                        .forkFont(15).foregroundStyle(tokens.bright).tint(tokens.text)
                         .focused($focused)
                         .onSubmit { submit(items) }
                         .onExitCommand { onDone() }
@@ -154,13 +154,13 @@ private struct ForkPaletteCard: View {
                             }
                         }
                 }
-                .padding(.horizontal, 16)
+                .padding(.horizontal, 14)
             }
-            .frame(height: 48)
-            Divider()
+            .frame(height: 44)
+            PanelRule()
             if items.isEmpty {
                 Spacer()
-                Text("No matches").font(.system(size: 12)).foregroundStyle(tokens.textSecondary)
+                Text("No matches").foregroundStyle(tokens.inactive).forkFont(12)
                 Spacer()
             } else {
                 ScrollViewReader { proxy in
@@ -171,6 +171,7 @@ private struct ForkPaletteCard: View {
                             }
                         }
                         .padding(6)
+                        .background(OverlayScroller())
                     }
                     .onChange(of: selected) { sel in
                         guard let sel, sel < items.count else { return }
@@ -178,21 +179,18 @@ private struct ForkPaletteCard: View {
                     }
                 }
             }
-            Divider()
-            HStack {
+            PanelRule()
+            HStack(spacing: 12) {
                 Text(trimmedQuery.isEmpty ? "\(options.count) entries"
                                           : "\(items.count) of \(options.count)")
+                    .foregroundStyle(tokens.inactive).forkFont(10)
                 Spacer()
-                Text("↑↓ move · ⏎ run · esc close")
+                KeyHint("↑↓", "move")
+                KeyHint("⏎", "run", enabled: selected != nil)
+                KeyHint("esc", "close")
             }
-            .font(.system(size: 10)).foregroundStyle(tokens.textSecondary)
-            .padding(.horizontal, 14).padding(.vertical, 5)
+            .padding(.horizontal, 14).padding(.vertical, 6)
         }
-        .background(.ultraThinMaterial, in: HandCut(tl: 14, tr: 8, br: 16, bl: 10))
-        .overlay(HandCut(tl: 14, tr: 8, br: 16, bl: 10).stroke(tokens.cardBorder, lineWidth: 1))
-        .shadow(color: .black.opacity(0.35), radius: 18, y: 6)
-        // Margin inside the borderless panel so the shadow has room to render.
-        .padding(24)
         // Async focus: the panel isn't key yet at onAppear time (same reason upstream's
         // palette defers); a sync set silently no-ops.
         .onAppear { DispatchQueue.main.async { focused = true } }
@@ -225,54 +223,43 @@ private struct ForkPaletteCard: View {
             opt.action()
         } label: {
             HStack(spacing: 9) {
+                // A pane leads with its host's color, an action with the prompt mark. The
+                // option's `leadingIcon` is upstream's field and isn't drawn: a different
+                // symbol per action was six more glyphs to learn beside titles that already
+                // say what they do.
                 if let color = opt.leadingColor {
-                    // Mini host dot — same organic pebble as the sidebar's, seeded stably
-                    // from the title so the silhouette doesn't reshuffle while filtering.
-                    Pebble(seed: opt.title.unicodeScalars.reduce(0) { $0 &+ Int($1.value) } % 89)
-                        .fill(color).frame(width: 9, height: 9)
-                        .frame(width: 16)
-                } else if let icon = opt.leadingIcon {
-                    Image(systemName: icon)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(tokens.textSecondary)
-                        .frame(width: 16)
+                    color.frame(width: 8, height: 8).frame(width: 16)
                 } else {
-                    Color.clear.frame(width: 16, height: 1)
+                    PromptMark(size: 12).frame(width: 16)
                 }
                 VStack(alignment: .leading, spacing: 1) {
-                    highlight(opt.title).font(.system(size: 13))
+                    highlight(opt.title).foregroundStyle(isSelected ? tokens.bright : tokens.text)
+                        .forkFont(13, isSelected ? .bold : .regular)
                     if let sub = opt.subtitle {
                         // Subtitle highlights only when the title itself didn't match —
                         // same rule as upstream's CommandRow.
                         (titleMatched(opt) ? Text(sub) : highlight(sub))
-                            .font(.system(size: 11)).foregroundStyle(tokens.textSecondary)
-                            .lineLimit(1).truncationMode(.middle)
+                            .foregroundStyle(tokens.inactive)
+                            .lineLimit(1).truncationMode(.middle).forkFont(11)
                     }
                 }
                 .lineLimit(1)
                 Spacer(minLength: 12)
                 if let badge = opt.badge, !badge.isEmpty {
-                    Text(badge)
-                        .font(.system(size: 10, weight: .medium))
-                        .padding(.horizontal, 7).padding(.vertical, 2)
-                        .background(Theme.clay.opacity(0.14), in: Capsule())
-                        .foregroundStyle(Theme.clay)
+                    Text(badge.uppercased()).kerning(0.5)
+                        .foregroundStyle(tokens.text).forkFont(9, .bold)
+                        .padding(.horizontal, 4).padding(.vertical, 1)
+                        .overlay(Rectangle().strokeBorder(tokens.rule, lineWidth: 1))
                 }
                 if let symbols = opt.symbols {
-                    HStack(spacing: 2) {
-                        ForEach(Array(symbols.enumerated()), id: \.offset) { _, s in
-                            Text(s).font(.system(size: 11, weight: .medium))
-                        }
-                    }
-                    .foregroundStyle(tokens.textSecondary)
+                    Text(symbols.joined()).foregroundStyle(tokens.text).forkFont(10, .semibold)
                 }
             }
             .padding(.horizontal, 10).padding(.vertical, 6)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .background(isSelected ? tokens.selectedRow : hovered == opt.id ? tokens.hover : .clear,
-                    in: RoundedRectangle(cornerRadius: 6))
+        .panelRow(selected: isSelected, hovered: hovered == opt.id)
         .id(opt.id)
         .onHover { hovered = $0 ? opt.id : nil }
         .help(opt.description ?? "")
@@ -283,7 +270,7 @@ private struct ForkPaletteCard: View {
         return !q.isEmpty && opt.title.matchedIndices(for: q) != nil
     }
 
-    /// Clay-bold the matched characters — upstream's matcher, the fork's accent.
+    /// Bright-bold the matched characters — upstream's matcher, the fork's emphasis.
     private func highlight(_ text: String) -> Text {
         let q = trimmedQuery
         guard !q.isEmpty, let indices = text.matchedIndices(for: q) else { return Text(text) }
@@ -292,7 +279,7 @@ private struct ForkPaletteCard: View {
             let off = text.distance(from: text.startIndex, to: idx)
             let s = a.index(a.startIndex, offsetByCharacters: off)
             let e = a.index(s, offsetByCharacters: 1)
-            a[s..<e].foregroundColor = Theme.clay
+            a[s..<e].foregroundColor = tokens.bright
             a[s..<e].inlinePresentationIntent = .stronglyEmphasized
         }
         return Text(a)
@@ -342,12 +329,16 @@ struct ScrollbackSearchView: View {
     @State private var unsearched = 0
     @State private var searchedPanes = 0
 
+    static let size = CGSize(width: 640, height: 440)
+
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: "text.magnifyingglass").foregroundStyle(tokens.textSecondary)
-                TextField("Search scrollback (all sessions)…", text: $query)
-                    .textFieldStyle(.plain).focused($fieldFocused).onSubmit(search)
+        Panel(title: "Search scrollback", chord: "⌘⇧K") {
+            HStack(spacing: 10) {
+                PromptMark(size: 15)
+                TextField("", text: $query,
+                          prompt: Text("Search every session's scrollback…").foregroundColor(tokens.inactive))
+                    .textFieldStyle(.plain).forkFont(15).foregroundStyle(tokens.bright).tint(tokens.text)
+                    .focused($fieldFocused).onSubmit(search)
                     .onChange(of: query) { _ in
                         debounce?.cancel()
                         debounce = Task {
@@ -355,10 +346,10 @@ struct ScrollbackSearchView: View {
                             if !Task.isCancelled { search() }
                         }
                     }
-                if searching { ProgressView().controlSize(.small) }
+                if searching { Lamp(.working) }
             }
-            .padding(12)
-            Divider()
+            .padding(.horizontal, 14).frame(height: 44)
+            PanelRule()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(hits) { hit in
@@ -366,55 +357,54 @@ struct ScrollbackSearchView: View {
                             onDone()
                             controller?.activate(tab: hit.tabID, paneIndex: hit.paneIndex)
                         } label: {
-                            HStack(spacing: 8) {
-                                HostDot(slot: hit.slot, size: 6)
+                            HStack(alignment: .top, spacing: 8) {
+                                HostDot(slot: hit.slot, size: 8).padding(.top, 4)
                                 VStack(alignment: .leading, spacing: 1) {
                                     HStack(spacing: 4) {
-                                        Text(hit.label).font(.system(size: 12, weight: .medium))
-                                        Text(hit.crumb).font(.system(size: 11)).foregroundStyle(tokens.textSecondary)
+                                        Text(hit.label).foregroundStyle(tokens.text).forkFont(12, .bold)
+                                        Text(hit.crumb).foregroundStyle(tokens.inactive).forkFont(11)
                                         if hit.count > 1 {
                                             Text("· \(hit.count) matches, latest shown")
-                                                .font(.system(size: 10)).foregroundStyle(tokens.textTertiary)
+                                                .foregroundStyle(tokens.inactive).forkFont(10)
                                         }
                                     }
                                     if let b = hit.before {
-                                        Text(b).font(.system(size: 10, design: .monospaced))
-                                            .foregroundStyle(tokens.textTertiary).lineLimit(1)
+                                        Text(b).foregroundStyle(tokens.inactive).lineLimit(1).forkFont(10)
                                     }
-                                    Text(hit.snippet)
-                                        .font(.system(size: 10, design: .monospaced))
-                                        .foregroundStyle(tokens.textSecondary).lineLimit(1)
+                                    Text(hit.snippet).foregroundStyle(tokens.bright).lineLimit(1).forkFont(10)
                                     if let a = hit.after {
-                                        Text(a).font(.system(size: 10, design: .monospaced))
-                                            .foregroundStyle(tokens.textTertiary).lineLimit(1)
+                                        Text(a).foregroundStyle(tokens.inactive).lineLimit(1).forkFont(10)
                                     }
                                 }
                                 Spacer()
                             }
-                            .padding(.horizontal, 12).padding(.vertical, 6)
+                            .padding(.horizontal, 14).padding(.vertical, 6)
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        PanelRule()
                     }
                 }
+                .background(OverlayScroller())
             }
             if !searching && hits.isEmpty && !query.isEmpty {
-                Text("No matches").font(.system(size: 11)).foregroundStyle(tokens.textSecondary).padding()
+                Text("No matches").foregroundStyle(tokens.inactive).forkFont(12).padding()
             }
             if !searching && !query.isEmpty {
                 // Say what was actually searched: zmx keeps the last 10k lines per session,
                 // and a pane whose history didn't come back isn't a pane with no match.
-                Divider()
+                PanelRule()
                 Text("Searched \(searchedPanes) pane\(searchedPanes == 1 ? "" : "s")"
                      + (unsearched > 0 ? " · \(unsearched) unavailable (no answer)" : "")
                      + " · last 10k lines per session, as of when this opened")
-                    .font(.system(size: 10)).foregroundStyle(tokens.textTertiary)
-                    .padding(.horizontal, 12).padding(.vertical, 5)
+                    .foregroundStyle(tokens.inactive).forkFont(10)
+                    .padding(.horizontal, 14).padding(.vertical, 6)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .frame(width: 600, height: 420)
-        .onAppear { fieldFocused = true }
+        .frame(width: Self.size.width, height: Self.size.height)
+        // Async: the borderless panel isn't key yet at onAppear time (same as the palette).
+        .onAppear { DispatchQueue.main.async { fieldFocused = true } }
         .onExitCommand { onDone() }
         .onDisappear { debounce?.cancel(); searchTask?.cancel(); fetchTask?.cancel() }
     }

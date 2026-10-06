@@ -9,16 +9,6 @@ import SwiftUI
 /// here, so a view can't read a themed color without declaring the dependency that
 /// invalidates it.
 enum Theme {
-    /// Fork brand accent — warm terracotta. The ONLY "active/on" tint; system
-    /// `Color.accentColor` is *not* used (it's user-theme blue and clashes).
-    ///
-    /// Deliberately NOT theme-derived. The obvious source would be `palette[1]`, which in the
-    /// author's theme happens to be this exact value — but slot 1 is semantically *red*, so on
-    /// a stock theme the accent would land on red and collapse into ``blocked``. The honest
-    /// source is `cursor-color`, which can't be read without an upstream Zig `cval()` (see
-    /// ``Ghostty/Config/forkColor(_:)``). Until then this stays a brand constant.
-    static let clay = Color(red: 0xD9/255, green: 0x77/255, blue: 0x57/255)
-
     // MARK: Status
     /// Pure red rather than `Color.red`: the system red is tuned to sit in Apple's palette and
     /// shifts with the appearance; a lamp on the terminal's own background wants the flat one.
@@ -26,10 +16,10 @@ enum Theme {
     /// Error text / destructive controls in sheets. Same hue as `blocked` today, but a
     /// separate role — "this operation failed" vs "this pane needs you" — so retuning one
     /// can't silently restyle the other.
-    static let error = Color.red
+    static let error = Color(red: 1, green: 0, blue: 0)
 
     // MARK: Sleep — recency without an age column. A discrete bucket (not a
-    // continuous fade) for the same reason Pebble is seeded: rows redraw on every probe
+    // continuous fade): rows redraw on every probe
     // tick, and a creeping value reads as activity. Not an alpha: nothing in the
     // sidebar is translucent, so it is carried by a *color role* (`ForkTokens.inactive`).
     // (There was also a short-term trail — the three panes before this one, first as a clay
@@ -64,13 +54,7 @@ enum Theme {
         })
     }
 
-    // MARK: Swatch selection ring
-    static let ringWidth: CGFloat = 1.5
-
     // MARK: Hover peek — the in-row expansion that replaced the pane-row tooltip.
-    /// Clay hairline that draws across the top of the peek ledger — the expansion's one
-    /// brand moment; everything else in the ledger stays grayscale.
-    static let peekRule = clay.opacity(0.35)
     /// The cursor must *rest* on a row this long before it exhales open — casual passes
     /// and scroll-throughs (rows changing under a still cursor) never trigger it.
     static let peekDelay: TimeInterval = 0.35
@@ -82,72 +66,8 @@ enum Theme {
     static let settle = Animation.easeOut(duration: 0.18)
 }
 
-/// Organic almost-circle — two low-amplitude sine harmonics perturb the radius so each seed
-/// gets its own stable pebble silhouette. Seeded (not random-per-render) on purpose: rows
-/// re-render on every probe tick and a shimmering dot reads as activity. Harmonics are
-/// integer multiples of the angle, so the outline closes without a seam.
-struct Pebble: InsettableShape {
-    var seed: Int
-    var insetAmount: CGFloat = 0
-    func inset(by amount: CGFloat) -> Pebble {
-        var c = self; c.insetAmount += amount; return c
-    }
-    func path(in rect: CGRect) -> Path {
-        let r = rect.insetBy(dx: insetAmount, dy: insetAmount)
-        guard r.width > 0, r.height > 0 else { return Path() }
-        let p1 = Double(seed) * 1.7, p2 = Double(seed) * 2.9
-        let n = 10
-        let pts = (0..<n).map { i -> CGPoint in
-            let t = Double(i) / Double(n) * 2 * .pi
-            let wobble = 0.96 + 0.065 * sin(2 * t + p1) + 0.045 * sin(3 * t + p2)
-            return CGPoint(x: r.midX + cos(t) * r.width / 2 * wobble,
-                           y: r.midY + sin(t) * r.height / 2 * wobble)
-        }
-        func mid(_ a: CGPoint, _ b: CGPoint) -> CGPoint { .init(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2) }
-        var path = Path()
-        path.move(to: mid(pts[n - 1], pts[0]))
-        for i in 0..<n {
-            path.addQuadCurve(to: mid(pts[i], pts[(i + 1) % n]), control: pts[i])
-        }
-        path.closeSubpath()
-        return path
-    }
-}
-
-extension Pebble {
-    /// Tag pebbles are seeded from the tag hue — the swatch picked in TagEditView is the
-    /// exact silhouette the sidebar row wears. Keep the hue→seed mapping here only.
-    /// Hue is decode-clamped (`PaneTag.init(from:)`) but harden here too: `Int(_:Double)`
-    /// traps on NaN/±inf/out-of-range, and a trap here repeats for every tagged row — a
-    /// hand-edited fork.json could brick launch.
-    init(tagHue: Double) {
-        let h = tagHue.isFinite ? min(max(tagHue, 0), 1) : 0
-        self.init(seed: Int(h * 97))
-    }
-}
-
-/// Hand-cut card corners — four slightly different radii (quad curves, a touch softer than
-/// arcs) so the card chrome reads as cut by hand rather than die-stamped.
-struct HandCut: Shape {
-    var tl: CGFloat = 8, tr: CGFloat = 4, br: CGFloat = 9, bl: CGFloat = 5
-    func path(in r: CGRect) -> Path {
-        var p = Path()
-        p.move(to: .init(x: r.minX + tl, y: r.minY))
-        p.addLine(to: .init(x: r.maxX - tr, y: r.minY))
-        p.addQuadCurve(to: .init(x: r.maxX, y: r.minY + tr), control: .init(x: r.maxX, y: r.minY))
-        p.addLine(to: .init(x: r.maxX, y: r.maxY - br))
-        p.addQuadCurve(to: .init(x: r.maxX - br, y: r.maxY), control: .init(x: r.maxX, y: r.maxY))
-        p.addLine(to: .init(x: r.minX + bl, y: r.maxY))
-        p.addQuadCurve(to: .init(x: r.minX, y: r.maxY - bl), control: .init(x: r.minX, y: r.maxY))
-        p.addLine(to: .init(x: r.minX, y: r.minY + tl))
-        p.addQuadCurve(to: .init(x: r.minX + tl, y: r.minY), control: .init(x: r.minX, y: r.minY))
-        p.closeSubpath()
-        return p
-    }
-}
-
-/// Cut corners — a rectangle with all four corners taken off at 45°. The sidebar's one
-/// frame shape: host modules, focus-mode cards, the focused row, toolbar keys.
+/// Cut corners — a rectangle with all four corners taken off at 45°. The fork's one
+/// frame shape: host modules, panels, focus-mode cards, the selected row, keys.
 struct Chamfer: InsettableShape {
     var cut: CGFloat = 8
     var insetAmount: CGFloat = 0

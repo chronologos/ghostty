@@ -35,10 +35,11 @@ GHOSTTY_FORK=1 open macos/build/Debug/Ghostty.app
 cd macos && xcodebuild test -scheme Ghostty -destination 'platform=macOS' \
   -only-testing:GhosttyTests/TransportTests
 
-# Look at the sidebar without quitting the running app: renders the real SidebarView
-# offscreen over a seeded registry (3 themes, focus mode, the narrow floor, every lamp)
+# Look at any fork view without quitting the running app: renders the real views offscreen
+# over a seeded registry (3 themes; sidebar incl. focus mode + narrow floor, every lamp, every
+# panel). Add TEST_RUNNER_FORK_SNAPSHOT_FONT='<family>' to set the face.
 cd macos && TEST_RUNNER_FORK_SNAPSHOT_DIR=/tmp/shots xcodebuild test -scheme Ghostty \
-  -destination 'platform=macOS' -only-testing:GhosttyTests/SidebarSnapshotTests
+  -destination 'platform=macOS' -only-testing:GhosttyTests/ForkSnapshotTests
 
 # Seam + symbol invariants — run after every rebase
 ./scripts/fork-check.sh
@@ -126,10 +127,30 @@ Fork/
                                poll keeps last-known. Also `rename` (CC name sync over the
                                session's control UDS)
   UI/
-    ForkWindowController.swift the controller; tab switching = swap surfaceTree; sheet
-                               presentation; ⌘W Detach/Kill routing; kill verification;
+    ForkWindowController.swift the controller; tab switching = swap surfaceTree; panel
+                               presentation (`presentSheet`: every floating surface is a
+                               borderless child window, one at a time, closed by losing key —
+                               never a system sheet or `NSAlert`, whose chrome can't be
+                               restyled; one key monitor per panel handles Esc for all of them;
+                               `presentConfirm` appends Cancel so no caller can forget it); ⌘W Detach/Kill routing; kill verification;
                                sidebar width = drag the right edge (248pt floor, persisted
                                via UserDefaults ForkSidebarWidth; ⌘⇧B hide/show restores it)
+    PanelKit.swift             the parts every surface outside the sidebar is built from, so the
+                               look lives in one place: `Panel` (cut-corner frame + title strip:
+                               NAME · hatch · chord), `PanelButtonStyle` (primary = inverse
+                               video, destructive = red line and label, never a red fill;
+                               compact destructive = red label in a quiet frame, because it
+                               repeats down lists), `panelField()`, `panelRow(selected:)` (the
+                               sidebar's bright outline — not inverse video, so what's in the
+                               row keeps its color), `KeyHint`, `PromptMark`, `PanelRule`,
+                               `ConfirmView` (its keys are *data*, matched by the pure, unit-
+                               tested `ConfirmView.choice(for:…)` from the panel's one key
+                               monitor — not `keyboardShortcut`s: they decide whether a session
+                               dies, and one rule refuses auto-repeat for all of them),
+                               `OverlayScroller`, and type: `forkMono` +
+                               `.forkFont(_:_:)` off `\.forkFontFamily`. House rules: flat,
+                               opaque, words or lamps rather than symbols, nothing on screen
+                               that has to be explained
     SidebarView.swift          flat, opaque, cut-cornered: nothing in it is translucent, so every
                                state is a *shape* or a *color role*, never an alpha. Sits on
                                the terminal's own background (`ForkTokens.ground`), divided
@@ -190,19 +211,18 @@ Fork/
                                nearest hue so a slot keeps its color, or the wheel if the
                                theme can't make a legible one) + the `\.forkTokens` env key
                                + ForkThemed, the one
-                               place ForkTheme is observed. Two families: the alpha-based
-                               roles the palette/sheets/pickers still use over a material, and
-                               the sidebar's four flat ones — `ground` (= bg), `rule` (bg→fg
+                               place ForkTheme is observed (it also injects
+                               `\.forkFontFamily`). Five roles, all opaque: `text` (= fg, also
+                               the loud line), `ground` (= bg), `rule` (bg→fg
                                at 0.4: the FF→66 ratio, so a flat primary lands on its dark
                                partner exactly), `inactive` (neutral gray: losing the hue is
                                what says "not live"), `bright` (white/black by polarity).
                                `resolve` declines a theme when
                                Increase Contrast is on or the bg's polarity fights the
-                               window appearance the material is drawn from
-    Theme.swift                theme-*independent* tokens (clay/blocked/error/…), recency rule
-                               (asleep), peek
-                               tokens (peekRule/peekDelay/exhale/settle), shapes: Chamfer + Hatch
-                               (sidebar), Pebble + HandCut (palette, sheets), ForkCard
+                               window appearance (system controls inside a panel follow it)
+    Theme.swift                theme-*independent* tokens (blocked/error, both pure red; tag
+                               hues), recency rule (asleep), peek timing
+                               (peekDelay/exhale/settle), shapes: Chamfer + Hatch, ForkCard
     TagEditView.swift          tag popover (text + 8 hue swatches); opened from the pane
                                context menu's Tag submenu ("New Tag…")
     NewSessionView.swift       two-stage new-session palette (⌘T / ⌘⇧T / sidebar ＋ /
@@ -214,22 +234,27 @@ Fork/
                                state lives in `NewSessionMachine` (unit-tested) so the
                                sel-reset invariants don't depend on view-side onChange
     SessionMetaLabel.swift     shared session-row pieces: name (alias › id › dim cwd/cmd
-                               line), trailer (CC sparkle + in-sidebar glyph + client-count
-                               + creation age or task exit), and the not-responding row
-    HostsView.swift            master-detail Hosts sheet (list + add-host form)
+                               line), trailer (CC lamp · OPEN if already in the sidebar ·
+                               "N clients" · creation age or task exit — words, not glyphs and
+                               bare numbers), and the not-responding row
+    HostsView.swift            master-detail Hosts panel (drawn list + add-host form)
     HostDetailView.swift       detail pane: rename, N×N SlotPicker (10-slot theme-derived ramp,
-                               bicolor HostDot), sessions, remove
+                               bicolor HostDot), sessions, remove. It and NewSessionView take a
+                               `ZmxAdapter.Lister` (default `liveLister`) so offscreen renders
+                               can feed them a canned list
     ForkPaletteView.swift      ForkPanePalette (⌘K, rendered by the fork-owned
                                ForkPaletteCard — fills a window-scaled panel; upstream's
                                CommandPaletteView caps at 500×~250 so it's not used; match
-                               highlighting still reuses upstream String.matchedIndices) +
+                               highlighting still reuses upstream String.matchedIndices; a pane
+                               leads with its host square, an action with `>` — upstream's
+                               `leadingIcon` isn't drawn) +
                                ScrollbackSearchView (⌘⇧K, history fetched once per sheet
                                then matched client-side)
     CheatsheetView.swift       hold-⌥ shortcut overlay; static content, shown/hidden by
                                `setCheatsheet` off OptionGestureRecognizer's `onPeek`
                                (it owns the debounce — there is no second ⌥ recognizer)
-    ForkSheetPanel.swift       NSWindow.performKeyEquivalent → ⌘V/C/X/A/Z/⇧Z to
-                               firstResponder; reused as the borderless ⌘K palette window
+    ForkSheetPanel.swift       the borderless key-capable window every panel floats in;
+                               performKeyEquivalent → ⌘V/C/X/A/Z/⇧Z to firstResponder
 ```
 
 New-session flow: one two-stage palette (`NewSessionView`) for every entry point. ⌘T /
@@ -282,7 +307,7 @@ shadows upstream's `undo` alias (Config.zig:6934); ⌘Z remains undo.
   probe keeps last-known for them (not `.probeAbsent`), and pickers/Hosts show a dim
   "not responding" row. Never reach for `zmx kill --force` — it unlinks the socket of a
   merely busy daemon and orphans it.
-- **Sheet ⌘V**: nil-targeted menu actions walk *past* the sheet to
+- **Panel ⌘V**: nil-targeted menu actions walk *past* the panel to
   `mainWindow.firstResponder` (the `SurfaceView`, which has its own `paste:`).
   `ForkSheetPanel.performKeyEquivalent` intercepts before the menu.
 - **`activeTabID` is controller-owned**: registry's `newTab`/`removeTab` mutate the list
@@ -576,7 +601,7 @@ A terminal that runs arbitrary shells will trip every macOS privacy surface. Thr
   buttons through untranslated). Trade-off: the pty never sees either form (xterm SGR
   buttons 8/9), so a TUI that binds them loses; nothing common does. Also in the ⌘K
   palette as Back/Forward (shown only when a step would actually land somewhere).
-  Swallowed-but-inert while a sheet or the ⌘W alert is up.
+  Swallowed-but-inert while a panel is up.
   ⇧⏎ in the session picker = smart-jump create — needs the zsh-z plugin (`zshz`) in
   the target host's .zshrc. No zshz → starts in the default dir; no zsh at all → the
   sh wrapper degrades to `${SHELL:-sh} -l`. Disabled when the typed name already

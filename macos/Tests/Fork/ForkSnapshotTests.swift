@@ -4,19 +4,21 @@ import SwiftUI
 import Testing
 @testable import Ghostty
 
-/// Renders the real `SidebarView` offscreen, over a seeded registry, to PNGs — the only way to
-/// *look* at a sidebar change without quitting the running app (a second instance exits at
+/// Renders the fork's real views offscreen, over a seeded registry, to PNGs — the only way to
+/// *look* at a visual change without quitting the running app (a second instance exits at
 /// the fork.json guard). Asserts nothing about pixels; it exists to be read by eye.
 ///
 ///     TEST_RUNNER_FORK_SNAPSHOT_DIR=/tmp/shots xcodebuild test … \
-///       -only-testing:GhosttyTests/SidebarSnapshotTests
+///       -only-testing:GhosttyTests/ForkSnapshotTests
 ///
-/// Skipped unless that variable is set. What it can't show: anything that needs a live surface
-/// (`controller` is nil, so no OSC titles and no DETACHED cue on rows) and the configured
-/// terminal font (it comes from the controller's config; this falls back to the system mono).
+/// Skipped unless that variable is set. `TEST_RUNNER_FORK_SNAPSHOT_FONT=<family>` sets the face
+/// (otherwise the system mono, as with no `window-title-font-family`). What it can't show:
+/// anything that needs a live surface (`controller` is nil, so no OSC titles, no DETACHED cue
+/// on rows, no pane actions in the palette), hover, focus rings, or motion.
 @MainActor
-struct SidebarSnapshotTests {
+struct ForkSnapshotTests {
     private static let dir = ProcessInfo.processInfo.environment["FORK_SNAPSHOT_DIR"]
+    private static let font = ProcessInfo.processInfo.environment["FORK_SNAPSHOT_FONT"]
 
     private struct Scheme { let name: String, fg: UInt32, bg: UInt32 }
     private static let schemes = [
@@ -36,9 +38,12 @@ struct SidebarSnapshotTests {
                                  increaseContrast: false)!
     }
 
-    private func shoot(_ view: some View, _ s: Scheme, size: CGSize, as name: String) throws {
-        let host = NSHostingView(rootView: view.environment(\.forkTokens, tokens(s)))
+    /// `size` nil = whatever the view asks for (panels that size themselves).
+    private func shoot(_ view: some View, _ s: Scheme, size: CGSize? = nil, as name: String) throws {
+        let host = NSHostingView(rootView: view.environment(\.forkTokens, tokens(s))
+            .environment(\.forkFontFamily, Self.font))
         host.appearance = NSAppearance(named: color(s.bg).isLightColor ? .aqua : .darkAqua)
+        let size = size ?? host.fittingSize
         host.frame = CGRect(origin: .zero, size: size)
         // Never ordered in: it only has to give the hosting view a window to lay out in.
         let window = NSWindow(contentRect: host.frame, styleMask: .borderless,
@@ -198,9 +203,71 @@ struct SidebarSnapshotTests {
                 }
             }
             .padding(12).background(t.ground), s, size: CGSize(width: 660, height: 72), as: "lamps")
-            try shoot(SidebarRevealKey(fontFamily: nil) {}.padding(8).background(t.ground), s,
-                      size: CGSize(width: 60, height: 36), as: "reveal")
+            try shoot(SidebarRevealKey {}.padding(8).background(t.ground), s, as: "reveal")
         }
+    }
+
+    // MARK: Panels
+
+    private func ago(_ s: TimeInterval) -> Date { Date(timeIntervalSinceNow: -s) }
+
+    /// One of every kind of row the session lists can show.
+    private var cannedList: ZmxAdapter.ListResult {
+        .init(
+            managed: [
+                .init(name: "deputy", clients: 1, created: ago(7200), external: false, cwd: "/Users/me/code/proxy-trial"),
+                .init(name: "shell-k7w", clients: 0, created: ago(90_000), external: false,
+                      alias: "release notes", cwd: "/Users/me/src/notes"),
+                .init(name: "ghostty", clients: 2, created: ago(400), external: false, cwd: "/Users/me/src/ghostty"),
+                .init(name: "nightly", clients: 0, created: ago(30_000), external: false, cwd: "/Users/me/src/app",
+                      cmd: "zig build test", ended: ago(1200), exitCode: 1),
+            ],
+            external: [.init(name: "scratch", clients: 0, created: ago(600_000), external: true, cwd: "/tmp")],
+            unresponsive: [.init(name: "build-box", external: false, err: "Timeout")])
+    }
+
+    /// A panel floats over the terminal, so shoot it over the ground with room for its corners.
+    private func floating(_ v: some View, _ s: Scheme) -> some View { v.padding(16).background(tokens(s).ground) }
+
+    @Test(.enabled(if: dir != nil))
+    func panels() throws {
+        let r = seed()
+        defer { r.resetForTesting() }
+        try FileManager.default.createDirectory(atPath: Self.dir!, withIntermediateDirectories: true)
+        let canned = cannedList
+        let lister: ZmxAdapter.Lister = { _ in .success(canned) }
+        let local = try #require(r.host(id: "local"))
+        let atlas = try #require(r.host(id: "atlas"))
+
+        for s in Self.schemes {
+            try shoot(floating(ForkPanePalette(controller: nil, onDone: {}).environmentObject(r)
+                .frame(width: 620, height: 460), s), s, as: "palette")
+            try shoot(floating(NewSessionView(host: local, placeholder: "shell-x3f", lister: lister,
+                                              onSubmit: { _, _, _ in }, onCancel: {}).environmentObject(r), s),
+                      s, as: "picker-host")
+            try shoot(floating(NewSessionView(title: "Split on localhost", host: local, locked: true,
+                                              placeholder: "shell-x3f", lister: lister,
+                                              onSubmit: { _, _, _ in }, onCancel: {}).environmentObject(r), s),
+                      s, as: "picker-session")
+            try shoot(floating(HostsView(select: atlas.id, lister: lister, onRemove: { _ in }, onDone: {})
+                .environmentObject(r), s), s, as: "hosts-detail")
+            try shoot(floating(ConfirmView(
+                title: "Close", chord: "⌘W", headline: "Close pane 'release notes'?",
+                detail: "zmx session shell-k7w. Detach leaves the zmx session running. Reattach from ⌘T or the split picker.",
+                choices: [
+                    .init(label: "Detach", chord: "⏎", kind: .primary, keys: [.return]) {},
+                    .init(label: "Kill Session", chord: "K · ⌘W", kind: .destructive, keys: []) {},
+                    .init(label: "Cancel", chord: "esc", keys: [.escape]) {},
+                ]), s), s, as: "confirm")
+        }
+        let s = Self.schemes[0]
+        try shoot(floating(HostsView(lister: lister, onRemove: { _ in }, onDone: {}).environmentObject(r), s),
+                  s, as: "hosts-add")
+        try shoot(floating(ScrollbackSearchView(controller: nil, onDone: {}).environmentObject(r), s),
+                  s, as: "search")
+        try shoot(floating(CheatsheetView(hoverCommands: ["g": .init(cmd: ["lazygit", "-p", "{cwd}"], mode: .pane)]), s),
+                  s, as: "cheatsheet")
+        try shoot(TagEditView(seed: PaneTag(text: "ops", hue: 0.08)) { _ in }, s, as: "tag")
     }
 }
 #endif

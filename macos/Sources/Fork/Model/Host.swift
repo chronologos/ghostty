@@ -151,10 +151,10 @@ struct PaneTag: Codable, Hashable {
 
     init(text: String, hue: Double) { self.text = text; self.hue = hue }
 
-    /// fork.json is hand-editable: a non-finite or out-of-range hue would reach
-    /// `Int(hue * 97)` (the Pebble seed) and trap — for every row wearing the tag, on
-    /// every launch, i.e. a launch-loop brick. Clamp at the decode boundary, same policy
-    /// as `ForkHost.accentSlot`.
+    /// fork.json is hand-editable: keep a non-finite or out-of-range hue from reaching
+    /// anything that does arithmetic on it. (It once seeded a shape via `Int(hue * 97)`, which
+    /// traps — for every row wearing the tag, on every launch, i.e. a launch-loop brick.)
+    /// Clamp at the decode boundary, same policy as `ForkHost.accentSlot`.
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
         text = try c.decode(String.self, forKey: .text)

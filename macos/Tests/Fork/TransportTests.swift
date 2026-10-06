@@ -144,8 +144,8 @@ struct TransportTests {
         #expect(ForkHost.SSHTarget(parsing: "-h") != nil)
     }
 
-    /// fork.json is hand-editable: a hostile/typo'd tag hue must clamp at decode, not trap
-    /// at `Int(hue * 97)` (the Pebble seed) on every launch — that's a launch-loop brick.
+    /// fork.json is hand-editable: a hostile/typo'd tag hue must clamp at decode, not reach
+    /// whatever does arithmetic on it (an `Int(hue * 97)` once trapped on every launch).
     @Test func paneTagHueClampsAtDecode() throws {
         func tag(_ hue: String) throws -> PaneTag {
             try JSONDecoder().decode(PaneTag.self, from: Data(#"{"text":"t","hue":\#(hue)}"#.utf8))
