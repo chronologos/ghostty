@@ -37,6 +37,46 @@ struct ForkThemeTests {
         #expect(resolve(fg: darkFG, bg: darkBG, dark: true)?.text == Color(nsColor: darkFG))
     }
 
+    // MARK: The sidebar's flat roles
+
+    private func srgb(_ hex: UInt32) -> NSColor {
+        NSColor(srgbRed: CGFloat(hex >> 16 & 0xFF) / 255, green: CGFloat(hex >> 8 & 0xFF) / 255,
+                blue: CGFloat(hex & 0xFF) / 255, alpha: 1)
+    }
+
+    /// The sidebar sits on the terminal's own background, exactly — not a wash of it.
+    @Test func groundIsTheTerminalBackground() {
+        #expect(resolve(fg: darkFG, bg: darkBG, dark: true)?.ground == Color(nsColor: darkBG))
+    }
+
+    /// 0.4 is the ratio between a saturated primary and its dark partner (FF → 66), so on a
+    /// flat primary theme the quiet rule is that partner to the byte, on either polarity.
+    @Test func ruleLandsOnThePrimarysDarkPartner() {
+        for (fg, want) in [(0x00FFFF, 0x006666), (0xFF00FF, 0x660066), (0xFFFF00, 0x666600)] as [(UInt32, UInt32)] {
+            #expect(resolve(fg: srgb(fg), bg: srgb(0x000000), dark: true)?.rule == Color(nsColor: srgb(want)))
+        }
+        #expect(resolve(fg: srgb(0x000000), bg: srgb(0xFFFFFF), dark: false)?.rule == Color(nsColor: srgb(0x999999)))
+    }
+
+    /// Nothing the sidebar draws with is translucent: two overlapping alphas stop being the
+    /// color either was meant to be.
+    @Test func flatRolesAreOpaque() throws {
+        for t in [try #require(resolve(fg: darkFG, bg: darkBG, dark: true)),
+                  try #require(resolve(fg: lightFG, bg: lightBG, dark: false))] {
+            for c in [t.ground, t.rule, t.inactive, t.bright] {
+                #expect(NSColor(c).alphaComponent == 1)
+            }
+        }
+    }
+
+    /// `bright` is the step *past* the foreground, so it follows the background's polarity;
+    /// `inactive` is a neutral gray that still clears 4.5:1 on a pure ground.
+    @Test func brightAndInactiveFollowPolarity() {
+        let dark = resolve(fg: darkFG, bg: darkBG, dark: true), light = resolve(fg: lightFG, bg: lightBG, dark: false)
+        #expect(dark?.bright == .white && light?.bright == .black)
+        #expect(dark?.inactive == Color(white: 0.6) && light?.inactive == Color(white: 0.4))
+    }
+
     // MARK: The decline paths — each returns nil, meaning "use system semantics"
 
     /// The bug this rule exists for: under `macos-titlebar-style = native`/`hidden`, the
