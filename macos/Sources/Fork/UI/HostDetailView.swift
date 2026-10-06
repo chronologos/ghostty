@@ -8,6 +8,7 @@ struct HostDetailView: View {
     @Environment(\.forkTokens) private var tokens
 
     let host: ForkHost
+    let lister: ZmxAdapter.Lister
     let onRemove: () -> Void
 
     @EnvironmentObject private var registry: SessionRegistry
@@ -18,56 +19,58 @@ struct HostDetailView: View {
     @State private var failure: ZmxAdapter.ListFailure?
     private var unreachable: Bool { failure != nil }
     @State private var killError: String?
+    @State private var pickingColor = false
 
-    init(host: ForkHost, onRemove: @escaping () -> Void) {
-        self.host = host; self.onRemove = onRemove
+    init(host: ForkHost, lister: @escaping ZmxAdapter.Lister = ZmxAdapter.liveLister,
+         onRemove: @escaping () -> Void) {
+        self.host = host; self.lister = lister; self.onRemove = onRemove
         self._label = State(initialValue: host.label)
         self._slot = State(initialValue: host.slot)
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text(host.label).font(.headline)
+                Text(host.label.uppercased()).kerning(1).foregroundStyle(tokens.bright).forkFont(12, .bold)
                 Spacer()
-                Text(host.transport.displayConnection).font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(tokens.textSecondary)
+                Text(host.transport.displayConnection).foregroundStyle(tokens.inactive).forkFont(11)
             }
 
-            TextField("Label", text: $label).textFieldStyle(.roundedBorder)
+            TextField("", text: $label, prompt: Text("label").foregroundColor(tokens.inactive)).panelField()
             // Collapsed by default — the 10×10 grid is ~236pt and would squash `sessionList`
             // to nothing; sessions are the primary content here.
-            DisclosureGroup {
-                SlotPicker(slot: $slot, hostID: host.id).padding(.top, 6)
-            } label: {
-                HStack(spacing: 8) { HostDot(slot: slot, size: 14); Text("Color") }
+            HStack(spacing: 8) {
+                HostDot(slot: slot, size: 14)
+                Text("COLOR").kerning(0.8).foregroundStyle(tokens.text).forkFont(10, .bold)
+                Spacer()
+                Button(pickingColor ? "Close" : "Change") { pickingColor.toggle() }
+                    .buttonStyle(PanelButtonStyle(compact: true))
             }
+            if pickingColor { SlotPicker(slot: $slot, hostID: host.id) }
 
-            Divider()
+            PanelRule()
 
             HStack {
-                Text("Sessions").font(.subheadline).foregroundStyle(tokens.textSecondary)
+                Text("SESSIONS").kerning(0.8).foregroundStyle(tokens.text).forkFont(10, .bold)
                 Spacer()
-                Button { Task { await reload() } } label: {
-                    Image(systemName: "arrow.clockwise").font(.caption)
-                }
-                .buttonStyle(.borderless).disabled(loading)
+                Button("Reload") { Task { await reload() } }
+                    .buttonStyle(PanelButtonStyle(compact: true)).disabled(loading)
             }
-            // Absence of a sparkle must not read as "verified no agent": CC info only
+            // Absence of a CC lamp must not read as "verified no agent": CC info only
             // exists for hosts the poll currently covers (toggle on + ≥1 sidebar tab).
             if !loading, !unreachable,
                registry.ccLive[host.id] == nil || !registry.tabs.contains(where: { $0.hostID == host.id }) {
                 Text("CC status unknown for this host (not currently polled)")
-                    .font(.caption2).foregroundStyle(tokens.textSecondary)
+                    .foregroundStyle(tokens.inactive).forkFont(10)
             }
             sessionList.frame(maxHeight: .infinity)
 
             if let killError {
-                Text(killError).font(.caption).foregroundStyle(Theme.error).lineLimit(2)
+                Text(killError).foregroundStyle(Theme.error).lineLimit(2).forkFont(10)
             }
 
             if host.id != ForkHost.local.id {
-                Button("Remove Host", role: .destructive, action: onRemove)
+                Button("Remove Host", action: onRemove).buttonStyle(PanelButtonStyle(kind: .destructive))
             }
         }
         .task { await reload() }
@@ -81,7 +84,7 @@ struct HostDetailView: View {
 
     @ViewBuilder private var sessionList: some View {
         if loading {
-            HStack { ProgressView().controlSize(.small); Text("Listing…").foregroundStyle(tokens.textSecondary) }
+            HStack(spacing: 8) { Lamp(.working); Text("Listing…").foregroundStyle(tokens.inactive).forkFont(11) }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if unreachable {
             // Distinct from "No sessions": the query failed, so the sessions are very likely
@@ -89,34 +92,43 @@ struct HostDetailView: View {
             // …and say which half failed: a zmx that's slow to list (a few sessions not
             // answering its 1s probe each) and an ssh that can't connect are fixed in
             // different places.
-            Text("No list from \(host.label) — \(failure?.summary ?? "unknown error"). Then ⟳")
+            Text("No list from \(host.label) — \(failure?.summary ?? "unknown error"). Then Reload.")
                 .multilineTextAlignment(.center)
-                .foregroundStyle(tokens.textSecondary)
+                .foregroundStyle(tokens.inactive).forkFont(11)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if sessions.managed.isEmpty && sessions.external.isEmpty && sessions.unresponsive.isEmpty {
-            Text("No sessions").foregroundStyle(tokens.textSecondary)
+            Text("No sessions").foregroundStyle(tokens.inactive).forkFont(11)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            List {
-                ForEach(sessions.managed, id: \.name) { sessionRow($0) }
-                ForEach(sessions.external, id: \.name) { sessionRow($0) }
-                // Present but not answering. Listed so a failed Kill can't look like a
-                // successful one (the row used to just vanish) and so there *is* a Kill
-                // button for a session that's wedged.
-                ForEach(sessions.unresponsive, id: \.self) { u in
-                    HStack {
-                        UnresponsiveSessionLabel(entry: u)
-                        Spacer()
-                        killButton(name: u.name, external: u.external)
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(sessions.managed, id: \.name) { sessionRow($0) }
+                    ForEach(sessions.external, id: \.name) { sessionRow($0) }
+                    // Present but not answering. Listed so a failed Kill can't look like a
+                    // successful one (the row used to just vanish) and so there *is* a Kill
+                    // button for a session that's wedged.
+                    ForEach(sessions.unresponsive, id: \.self) { u in
+                        ruled(HStack {
+                            UnresponsiveSessionLabel(entry: u)
+                            Spacer()
+                            killButton(name: u.name, external: u.external)
+                        })
                     }
                 }
+                .background(OverlayScroller())
             }
-            .listStyle(.plain)
+        }
+    }
+
+    private func ruled(_ row: some View) -> some View {
+        VStack(spacing: 0) {
+            row.padding(.vertical, 5)
+            PanelRule()
         }
     }
 
     private func sessionRow(_ e: ZmxAdapter.ListEntry) -> some View {
-        HStack {
+        ruled(HStack(spacing: 8) {
             // Alias + demoted id (or id alone); Kill still keys on the id (`e.name`).
             VStack(alignment: .leading, spacing: 0) { SessionNameLabel(entry: e) }
             Spacer()
@@ -124,7 +136,7 @@ struct HostDetailView: View {
                              inSidebar: registry.isInSidebar(e.name, external: e.external, on: host.id),
                              ccInfo: registry.ccInfo(for: e, on: host.id))
             killButton(name: e.name, external: e.external)
-        }
+        })
     }
 
     private func killButton(name: String, external: Bool) -> some View {
@@ -155,12 +167,12 @@ struct HostDetailView: View {
                 killError = still ? "\(name) is still there — the kill didn't land (daemon not responding?)" : nil
             }
         }
-        .buttonStyle(.borderless).foregroundStyle(Theme.error)
+        .buttonStyle(PanelButtonStyle(kind: .destructive, compact: true))
     }
 
     private func reload() async {
         loading = true
-        switch await ZmxAdapter.listResult(host: host) {
+        switch await lister(host) {
         case .success(let r): failure = nil; sessions = r
         case .failure(let f): failure = f; sessions = .init()
         }
@@ -192,13 +204,14 @@ struct SlotPicker: View {
                     .compactMap(\.accentSlot))
                 slot = ForkHost.autoSlot(for: hostID, avoiding: others)
             }
-            .buttonStyle(.link).font(.caption)
+            .buttonStyle(PanelButtonStyle(compact: true))
             LazyVGrid(columns: Array(repeating: .init(.fixed(20), spacing: 4), count: ForkHost.N),
                       alignment: .leading, spacing: 4) {
                 ForEach(0..<ForkHost.slotCount, id: \.self) { s in
-                    HostDot(slot: s, size: 18)
-                        .overlay(HostDot.outline(slot: s)
-                            .stroke(s == slot ? tokens.text : .clear, lineWidth: Theme.ringWidth))
+                    HostDot(slot: s, size: 14)
+                        // Ring outside the swatch, on the ground, so it reads on every hue.
+                        .padding(3)
+                        .overlay(Rectangle().strokeBorder(s == slot ? tokens.bright : .clear, lineWidth: 1))
                         .onTapGesture { slot = s }
                 }
             }

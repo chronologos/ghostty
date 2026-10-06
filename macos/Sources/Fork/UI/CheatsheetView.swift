@@ -6,6 +6,7 @@ import SwiftUI
 /// opens both. Static content; the controller toggles the hosting `NSView.isHidden` via
 /// `setCheatsheet`, driven by that recognizer's `onPeek`.
 struct CheatsheetView: View {
+    @Environment(\.forkTokens) private var tokens
     let hoverCommands: [String: HoverCommand]
 
     private static let rows: [(String, String)] = [
@@ -29,29 +30,29 @@ struct CheatsheetView: View {
         ("⌥ hold", "This sheet + reveal read CC status text"),
         ("⌥⌥", "Mark all CC status read"),
         ("Hover pane ⅓s", "Peek — status · dir · zmx name · age"),
-        ("Long-press ◎", "Focus cutoff & sort options"),
+        ("Long-press FOCUS", "Focus cutoff & sort options"),
         ("Mouse ⏴ ⏵", "Back / forward in tab history"),
         ("⇧⏎ in picker", "New session at z-jump dir"),
     ]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(Self.rows, id: \.0) { k, l in row(k, l) }
-            ForEach(hoverCommands.sorted { $0.key < $1.key }, id: \.key) { key, hc in
-                row("⌘K → \(hc.cmd.first ?? key)", hc.cmd.joined(separator: " "))
+        Panel(title: "Keys", chord: "⌥ hold") {
+            VStack(alignment: .leading, spacing: 5) {
+                ForEach(Self.rows, id: \.0) { k, l in row(k, l) }
+                ForEach(hoverCommands.sorted { $0.key < $1.key }, id: \.key) { key, hc in
+                    row("⌘K → \(hc.cmd.first ?? key)", hc.cmd.joined(separator: " "))
+                }
             }
+            .padding(14)
         }
-        .padding(16)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.separator))
-        .shadow(radius: 12)
+        .fixedSize()
     }
 
     private func row(_ key: String, _ label: String) -> some View {
         HStack(spacing: 12) {
-            Text(key).font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .frame(width: 110, alignment: .leading)
-            Text(label).font(.system(size: 11)).lineLimit(1)
+            Text(key).foregroundStyle(tokens.bright).forkFont(11, .bold)
+                .frame(width: 130, alignment: .leading)
+            Text(label).foregroundStyle(tokens.text).lineLimit(1).forkFont(11)
         }
     }
 }

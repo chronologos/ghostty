@@ -160,6 +160,11 @@ enum ZmxAdapter {
         }
     }
 
+    /// `listResult(host:)`'s shape, for the two views that fetch a list themselves — so an
+    /// offscreen render can hand them a canned one instead of running zmx (or ssh).
+    typealias Lister = (ForkHost) async -> Result<ListResult, ListFailure>
+    static let liveLister: Lister = { await listResult(host: $0) }
+
     /// Why a `zmx list` produced no answer — so the UI can stop blaming ssh for a slow zmx.
     enum ListFailure: Error, Equatable {
         /// Wall-clock timeout. With ssh up this is usually zmx itself: `list` probes every
