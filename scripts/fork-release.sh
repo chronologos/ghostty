@@ -54,9 +54,19 @@ env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
     'PRODUCT_BUNDLE_IDENTIFIER=com.mitchellh.ghostty.fork' \
     build
 
+echo "→ fork icon"
+# Baked, not painted at launch: Finder, Spotlight, the quit Dock tile and notification
+# banners only ever read the bundle's icon. Upstream's lives in Assets.car behind
+# CFBundleIconName, which wins over CFBundleIconFile, so the key has to go. Drawn by
+# scripts/fork-icon/render.swift. Must stay above the signing below — Info.plist and
+# Resources are both under the seal.
+cp scripts/fork-icon/ForkGhost.icns "${out}/Contents/Resources/ForkGhost.icns"
+plutil -replace CFBundleIconFile -string ForkGhost "${out}/Contents/Info.plist"
+plutil -remove CFBundleIconName "${out}/Contents/Info.plist"
+
+ent="${ROOT}/macos/GhosttyReleaseLocal.entitlements"
 if security find-identity 2>/dev/null | grep -q "\"${IDENTITY}\""; then
   echo "→ re-sign with '${IDENTITY}'"
-  ent="${ROOT}/macos/GhosttyReleaseLocal.entitlements"
   # Inside-out: nested code first (no entitlements), then the app shell.
   codesign --force --deep --sign "${IDENTITY}" \
     "${out}/Contents/Frameworks/Sparkle.framework"
@@ -73,6 +83,8 @@ if security find-identity 2>/dev/null | grep -q "\"${IDENTITY}\""; then
 else
   echo "⚠ identity '${IDENTITY}' not found — left ad-hoc; TCC will re-prompt every build"
   echo "  fix: scripts/fork-make-cert.sh   (or: FORK_SIGN_IDENTITY='Apple Development: …')"
+  # The icon swap broke xcodebuild's seal on the app shell; nested code is untouched.
+  codesign --force --options runtime --entitlements "${ent}" --sign - "${out}"
 fi
 
 echo

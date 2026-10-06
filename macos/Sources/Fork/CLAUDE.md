@@ -421,6 +421,40 @@ these five exercise the upstream contracts the fork leans on hardest):
    badge counts it (progressReport / `progress-style` gate / UN / badge contracts in one
    pass — all of these break silently).
 
+## App icon
+
+`scripts/fork-icon/render.swift` draws it (CoreGraphics, no dependencies) into the committed
+`scripts/fork-icon/ForkGhost.icns`; `fork-release.sh` bakes that into the bundle before
+signing. Nothing is painted at launch, so Finder, Spotlight, the quit Dock tile and
+notification banners all agree. Debug builds keep upstream's icon — a free tell.
+
+- **Baking = copy the .icns, point `CFBundleIconFile` at it, remove `CFBundleIconName`.**
+  Upstream's icon lives in `Assets.car` behind `CFBundleIconName`, which wins while present.
+  If upstream ever drops that key the `plutil -remove` fails the release loudly: re-check
+  how the icon is wired before papering over it.
+- **No 16px or 32px representations, ever** (`16`, `16@2x`, `32`). macOS 26+ re-masks an
+  `.icns` to the system shape, but shrinks those three onto a grey plate whatever they
+  contain — pre-rounded, full-bleed and identical-to-large art were all plated (tested on
+  27.0). `32@2x` (64px) is the smallest safe one, so it carries the bold small-size cut:
+  Retina 16pt/32pt scale down from it, 1x displays scale down from 128.
+- To see what the system will really draw, dump `NSWorkspace.shared.icon(forFile:)` for a
+  *fresh copy* of the bundle (IconServices caches by path). Reading the .icns directly
+  shows none of the masking or plating. Asking for a copy's icon registers it with
+  LaunchServices under the fork's bundle ID, and deleting the copy doesn't undo that:
+  `lsregister -u <copy>` each one afterwards.
+- **After changing the icon, a pinned Dock tile keeps the old one** while Finder, ⌘Tab and
+  every API (`icon(forFile:)`, `NSRunningApplication.icon`, in-process
+  `applicationIconImage`) already show the new one. The Dock keeps its own on-disk cache,
+  keyed by the tile's GUID rather than by anything about the bundle, and a plain
+  `killall Dock` comes back up with the same stale image. Clear it and don't let the Dock
+  exit cleanly:
+  `rm "$(getconf DARWIN_USER_CACHE_DIR)com.apple.dock.iconcache"; killall -KILL Dock`.
+  The file is also the only way to see a tile without looking at the screen (an auto-hidden
+  Dock renders nothing to capture): after a 0x1000 header it is 256×256 RGBA float16
+  images, premultiplied, 512 KiB each.
+- Upstream's `macos-icon` config still works on top of this and would override the baked
+  icon in the Dock; leave it at `official`.
+
 ## Backlog
 
 - 3rd seam for `keybind = all:cmd+t=new_tab` config edge — leaks through
