@@ -20,38 +20,29 @@ enum Theme {
     static let clay = Color(red: 0xD9/255, green: 0x77/255, blue: 0x57/255)
 
     // MARK: Status
-    static let blocked = Color.red
+    /// Pure red rather than `Color.red`: the system red is tuned to sit in Apple's palette and
+    /// shifts with the appearance; a lamp on the terminal's own background wants the flat one.
+    static let blocked = Color(red: 1, green: 0, blue: 0)
     /// Error text / destructive controls in sheets. Same hue as `blocked` today, but a
     /// separate role — "this operation failed" vs "this pane needs you" — so retuning one
     /// can't silently restyle the other.
     static let error = Color.red
 
-    // MARK: Afterglow / doze — recency without an age column. Discrete buckets (not a
+    // MARK: Sleep — recency without an age column. A discrete bucket (not a
     // continuous fade) for the same reason Pebble is seeded: rows redraw on every probe
-    // tick, and a creeping value reads as activity.
+    // tick, and a creeping value reads as activity. Not an alpha: nothing in the
+    // sidebar is translucent, so it is carried by a *color role* (`ForkTokens.inactive`).
+    // (There was also a short-term trail — the three panes before this one, first as a clay
+    // afterglow, then as a corner cut. It never earned its ink; mouse ⏴/⏵ and ⌘K Back walk
+    // the same history.)
     private static func age(_ d: Date?) -> TimeInterval { d.map { Date().timeIntervalSince($0) } ?? .infinity }
-    /// Short-term trail on the row background — "where was I just now". Keyed on the pane's
-    /// *rank* in the visit order (`SessionRegistry.trailRanks`: 0 = the pane you just left),
-    /// not its age: the old 5m/15m buckets lit every row touched while cycling through a
-    /// fleet, which is exactly when the trail is needed and exactly when it then said nothing.
-    /// Three steps and out. This is the only clay *fill* on a sidebar row — the focused row
-    /// is a neutral lift plus a clay leading bar (`ForkTokens.focusedRow`) — so "here" and
-    /// "just was" can't be mistaken for two strengths of the same thing.
-    static func afterglow(rank: Int?) -> Color {
-        switch rank {
-        case 0: clay.opacity(0.10)
-        case 1: clay.opacity(0.06)
-        case 2: clay.opacity(0.03)
-        default: .clear
-        }
-    }
-    /// Whole-row content opacity for the long tail. `cutoff` is the focus-mode cutoff in
+    /// The long tail: is this pane past caring about? `cutoff` is the focus-mode cutoff in
     /// seconds — "asleep" reuses the user's own definition of "too old to care about".
-    /// `nil` (never touched) is awake, not ancient — the opposite default from `spineHeat`.
-    static func doze(_ d: Date?, cutoff: TimeInterval) -> Double {
-        guard let d else { return 1 }
-        let a = age(d)
-        return a < 3600 ? 1 : a < cutoff ? 0.82 : 0.55
+    /// `nil` (never touched) is awake, not ancient. One step, where the old opacity ramp had
+    /// two (rested at an hour, asleep at the cutoff): a flat palette has one "inactive".
+    static func asleep(_ d: Date?, cutoff: TimeInterval) -> Bool {
+        guard let d else { return false }
+        return age(d) >= max(cutoff, 3600)
     }
 
     // MARK: Tags — one appearance-adaptive formula
@@ -59,8 +50,8 @@ enum Theme {
     /// the brightness bends, with the *appearance* — so this lives on `Theme`, and a tag
     /// swatch takes no `\.forkTokens` dependency.
     static func tag(_ hue: Double) -> Color {
-        appearanceAdaptive(light: NSColor(hue: hue, saturation: 0.6, brightness: 0.45, alpha: 1),
-                           dark: NSColor(hue: hue, saturation: 0.6, brightness: 0.55, alpha: 1))
+        appearanceAdaptive(light: NSColor(hue: hue, saturation: 1, brightness: 0.6, alpha: 1),
+                           dark: NSColor(hue: hue, saturation: 1, brightness: 1, alpha: 1))
     }
 
     /// Self-adapting `Color` so callers don't need `@Environment(\.colorScheme)` — it resolves
@@ -155,17 +146,62 @@ struct HandCut: Shape {
     }
 }
 
-/// Shared card chrome (focus-mode tab cards, host-section cards).
+/// Cut corners — a rectangle with all four corners taken off at 45°. The sidebar's one
+/// frame shape: host modules, focus-mode cards, the focused row, toolbar keys.
+struct Chamfer: InsettableShape {
+    var cut: CGFloat = 8
+    var insetAmount: CGFloat = 0
+    func inset(by amount: CGFloat) -> Chamfer {
+        var c = self; c.insetAmount += amount; return c
+    }
+    func path(in rect: CGRect) -> Path {
+        let r = rect.insetBy(dx: insetAmount, dy: insetAmount)
+        guard r.width > 0, r.height > 0 else { return Path() }
+        // Insetting moves the diagonal in by `inset`·√2 along each axis but the straight edges
+        // by only `inset`, so the cut shortens by the difference — otherwise a stroked border
+        // is visibly heavier on the diagonals.
+        let c = min(max(cut - insetAmount * (2 - 2.0.squareRoot()), 0), min(r.width, r.height) / 2)
+        var p = Path()
+        p.move(to: .init(x: r.minX + c, y: r.minY))
+        p.addLine(to: .init(x: r.maxX - c, y: r.minY))
+        p.addLine(to: .init(x: r.maxX, y: r.minY + c))
+        p.addLine(to: .init(x: r.maxX, y: r.maxY - c))
+        p.addLine(to: .init(x: r.maxX - c, y: r.maxY))
+        p.addLine(to: .init(x: r.minX + c, y: r.maxY))
+        p.addLine(to: .init(x: r.minX, y: r.maxY - c))
+        p.addLine(to: .init(x: r.minX, y: r.minY + c))
+        p.closeSubpath()
+        return p
+    }
+}
+
+/// 45° hatching, the filler between a module's name and its key hint. Stroke it and clip it:
+/// the lines deliberately overrun the rect so the pattern meets every edge.
+struct Hatch: Shape {
+    var pitch: CGFloat = 5
+    func path(in r: CGRect) -> Path {
+        var p = Path()
+        var x = r.minX - r.height
+        while x < r.maxX {
+            p.move(to: .init(x: x, y: r.maxY))
+            p.addLine(to: .init(x: x + r.height, y: r.minY))
+            x += pitch
+        }
+        return p
+    }
+}
+
+/// Shared card chrome (focus-mode tab cards, host modules): a cut-corner frame on the
+/// sidebar's own ground. `line` nil = the quiet rule color.
 struct ForkCard: ViewModifier {
     @Environment(\.forkTokens) private var tokens
-    var fill: Color? = nil
-    var hPad: CGFloat = 6
+    var line: Color? = nil
+    var pad: CGFloat = 3
+    var hPad: CGFloat = 8
     func body(content: Content) -> some View {
         content
-            .padding(6)
-            .background(fill ?? .clear, in: HandCut())
-            .overlay(HandCut()
-                .stroke(tokens.cardBorder, lineWidth: 0.5))
+            .padding(pad)
+            .overlay(Chamfer().strokeBorder(line ?? tokens.rule, lineWidth: 1))
             .padding(.horizontal, hPad)
     }
 }

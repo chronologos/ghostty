@@ -499,8 +499,8 @@ final class SessionRegistry: ObservableObject {
         guard let i = tabs.firstIndex(where: { $0.id == id }) else { return }
         // Exit-stamp the pane being left: `lastActive` means "last time this pane was the
         // focused one", and arrival-only stamping would leave a pane you sat in for an hour
-        // reading as an hour old the moment you switch away (kills the sidebar afterglow
-        // trail, and under-ranks the tab in focus-mode MRU). The stamp is written at the
+        // reading as an hour old the moment you switch away (puts it to sleep early in the
+        // sidebar, and under-ranks the tab in focus-mode MRU). The stamp is written at the
         // *next* touch, so an absence (⌘-tab away, sleep) inflates the departed pane's
         // recency by the gap — accepted: it was still the current pane that whole time.
         if let prev = lastTouched, prev != (id, name) { exitStamp(prev) }
@@ -509,46 +509,6 @@ final class SessionRegistry: ObservableObject {
         // Watermark check (`mru >= dismissedAt`) regresses if `setPersistedTree` later
         // prunes `lastActive` to empty, so clear explicitly — same as `setPinned(true)`.
         tabs[i].dismissedAt = nil
-    }
-
-    /// One pane in one tab — `SessionRef.key` alone isn't unique across tabs.
-    struct PaneTrailKey: Hashable {
-        let tab: TabModel.ID
-        let pane: String
-    }
-
-    /// How far back the afterglow trail reaches. An hour matches `Theme.doze`'s first
-    /// bucket: past it a visit is history, not "where was I just now".
-    static let trailWindow: TimeInterval = 3600
-
-    /// The sidebar's afterglow trail: the panes you were in *before* the current one,
-    /// newest first → rank 0, 1, 2. Rank, not age: a time bucket ("touched in the last
-    /// 15 minutes") saturates exactly when the trail matters — cycling through a fleet lights
-    /// every row you passed, and a sidebar where everything glows says nothing about order.
-    /// The current pane is excluded (selection marks it), and anything older than `within`
-    /// drops out so the last three panes before lunch don't still glow after it.
-    /// Pure, for tests.
-    static func trail(_ stamps: [(key: PaneTrailKey, at: Date)], excluding current: PaneTrailKey?,
-                      now: Date = Date(), within: TimeInterval = trailWindow,
-                      limit: Int = 3) -> [PaneTrailKey: Int] {
-        let recent = stamps
-            .filter { $0.key != current && now.timeIntervalSince($0.at) < within }
-            .sorted { $0.at > $1.at }
-            .prefix(limit)
-        return Dictionary(uniqueKeysWithValues: recent.enumerated().map { ($0.element.key, $0.offset) })
-    }
-
-    /// `trail` over every pane's `lastActive`, minus the pane focus is in right now.
-    func trailRanks(now: Date = Date()) -> [PaneTrailKey: Int] {
-        // Only panes still in the tree: a stamp that outlived its pane would hold a rank
-        // no row can show, and the visible trail would come up one short.
-        let stamps = tabs.flatMap { t in
-            let panes = Set(t.tree.leafRefs.map(\.key))
-            return t.lastActive.filter { panes.contains($0.key) }
-                .map { (key: PaneTrailKey(tab: t.id, pane: $0.key), at: $0.value) }
-        }
-        return Self.trail(stamps, excluding: lastTouched.map { PaneTrailKey(tab: $0.0, pane: $0.1) },
-                          now: now)
     }
 
     func setPaneLabel(tab id: TabModel.ID, name: String, to label: String?) {
