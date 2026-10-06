@@ -671,7 +671,7 @@ final class ForkWindowController: TerminalController {
         return min(max(v, Self.sidebarMinWidth), Self.sidebarMaxWidth, cap)
     }
     private weak var sidebarHost: NSView?
-    private weak var sidebarReveal: NSButton?
+    private weak var sidebarReveal: NSView?
     private weak var sidebarHandle: NSView?
     private var sidebarWidthConstraint: NSLayoutConstraint?
     /// Sidebar's leading offset within the container: 0 shown, −width hidden. Hide/show
@@ -726,8 +726,6 @@ final class ForkWindowController: TerminalController {
         cheatsheetCenterX?.constant = w / 2
         if commit { UserDefaults.standard.set(Double(w), forKey: Self.sidebarWidthKey) }
     }
-
-    @objc private func revealSidebar(_ sender: Any?) { toggleSidebar() }
 
     /// The tab list the sidebar is currently rendering — the single contract for every
     /// list-relative navigation (⌘1-9, ⌘⇧[/⌘⇧], last_tab, move_tab). One accessor so a
@@ -1352,9 +1350,9 @@ final class ForkWindowController: TerminalController {
             cheatsheet.centerYAnchor.constraint(equalTo: terminalContent.centerYAnchor),
         ])
 
-        let reveal = NSButton(image: NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Show sidebar")!,
-                              target: self, action: #selector(revealSidebar(_:)))
-        reveal.isBordered = false
+        let reveal = NSHostingView(rootView: ForkThemed {
+            SidebarRevealKey(fontFamily: ghostty.config.forkFontFamily) { [weak self] in self?.toggleSidebar() }
+        })
         reveal.isHidden = true
         reveal.translatesAutoresizingMaskIntoConstraints = false
         terminalContent.addSubview(reveal)
@@ -1370,7 +1368,7 @@ final class ForkWindowController: TerminalController {
         // edits must not route through SwiftUI re-renders (see the leading-constraint
         // comment above). Added last so it sits above both views — which also means it
         // *steals* clicks from what it covers: biased 2pt-sidebar/5pt-terminal because
-        // the sidebar edge has clickable chrome (rows, StatusRail, overlay scroller)
+        // the sidebar edge has clickable chrome (rows, lamps, overlay scroller)
         // while the terminal's first half-column is only text selection.
         let handle = SidebarResizeHandle()
         handle.translatesAutoresizingMaskIntoConstraints = false
