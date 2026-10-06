@@ -43,13 +43,6 @@ enum ForkBootstrap {
         // `applicationWillFinishLaunching`, which is main — same assumption as the
         // willTerminate handler below; if that ever changes this traps rather than degrading.
         MainActor.assumeIsolated { ForkTheme.shared.start(ghostty.config) }
-        let violet = NSColor(red: 0x7C/255, green: 0x5C/255, blue: 0xD3/255, alpha: 1)
-        let icon = ColorizedGhosttyIcon(
-            screenColors: [.systemPurple, violet],
-            ghostColor: .white,
-            frame: .aluminum
-        ).makeImage(in: .main)
-        NSApp.applicationIconImage = icon.flatMap { degauss($0, px: 6) } ?? icon
         // Flush pending debounced fork.json writes at quit — `$objectWillChange.debounce(500ms)`
         // means rename/tag/tab-switch made within the last half-second would otherwise be lost.
         NotificationCenter.default.addObserver(
@@ -201,28 +194,6 @@ enum ForkBootstrap {
         loginShellOutput("printf '__FORKPATH__%s\\n' \"$PATH\"", timeout: timeout)?
             .split(separator: "\n").last(where: { $0.hasPrefix("__FORKPATH__") })
             .map { String($0.dropFirst("__FORKPATH__".count)) }
-    }
-
-    /// Chromatic-aberration "degauss" — split RGB, offset R/B by ±px, recombine. Channels
-    /// are orthogonal so per-component max ≡ add; alpha stays correct via max(a,a,a)=a.
-    private static func degauss(_ img: NSImage, px: CGFloat) -> NSImage? {
-        guard let tiff = img.tiffRepresentation, let src = CIImage(data: tiff) else { return nil }
-        func channel(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat, dx: CGFloat, dy: CGFloat) -> CIImage {
-            src.applyingFilter("CIColorMatrix", parameters: [
-                "inputRVector": CIVector(x: r, y: 0, z: 0, w: 0),
-                "inputGVector": CIVector(x: 0, y: g, z: 0, w: 0),
-                "inputBVector": CIVector(x: 0, y: 0, z: b, w: 0),
-            ]).transformed(by: .init(translationX: dx, y: dy))
-        }
-        let composed = channel(0, 0, 1, dx: px, dy: -px)
-            .applyingFilter("CIMaximumCompositing",
-                            parameters: [kCIInputBackgroundImageKey: channel(0, 1, 0, dx: 0, dy: 0)])
-            .applyingFilter("CIMaximumCompositing",
-                            parameters: [kCIInputBackgroundImageKey: channel(1, 0, 0, dx: -px, dy: px)])
-            .cropped(to: src.extent)
-        let out = NSImage(size: img.size)
-        out.addRepresentation(NSCIImageRep(ciImage: composed))
-        return out
     }
 
     /// Seam #2 — called from `TerminalController.newWindow` before it constructs a controller.
