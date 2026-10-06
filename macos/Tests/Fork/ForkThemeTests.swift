@@ -37,7 +37,7 @@ struct ForkThemeTests {
         #expect(resolve(fg: darkFG, bg: darkBG, dark: true)?.text == Color(nsColor: darkFG))
     }
 
-    // MARK: The sidebar's flat roles
+    // MARK: The flat roles
 
     private func srgb(_ hex: UInt32) -> NSColor {
         NSColor(srgbRed: CGFloat(hex >> 16 & 0xFF) / 255, green: CGFloat(hex >> 8 & 0xFF) / 255,
@@ -114,41 +114,6 @@ struct ForkThemeTests {
     @Test func polarityIgnoresTheForeground() {
         #expect(resolve(fg: darkFG, bg: lightBG, dark: false) != nil)
         #expect(resolve(fg: lightFG, bg: darkBG, dark: true) != nil)
-    }
-
-    // MARK: weight()
-
-    /// The correction's sign flips with polarity: oat is *dimmer* than the white label it
-    /// replaces (needs more alpha), warm charcoal is *lighter* than the black one (also more).
-    /// Both must exceed the system alpha they're matching — an earlier draft hardcoded one
-    /// constant tuned for dark, which pushed light-mode text the wrong way.
-    @Test func weightExceedsTheSystemAlphaInBothPolarities() {
-        #expect(ForkTheme.weight(0.549, fg: darkFG, isLight: false) > 0.549)
-        #expect(ForkTheme.weight(0.498, fg: lightFG, isLight: true) > 0.498)
-    }
-
-    /// A dim foreground has to work harder to carry the same weight than a bright one.
-    @Test func dimmerForegroundEarnsMoreAlpha() {
-        let oat = ForkTheme.weight(0.549, fg: darkFG, isLight: false)
-        let dim = ForkTheme.weight(0.549, fg: dimFG, isLight: false)
-        #expect(dim > oat)
-    }
-
-    /// Never exceeds opacity, whatever the theme — including the degenerate fg≈bg case that
-    /// would otherwise divide toward infinity.
-    @Test func weightIsClampedToOpaque() {
-        let onBg = NSColor(srgbRed: 0.02, green: 0.02, blue: 0.02, alpha: 1)  // reach ≈ 0.02
-        #expect(ForkTheme.weight(0.549, fg: onBg, isLight: false) == 1)
-        #expect(ForkTheme.weight(0.25, fg: darkFG, isLight: false) <= 1)
-    }
-
-    /// Tertiary stays lighter than secondary for every theme — the text hierarchy can't
-    /// invert no matter how the per-theme correction lands.
-    @Test func textHierarchyCannotInvert() {
-        for (fg, isLight) in [(darkFG, false), (lightFG, true), (dimFG, false)] {
-            #expect(ForkTheme.weight(0.25, fg: fg, isLight: isLight)
-                    < ForkTheme.weight(isLight ? 0.498 : 0.549, fg: fg, isLight: isLight))
-        }
     }
 
     // MARK: Host ramp
@@ -291,20 +256,13 @@ struct ForkThemeTests {
         }
     }
 
-    // MARK: Constants
-
-    /// The accent is deliberately NOT theme-derived — it must survive any reload. Pinning the
-    /// literal so a later "just wire clay to palette[1]" has to delete a test that says why
-    /// not (slot 1 is semantically *red*; it only reads as clay in one unusual theme).
-    @Test func clayStaysABrandConstant() {
-        #expect(Theme.clay == Color(red: 0xD9/255, green: 0x77/255, blue: 0x57/255))
-    }
+    // MARK: Fallback
 
     /// The fallback must be system semantics, not a themed guess — it's what every decline
     /// path above lands on, so it has to be a finished look rather than a degraded one.
     @Test func fallbackIsSystemSemantics() {
         #expect(ForkTokens.fallback.text == .primary)
-        #expect(ForkTokens.fallback.textSecondary == .secondary)
+        #expect(ForkTokens.fallback.inactive == .secondary)
     }
 }
 #endif

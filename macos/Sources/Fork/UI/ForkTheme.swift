@@ -11,19 +11,16 @@ import GhosttyKit
 /// dependency — skips its `body` on a reload and leaves the previous theme's colors on
 /// screen. Here, forgetting is a compile error.
 struct ForkTokens: Equatable {
+    /// The terminal's foreground: text, and the loud line (frames, lit outlines).
     var text: Color
-    var textSecondary: Color
-    var textTertiary: Color
-    var hover: Color
-    var chipBg: Color
-    var cardBorder: Color
-    var selectedRow: Color
 
-    // MARK: Sidebar — flat roles. Every one is opaque: the sidebar sits on `ground`, so a
-    // translucent color would only be a slower way to write a mix, and it would stop being
-    // the same color the moment two of them overlapped.
-    /// The sidebar's backdrop: the terminal's own background, so sidebar and grid are one
-    /// surface divided by a rule rather than a panel bolted on beside it.
+    // Every role is opaque. Fork chrome sits on `ground`, so a translucent color would only be
+    // a slower way to write a mix, and it would stop being the same color the moment two of
+    // them overlapped. (There used to be a second, alpha-based family — secondary/tertiary
+    // text, hover, chip, card border, a clay selection — for the surfaces that sat on a
+    // material. Nothing does any more.)
+    /// The backdrop of everything the fork draws: the terminal's own background, so sidebar and
+    /// grid are one surface divided by a rule, and a panel is a cut-out of the same surface.
     var ground: Color
     /// Quiet hairlines (between tabs, unlit lamps, the sidebar's edge). `text` is the loud one.
     var rule: Color
@@ -55,14 +52,6 @@ struct ForkTokens: Equatable {
     /// can't be trusted over this backdrop, so it has to look finished, not degraded.
     static let fallback = ForkTokens(
         text: .primary,
-        textSecondary: .secondary,
-        textTertiary: Color(nsColor: .tertiaryLabelColor),
-        // The historical literals — see the alpha note in `resolve`.
-        hover: Color.primary.opacity(0.06),
-        chipBg: Color.primary.opacity(0.08),
-        cardBorder: Color.secondary.opacity(0.15),
-        selectedRow: Theme.appearanceAdaptive(light: NSColor(Theme.clay).withAlphaComponent(0.20),
-                                              dark: NSColor(Theme.clay).withAlphaComponent(0.14)),
         ground: Color(nsColor: .windowBackgroundColor),
         rule: Color(nsColor: .separatorColor),
         inactive: .secondary,
@@ -78,7 +67,7 @@ struct ForkTokens: Equatable {
     /// Host tint (the A half of the slot pair), falling back to de-emphasized text for
     /// "no host". The dot is the only bicolor render; text/stroke/rail use A alone.
     func hostAccent(_ h: ForkHost?) -> Color {
-        guard let h else { return textSecondary }
+        guard let h else { return inactive }
         return hostColor(ForkHost.pair(h.slot).a)
     }
 }
@@ -100,7 +89,7 @@ extension EnvironmentValues {
 ///
 /// It resolves the palette here, rather than in ``ForkTheme``, because two of the three inputs
 /// are properties of *this view's* window, not of the app: `colorScheme` is the hosting view's
-/// own `NSAppearance` — the thing that actually colors the material behind a fork view — and
+/// own `NSAppearance` — the thing that colors every system control inside a fork view — and
 /// `colorSchemeContrast` is Increase Contrast. Reading them as environment values means
 /// SwiftUI re-runs this body when either moves, so no `NSApp` KVO or workspace notification is
 /// needed, and the polarity test can't be answered with some other window's appearance.
@@ -117,6 +106,7 @@ struct ForkThemed<Content: View>: View {
                               appearanceIsDark: colorScheme == .dark,
                               increaseContrast: contrast == .increased)
         } ?? .fallback)
+        .environment(\.forkFontFamily, theme.fontFamily)
     }
 }
 
@@ -136,6 +126,10 @@ final class ForkTheme: ObservableObject {
 
     /// `nil` until a config lands, or if either key can't be read.
     @Published private(set) var source: Source?
+
+    /// The face fork chrome is set in — see `Ghostty.Config.forkFontFamily`. Separate from
+    /// `source`: it stands whether or not the colors could be read.
+    @Published private(set) var fontFamily: String?
 
     private init() {}
 
@@ -158,6 +152,7 @@ final class ForkTheme: ObservableObject {
     }
 
     private func adopt(_ config: Ghostty.Config) {
+        if fontFamily != config.forkFontFamily { fontFamily = config.forkFontFamily }
         let new = config.forkColor("foreground").flatMap { fg in
             config.forkColor("background").map {
                 Source(fg: fg, bg: $0, palette: config.forkPalette() ?? [])
@@ -177,11 +172,11 @@ final class ForkTheme: ObservableObject {
     ///    text over an unthemed surface) is a worse failure than staying one reload behind.
     /// 2. **Increase Contrast is on.** A user who asked the OS for maximum contrast is asking
     ///    us not to art-direct their chrome; system label colors are what respond to that
-    ///    setting, and a frozen `fg.opacity(0.3)` is what doesn't.
-    /// 3. **The background's polarity disagrees with the appearance.** The palette's and the
-    ///    sheets' backdrop is a material, whose scrim comes from the window's `NSAppearance` — so a
-    ///    foreground borrowed from a background of the *other* polarity would be painted onto
-    ///    a surface it was never guaranteed to contrast against.
+    ///    setting, and a theme's fixed colors are what don't.
+    /// 3. **The background's polarity disagrees with the appearance.** The fork paints its own
+    ///    ground, but what it can't paint follows the window's `NSAppearance`: field editors'
+    ///    selection, the slider and checkbox, popover and context-menu chrome. A dark panel
+    ///    full of light-mode controls is a worse failure than an unthemed one.
     ///
     ///    Whether that can happen depends on `macos-titlebar-style`. Under the default
     ///    (`transparent`) and `tabs`, upstream forces the window's appearance from the
@@ -189,7 +184,7 @@ final class ForkTheme: ObservableObject {
     ///    and documented at `window-theme` — so the two always agree and this never fires.
     ///    Under `native`/`hidden` the window follows `window-theme`, which `system` and
     ///    `ghostty` leave on the macOS setting: a fixed dark theme in macOS Light then really
-    ///    does put a light material under a near-white foreground, and this declines.
+    ///    does put light-mode controls on a near-black ground, and this declines.
     ///
     /// `appearanceIsDark` must therefore come from the *view's* appearance, never `NSApp`'s —
     /// those are deliberately decoupled, and ``ForkThemed`` reads `colorScheme` for exactly
@@ -203,16 +198,6 @@ final class ForkTheme: ObservableObject {
         let c = Color(nsColor: fg)
         return ForkTokens(
             text: c,
-            textSecondary: c.opacity(weight(isLight ? 0.498 : 0.549, fg: fg, isLight: isLight)),
-            textTertiary: c.opacity(weight(0.25, fg: fg, isLight: isLight)),
-            // Old: `Color.primary.opacity(0.06)` &c. `.primary` is `labelColor`, which carries
-            // 0.847 alpha, and `Color.opacity` multiplies — so the literals were never the
-            // effective alpha. `fg` is opaque; these are the old *rendered* values.
-            hover: c.opacity(0.05),       // 0.847 × 0.06
-            chipBg: c.opacity(0.07),      // 0.847 × 0.08
-            cardBorder: c.opacity(0.08),  // secondaryLabelColor 0.549 × 0.15 (dark; 0.075 light)
-            selectedRow: Color(nsColor: NSColor(Theme.clay)
-                .withAlphaComponent(isLight ? 0.20 : 0.14)),
             ground: Color(nsColor: bg),
             // 40% of the way from the background to the foreground. Not a taste number: it is
             // the ratio between a saturated primary and its dark partner (FF → 66), so on a
@@ -297,26 +282,6 @@ final class ForkTheme: ObservableObject {
     /// Shortest distance around the hue circle, where 0 and 1 are the same red.
     static func hueDistance(_ a: Double, _ b: Double) -> Double {
         let d = abs(a - b); return min(d, 1 - d)
-    }
-
-    /// Alpha that makes `fg` carry the same visual weight a system label would at
-    /// `systemAlpha`.
-    ///
-    /// A system label is pure white (dark mode) or pure black (light); a terminal foreground
-    /// stops short of that extreme, so the same alpha lands fainter. Scale by how far this
-    /// particular `fg` actually travels toward the extreme — computed per theme rather than
-    /// hardcoded, because the correction's *sign* flips with polarity (oat is dimmer than
-    /// white; warm charcoal is lighter than black) and its size depends on the theme. A dim
-    /// foreground (Solarized's `#839496`) correctly lands near-opaque here.
-    ///
-    /// Exact only against an idealized #000/#fff backdrop: solving `x·(fg−b) = a·(1−b)` at
-    /// `b = 0`/`b = 1` gives the two branches below. The real backdrop is a material at
-    /// roughly 0.2–0.3 luminance, so for a dim foreground this under-corrects — the clamps
-    /// are the error budget, not decoration.
-    static func weight(_ systemAlpha: Double, fg: NSColor, isLight: Bool) -> Double {
-        let l = fg.luminance
-        let reach = isLight ? 1 - l : l
-        return min(1, systemAlpha / max(reach, 0.2))
     }
 }
 

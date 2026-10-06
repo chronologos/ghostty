@@ -10,62 +10,83 @@ struct HostsView: View {
     enum Sel: Hashable { case host(ForkHost.ID), new }
 
     @EnvironmentObject private var registry: SessionRegistry
-    @State private var sel: Sel?   // optional — `List(selection:)` writes nil on cmd-click
+    @State private var sel: Sel
     /// `controller.removeHost`, not `registry.removeHost` — the latter would leak `liveTabs`/
     /// `progressSubs` and leave `surfaceTree` rendering the removed host's panes.
     let onRemove: (ForkHost.ID) -> Void
     let onDone: () -> Void
+    /// Handed to `HostDetailView`. Injected only by offscreen renders.
+    let lister: ZmxAdapter.Lister
 
-    init(select: ForkHost.ID? = nil, onRemove: @escaping (ForkHost.ID) -> Void,
-         onDone: @escaping () -> Void) {
+    static let size = CGSize(width: 680, height: 560)
+
+    init(select: ForkHost.ID? = nil, lister: @escaping ZmxAdapter.Lister = ZmxAdapter.liveLister,
+         onRemove: @escaping (ForkHost.ID) -> Void, onDone: @escaping () -> Void) {
         self._sel = State(initialValue: select.map(Sel.host) ?? .new)
+        self.lister = lister
         self.onRemove = onRemove; self.onDone = onDone
     }
 
     var body: some View {
-        VStack(spacing: 0) {
+        Panel(title: "Hosts") {
             HStack(spacing: 0) {
                 master
-                Divider()
+                tokens.rule.frame(width: 1)
                 detail.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .padding(20)
+                    .padding(16)
             }
-            Divider()
+            PanelRule()
             HStack {
                 // Hidden — Done already saves (no discard semantics here), but `.cancelAction`
-                // is what makes Esc dismiss a `beginSheet` panel.
+                // is what makes Esc dismiss the panel.
                 Button("", action: onDone).keyboardShortcut(.cancelAction).hidden()
                 Spacer()
-                Button("Done") { onDone() }.keyboardShortcut(.defaultAction)
-            }.padding(12)
+                Button("Done") { onDone() }
+                    .buttonStyle(PanelButtonStyle(kind: .primary, chord: "⏎"))
+                    .keyboardShortcut(.defaultAction)
+            }.padding(10)
         }
-        .frame(width: 640, height: 560)   // pinned here so `presentSheet(size:)` can't drift
+        .frame(width: Self.size.width, height: Self.size.height)   // the one size `showHostsSheet` reads
     }
 
+    /// Drawn, not a `List(.sidebar)`: that brings its own material, selection pill and accent.
     private var master: some View {
-        List(selection: $sel) {
-            Section("Hosts") {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 2) {
                 ForEach(registry.hosts) { h in
-                    Label {
+                    masterRow(.host(h.id)) {
+                        HostDot(host: h, size: 8)
                         Text(h.label).lineLimit(1)
-                    } icon: {
-                        HostDot(host: h, size: 12)
                     }
-                    .tag(Sel.host(h.id))
                 }
+                PanelRule().padding(.vertical, 4)
+                masterRow(.new) { Text("+ ADD HOST").kerning(0.6) }
             }
-            Label("Add Host…", systemImage: "plus").tag(Sel.new)
+            .padding(6)
+            .background(OverlayScroller())
         }
-        .listStyle(.sidebar)
         .frame(width: 180)
     }
 
+    private func masterRow<C: View>(_ target: Sel, @ViewBuilder _ content: () -> C) -> some View {
+        Button { sel = target } label: {
+            HStack(spacing: 8) { content() }
+                .foregroundStyle(sel == target ? tokens.bright : tokens.text)
+                .forkFont(12, sel == target ? .bold : .regular)
+                .padding(.horizontal, 8).frame(height: 26)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .panelRow(selected: sel == target)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
     @ViewBuilder private var detail: some View {
-        switch sel ?? .new {
+        switch sel {
         case .host(let id):
             // Look up fresh — `registry.hosts` mutates while open (rename, hue, removeHost).
             if let h = registry.host(id: id) {
-                HostDetailView(host: h, onRemove: { onRemove(id); sel = .new })
+                HostDetailView(host: h, lister: lister, onRemove: { onRemove(id); sel = .new })
                     .id(id)   // reset @State on selection change
             }
         case .new:
@@ -87,21 +108,21 @@ struct HostsView: View {
     }
 
     private var newHostForm: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Add Host").font(.headline)
-            TextField("Connection", text: $connection, prompt: Text("user@host"))
-                .textFieldStyle(.roundedBorder).onSubmit(add)
-            TextField("Label", text: $label, prompt: Text("optional"))
-                .textFieldStyle(.roundedBorder).onSubmit(add)
+        VStack(alignment: .leading, spacing: 12) {
+            Text("ADD HOST").kerning(1).foregroundStyle(tokens.bright).forkFont(12, .bold)
+            TextField("", text: $connection, prompt: Text("user@host").foregroundColor(tokens.inactive))
+                .panelField().onSubmit(add)
+            TextField("", text: $label, prompt: Text("label (optional)").foregroundColor(tokens.inactive))
+                .panelField().onSubmit(add)
             HStack(spacing: 10) {
-                HostDot(slot: previewSlot, size: 18)
+                HostDot(slot: previewSlot, size: 14)
                 Text("Auto-assigned color (change after adding)")
-                    .font(.caption).foregroundStyle(tokens.textSecondary)
+                    .foregroundStyle(tokens.inactive).forkFont(10)
             }
-            if dupe { Text("Already added.").font(.caption).foregroundStyle(Theme.error) }
+            if dupe { Text("Already added.").foregroundStyle(Theme.error).forkFont(10) }
             HStack {
                 Spacer()
-                Button("Add", action: add).disabled(target == nil || dupe)
+                Button("Add", action: add).buttonStyle(PanelButtonStyle()).disabled(target == nil || dupe)
             }
         }
     }

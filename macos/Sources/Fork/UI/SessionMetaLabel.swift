@@ -15,14 +15,13 @@ struct SessionNameLabel: View {
         // "proj". Capped alias (64) still can't take the row: single-line, and the parent
         // HStack's trailing `SessionMetaLabel` keeps its width.
         if let alias = entry.alias, alias != entry.name {
-            Text(alias).font(.system(size: 12))
-                .lineLimit(1).truncationMode(.middle)
-            Text(entry.name).font(.system(size: 10, design: .monospaced))
-                .lineLimit(1).truncationMode(.middle)
-                .foregroundStyle(tokens.textSecondary)
+            Text(alias).lineLimit(1).truncationMode(.middle)
+                .foregroundStyle(tokens.text).forkFont(13)
+            Text(entry.name).lineLimit(1).truncationMode(.middle)
+                .foregroundStyle(tokens.inactive).forkFont(10)
         } else {
-            Text(entry.name).font(.system(size: 12, design: .monospaced))
-                .lineLimit(1).truncationMode(.middle)
+            Text(entry.name).lineLimit(1).truncationMode(.middle)
+                .foregroundStyle(tokens.text).forkFont(13)
         }
         // Where it is (and, for a session that was created to run something, what): with
         // twenty `shell-xxx` rows on a host the name alone doesn't say which one is sitting
@@ -30,9 +29,8 @@ struct SessionNameLabel: View {
         // The daemon reports both in the same `zmx list` row. `.head` truncation: the leaf
         // of a path is the part that identifies it.
         if let where_ = Self.whereLine(entry) {
-            Text(where_).font(.system(size: 10, design: .monospaced))
-                .lineLimit(1).truncationMode(.head)
-                .foregroundStyle(tokens.textTertiary)
+            Text(where_).lineLimit(1).truncationMode(.head)
+                .foregroundStyle(tokens.inactive).forkFont(10)
         }
     }
 
@@ -58,14 +56,13 @@ struct UnresponsiveSessionLabel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(entry.name).font(.system(size: 12, design: .monospaced))
-                .lineLimit(1).truncationMode(.middle)
-                .foregroundStyle(tokens.textSecondary)
-            HStack(spacing: 3) {
-                Image(systemName: "exclamationmark.circle").font(.system(size: 8))
+            Text(entry.name).lineLimit(1).truncationMode(.middle)
+                .foregroundStyle(tokens.inactive).forkFont(13)
+            HStack(spacing: 5) {
+                Lamp(.unresponsive)
                 Text("not responding (\(entry.err)) — probably busy, still running")
             }
-            .font(.system(size: 10)).foregroundStyle(tokens.textTertiary)
+            .foregroundStyle(tokens.inactive).forkFont(10)
         }
         .help("The zmx daemon for this session didn't answer within 1s. zmx treats that as "
               + "\"may just be busy\" and so does the fork: the session and anything in it are very likely alive.")
@@ -75,8 +72,9 @@ struct UnresponsiveSessionLabel: View {
 /// Trailing metadata for a zmx session row. The client count alone is a poor "in use"
 /// signal — it counts attached *viewers* (live `zmx attach` clients), so a detached session
 /// with a CC agent working inside, or one whose only presence is a cold-restored placeholder
-/// pane in the sidebar, reads as an orphaned `0`. The sparkle and sidebar glyphs carry those
-/// two signals so "0 people + old age" stops looking like "safe to kill". The age is the
+/// pane in the sidebar, reads as an orphaned `0`. The CC lamp and the word OPEN carry those
+/// two signals so "0 clients + old age" stops looking like "safe to kill". Everything here is
+/// a word or a sidebar lamp — it used to be three 8pt symbols and a bare number. The age is the
 /// session's *creation* age (`zmx list` has no activity field).
 struct SessionMetaLabel: View {
     @Environment(\.forkTokens) private var tokens
@@ -88,51 +86,45 @@ struct SessionMetaLabel: View {
     var ccInfo: CCProbe.Info? = nil
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 6) {
             if let ccInfo {
                 // Busy outranks blocked, same as PaneMachine.dot — CC doesn't reliably
                 // rewrite `tempo` after a reply, so a stale "needs input" must not paint
-                // this red while the sidebar rail shows the same session working.
+                // this red while the sidebar lamp shows the same session working.
                 let busy = ccInfo.status == "busy"
-                Image(systemName: "sparkles")
-                    .font(.system(size: 8))
-                    .foregroundStyle(busy ? Theme.clay
-                                     : ccInfo.isBlocked ? Theme.blocked : tokens.textSecondary)
-                    .opacity(busy || ccInfo.isBlocked ? 1 : 0.6)
-                    .help(ccHelp(ccInfo, busy: busy))
+                HStack(spacing: 4) {
+                    Lamp(busy ? .working : ccInfo.isBlocked ? .blocked : .unlit)
+                    Text("CC")
+                }
+                .help(ccHelp(ccInfo, busy: busy))
             }
             if inSidebar {
-                Image(systemName: "sidebar.left")
-                    .font(.system(size: 8))
-                    .foregroundStyle(tokens.textSecondary)
+                Text("OPEN").foregroundStyle(tokens.text)
                     .help("Already open as a pane in the sidebar")
             }
-            HStack(spacing: 2) {
-                Image(systemName: "person.fill").font(.system(size: 8))
-                Text("\(entry.clients)")
-            }
-            .foregroundStyle(entry.clients > 0 ? Theme.clay : tokens.textSecondary)
-            .help(entry.clients == 1 ? "1 attached client" : "\(entry.clients) attached clients")
-            Text("·").foregroundStyle(tokens.textSecondary)
-            // Creation age in plain secondary, not the recency ramp — an old-but-busy
-            // session must not render faded as if abandoned.
+            Text(entry.clients == 1 ? "1 client" : "\(entry.clients) clients")
+                .foregroundStyle(entry.clients > 0 ? tokens.text : tokens.inactive)
+                .help(entry.clients == 1 ? "1 attached client" : "\(entry.clients) attached clients")
+            Text("·")
+            // Creation age in the row's plain color, whatever it is — an old-but-busy
+            // session must not render as if abandoned.
             if let ended = entry.ended {
                 // A `zmx run` task that has finished: how it ended beats how old it is —
                 // "0 clients · 3h old" otherwise reads exactly like an abandoned live shell.
                 let ok = (entry.exitCode ?? 0) == 0
                 Text("\(ok ? "✓" : "✗") exit \(entry.exitCode ?? 0) · \(ended.shortAge) ago")
-                    .foregroundStyle(ok ? tokens.textSecondary : Theme.error)
+                    .foregroundStyle(ok ? tokens.inactive : Theme.error)
                     .help("Task finished \(ended.shortAge) ago; session created \(entry.created.shortAge) ago")
             } else {
-                Text("\(entry.created.shortAge) old").foregroundStyle(tokens.textSecondary)
+                Text("\(entry.created.shortAge) old")
                     .help("Created \(entry.created.shortAge) ago")
             }
             if entry.external {
-                Text("ext").foregroundStyle(tokens.textSecondary)
+                Text("ext")
             }
         }
-        // 10pt matches the sidebar's small-text scale (PR48 bumped that +1pt; sheets lagged).
-        .font(.system(size: 10))
+        .lineLimit(1).fixedSize()
+        .foregroundStyle(tokens.inactive).forkFont(10)
     }
 
     private func ccHelp(_ info: CCProbe.Info, busy: Bool) -> String {
