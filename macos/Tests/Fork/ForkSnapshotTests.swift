@@ -14,7 +14,8 @@ import Testing
 /// Skipped unless that variable is set. `TEST_RUNNER_FORK_SNAPSHOT_FONT=<family>` sets the face
 /// (otherwise the system mono, as with no `window-title-font-family`). What it can't show:
 /// anything that needs a live surface (`controller` is nil, so no OSC titles, no DETACHED cue
-/// on rows, no pane actions in the palette), hover, focus rings, or motion.
+/// on rows, no pane actions in the palette), focus rings, or motion (hover is faked:
+/// `hoverAll`; an animation driven by one number can be shot as a filmstrip).
 @MainActor
 struct ForkSnapshotTests {
     private static let dir = ProcessInfo.processInfo.environment["FORK_SNAPSHOT_DIR"]
@@ -81,6 +82,7 @@ struct ForkSnapshotTests {
         let deputy = tab(r, "local", ["deputy", "deputy-wbd5"])
         let ledger = tab(r, "local", ["ledger", "ledger-djzu"])
         let ghostty = tab(r, "local", ["ghostty"])
+        _ = tab(r, "local", ["shell-k7w"])
         let azure = tab(r, "atlas", ["azure", "azure-ge1o"], title: "azure")
         r.renameTab(azure, to: "cloud")
         let foundry = tab(r, "borei", ["foundry"])
@@ -100,7 +102,7 @@ struct ForkSnapshotTests {
         r.noteList(hostID: "local", list: .init(managed: [
             entry("deputy", "/Users/me/code/proxy-trial"), entry("deputy-wbd5", "/Users/me/code/proxy-trial"),
             entry("ledger", "/Users/me/Desktop"), entry("ledger-djzu", "/Users/me/Desktop"),
-            entry("ghostty", "/Users/me/src/ghostty")]))
+            entry("ghostty", "/Users/me/src/ghostty"), entry("shell-k7w", "/Users/me/src/ghostty/macos")]))
         r.noteList(hostID: "atlas", list: .init(managed: [
             entry("azure", "/root/src/app"), entry("azure-ge1o", "/root/src/app")]))
         r.noteList(hostID: "borei", list: .init(
@@ -183,6 +185,11 @@ struct ForkSnapshotTests {
                           SessionRegistry.kFilterTagged: false]) {
             try shoot(SidebarView(controller: nil, polls: false).environmentObject(r), Self.schemes[0],
                       size: CGSize(width: 248, height: 792), as: "narrow")
+            // Every row as if pointed at: tags unfolded into names, at both widths.
+            for (w, name) in [(300, "hover"), (248, "hover-narrow")] {
+                try shoot(SidebarView(controller: nil, polls: false, hoverAll: true).environmentObject(r),
+                          Self.schemes[0], size: CGSize(width: w, height: 792), as: name)
+            }
         }
     }
 
@@ -276,9 +283,25 @@ struct ForkSnapshotTests {
         try shoot(HStack(spacing: 16) {
             ForEach(1...5, id: \.self) { n in
                 TagMark(tags: [0, 0.08, 0.5, 0.3, 0.75].prefix(n).map { PaneTag(text: "t", hue: $0) })
-                    .frame(width: 9, height: 9).scaleEffect(4).frame(width: 36, height: 36)
+                    .scaleEffect(4).frame(width: 36, height: 36)
             }
         }.padding(12).background(tokens(s).ground), s, as: "tagmarks")
+        // The same marks unfolding into names, as a filmstrip: down = time, across = 1…5 tags.
+        let words = ["ops", "cloud", "review", "p1", "later"]
+        try shoot(VStack(alignment: .leading, spacing: 6) {
+            ForEach([0, 0.25, 0.5, 0.75, 1], id: \.self) { (t: CGFloat) in
+                HStack(spacing: 0) {
+                    ForEach(1...5, id: \.self) { n in
+                        HStack(spacing: 4) {
+                            TagMark(tags: zip(words, [0, 0.08, 0.5, 0.3, 0.75]).prefix(n)
+                                .map { PaneTag(text: $0, hue: $1) }, open: t, line: 17)
+                            Text("title").forkFont(14).foregroundStyle(tokens(s).text)
+                        }
+                        .frame(width: CGFloat(60 + n * 42), alignment: .leading)
+                    }
+                }
+            }
+        }.padding(12).background(tokens(s).ground), s, as: "tagunfold")
     }
 }
 #endif

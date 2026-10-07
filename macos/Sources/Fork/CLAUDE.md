@@ -36,8 +36,8 @@ cd macos && xcodebuild test -scheme Ghostty -destination 'platform=macOS' \
   -only-testing:GhosttyTests/TransportTests
 
 # Look at any fork view without quitting the running app: renders the real views offscreen
-# over a seeded registry (3 themes; sidebar incl. focus mode + narrow floor, every lamp, every
-# panel). Add TEST_RUNNER_FORK_SNAPSHOT_FONT='<family>' to set the face.
+# over a seeded registry (3 themes; sidebar incl. focus mode, narrow floor + every row hovered,
+# every lamp, every panel, the tag unfold as a filmstrip). Add TEST_RUNNER_FORK_SNAPSHOT_FONT='<family>' to set the face.
 cd macos && TEST_RUNNER_FORK_SNAPSHOT_DIR=/tmp/shots xcodebuild test -scheme Ghostty \
   -destination 'platform=macOS' -only-testing:GhosttyTests/ForkSnapshotTests
 
@@ -165,8 +165,12 @@ Fork/
                                chevron; ⌘I/⌘⇧I → inline rename; one layout rule per side —
                                the leading gutter is *identity* (the tags: one square at the
                                title line divided between them — `TagMark`: whole, halves, two
-                               over one, quarters, the rest elided — their names sliding in on
-                               hover only; the pane menu's tag entries are toggles),
+                               over one, quarters, the rest elided. On hover it *unfolds*: each
+                               part grows into that tag's name and the title moves aside — one
+                               `Layout` animated on one number, so the row height never changes
+                               and the motion can be shot as a filmstrip; a beat of delay keeps
+                               a passing pointer from setting it off. The pane menu's tag
+                               entries are toggles),
                                the trailing edge is *state* (`Lamp`s)
                                — so a red tag can't read as an alarm. `Lamp` is the one state
                                carrier (rows, collapsed headers, host strip, footer): filled =
@@ -177,14 +181,23 @@ Fork/
                                white-text theme `text` == `bright`. Every row has one, lit or
                                not; watched gets its own lamp beside the main one because it
                                coexists with working. Blocked is steady, not blinking, and its
-                               question is bright, not red (several at once = wall of alarm).
+                               question is `text`, not red (several at once = wall of alarm).
                                Single density (no
-                               compact toggle): unread CC status text is bright + up to 3
+                               compact toggle): unread CC status text is `text` + up to 3
                                lines, read text (exit-stamped ccSeenDetail) demotes to one
-                               inactive line; a CC name that only repeats the row's title is
+                               inactive line, as does a bare CC name with no status after it.
+                               `bright` *type* is the focused row's title and nothing else:
+                               shared with unread text it was most of the sidebar; a CC name that only repeats the row's title is
                                dropped; a row CC has nothing to say about shows the session's
                                where-line instead (`SessionNameLabel.whereLine`: daemon cwd ·
                                creating cmd), and with neither there is no second line;
+                               a shell nobody named, with no agent in it, *is* its where-line:
+                               one quiet 12pt line, no title (`plainLine`: no alias **and** an
+                               id `SessionRegistry.looksAuto` could have come from `autoName` —
+                               either test alone is wrong: old typed names have no alias, and
+                               `api-prod` has the shape). So every big title is a chosen name.
+                               The id is in the tooltip and the peek; a live OSC title is
+                               appended to the line, never allowed to change the row's height;
                                solo ⌥-hold ≥0.5s reveals all (and pops the
                                cheatsheet — one peek, one threshold), ⌥⌥ marks all
                                read; the focused row is a *shape* — bright cut-corner outline +
@@ -197,18 +210,22 @@ Fork/
                                ⌘1-9 are spelled out in both modes: host mode shows ⌘N at the
                                trailing edge of each tab's first line, on the module of the
                                host you are *in* only — that is all ⌘N indexes there
-                               (`visibleTabs`) — and they move with you;
+                               (`visibleTabs`) — and they move with you; every key hint is
+                               gray (looked up, not noticed — the lamps are beside it);
                                focus mode wraps each tab in a ForkCard whose ⌘N + pin · hatch ·
                                HostDot + HOST caption (a host strip read the other way round,
                                same caps) rides on the tab's heading line (a headless
                                tab keeps a caption row of its own — its only tab-level
                                right-click target). Toolbar = worded keys (`KeyCap`), on =
-                               inverse video. Footer = the lamps' legend and the fleet's tally
-                               (blocked / done / busy / off), always on screen; zero = unlit;
-                               drops its words at the narrow floor (`ViewThatFits`). Hidden
+                               inverse video, a gap between the three that act and the three
+                               that stay on. Footer = the fleet's tally
+                               (blocked / done / busy / detached), always on screen; only what
+                               there is some of, "ALL QUIET" for none;
+                               drops its words when they don't fit (`ViewThatFits`: the narrow
+                               floor, or all four at once). Hidden
                                sidebar (⌘⇧B / HIDE) leaves one `SidebarRevealKey` ("SHOW") where
                                the toolbar's first key was.
-                               `polls: false` is for offscreen renders only
+                               `polls: false` / `hoverAll: true` are for offscreen renders only
     OptionGesture.swift        OptionGestureRecognizer — the *only* ⌥-hold / ⌥⌥ recognizer
                                (extracted ViewModifier; SidebarView binds revealAll/onPeek/
                                onSweep). Solo-⌥ 0.5s peek drives the sidebar reveal and the
@@ -223,7 +240,8 @@ Fork/
                                the loud line), `ground` (= bg), `rule` (bg→fg
                                at 0.4: the FF→66 ratio, so a flat primary lands on its dark
                                partner exactly), `inactive` (neutral gray: losing the hue is
-                               what says "not live"), `bright` (white/black by polarity).
+                               what says "not live"), `bright` (white/black by polarity; as type,
+                               "you are here" only).
                                `resolve` declines a theme when
                                Increase Contrast is on or the bg's polarity fights the
                                window appearance (system controls inside a panel follow it)
