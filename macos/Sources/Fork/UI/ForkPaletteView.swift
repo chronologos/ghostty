@@ -79,7 +79,7 @@ struct ForkPanePalette: View {
                 title: alias ?? p.ref.name,
                 subtitle: (alias != nil && alias != p.ref.name) ? "\(p.ref.name) · \(crumb)" : crumb,
                 leadingColor: tokens.hostAccent(p.host),
-                badge: p.tab.paneTags[p.ref.key]?.text
+                badge: p.tab.paneTags[p.ref.key]?.map(\.text).joined(separator: " · ")
             ) { [weak controller, id = p.tab.id, i = p.index] in
                 controller?.activate(tab: id, paneIndex: i)
             }

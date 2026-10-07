@@ -184,7 +184,9 @@ struct TabModel: Codable, Identifiable, Hashable {
     /// User-set per-pane labels (⌘I / "Rename Pane…"), keyed by `SessionRef.key`. Shown in
     /// the sidebar over `surface.title`, which is per-`SurfaceView`-instance and lost on restart.
     var paneLabels: [String: String]
-    var paneTags: [String: PaneTag]
+    /// A pane's tags in the order they were put on, keyed by `SessionRef.key`. No pane maps to
+    /// an empty list — "has an entry" and "is tagged" stay the same question.
+    var paneTags: [String: [PaneTag]]
     /// Last-seen CC session name per pane (CCProbe write-through). Shown dimmed when the
     /// live probe has nothing — i.e. the agent has exited but the zmx shell remains.
     var ccNames: [String: String]
@@ -202,6 +204,18 @@ struct TabModel: Codable, Identifiable, Hashable {
     var dismissedAt: Date?
 
     var hasTag: Bool { tree.leafRefs.contains { paneTags[$0.key] != nil } }
+
+    /// `paneTags` is stored as `paneTagLists`, not under its own name. That name holds the old
+    /// shape — one tag per pane — in every fork.json written before panes could wear several,
+    /// and in the eyes of any older build: handed a list there it would fail to decode the
+    /// *tab*, and the lenient load drops a tab it can't decode. Under a new key the worst an
+    /// older build can do is not see the tags.
+    private enum CodingKeys: String, CodingKey {
+        case id, hostID, title, tree, lastActive, paneLabels, paneTags = "paneTagLists"
+        case ccNames, aliasProven, collapsed, pinned, dismissedAt
+    }
+    /// Read-only: the one-tag-per-pane shape, migrated on load.
+    private enum LegacyKeys: String, CodingKey { case paneTags }
 
     init(id: UUID = UUID(), hostID: ForkHost.ID, title: String, tree: PersistedTree = .empty) {
         self.id = id
@@ -226,7 +240,12 @@ struct TabModel: Codable, Identifiable, Hashable {
         tree = try c.decode(PersistedTree.self, forKey: .tree)
         lastActive = try c.decodeIfPresent([String: Date].self, forKey: .lastActive) ?? [:]
         paneLabels = try c.decodeIfPresent([String: String].self, forKey: .paneLabels) ?? [:]
-        paneTags = try c.decodeIfPresent([String: PaneTag].self, forKey: .paneTags) ?? [:]
+        if let lists = try c.decodeIfPresent([String: [PaneTag]].self, forKey: .paneTags) {
+            paneTags = lists.filter { !$0.value.isEmpty }
+        } else {
+            paneTags = try d.container(keyedBy: LegacyKeys.self)
+                .decodeIfPresent([String: PaneTag].self, forKey: .paneTags)?.mapValues { [$0] } ?? [:]
+        }
         ccNames = try c.decodeIfPresent([String: String].self, forKey: .ccNames) ?? [:]
         aliasProven = try c.decodeIfPresent([String: String].self, forKey: .aliasProven) ?? [:]
         collapsed = try c.decodeIfPresent(Bool.self, forKey: .collapsed) ?? false

@@ -516,21 +516,28 @@ final class SessionRegistry: ObservableObject {
         if let label { tabs[i].paneLabels[name] = label } else { tabs[i].paneLabels.removeValue(forKey: name) }
     }
 
-    func setPaneTag(tab id: TabModel.ID, name: String, to tag: PaneTag?) {
+    /// Put `tag` on a pane, after the ones it already wears. Already wearing it = no change to
+    /// the pane, but it still counts as a use for the recents.
+    func addPaneTag(tab id: TabModel.ID, name: String, _ tag: PaneTag) {
         guard let i = tabs.firstIndex(where: { $0.id == id }) else { return }
-        if let tag {
-            tabs[i].paneTags[name] = tag
-            recentTags.removeAll { $0 == tag }
-            recentTags.insert(tag, at: 0)
-            if recentTags.count > 8 { recentTags.removeLast() }
-        } else {
-            tabs[i].paneTags.removeValue(forKey: name)
-        }
+        if tabs[i].paneTags[name]?.contains(tag) != true { tabs[i].paneTags[name, default: []].append(tag) }
+        recentTags.removeAll { $0 == tag }
+        recentTags.insert(tag, at: 0)
+        if recentTags.count > 8 { recentTags.removeLast() }
+        pruneRecentTags()
+    }
+
+    /// Take one tag off a pane, or (`nil`) all of them.
+    func removePaneTag(tab id: TabModel.ID, name: String, _ tag: PaneTag?) {
+        guard let i = tabs.firstIndex(where: { $0.id == id }) else { return }
+        let left = tag.map { t in tabs[i].paneTags[name]?.filter { $0 != t } ?? [] } ?? []
+        // Never an empty list — see `TabModel.paneTags`.
+        tabs[i].paneTags[name] = left.isEmpty ? nil : left
         pruneRecentTags()
     }
 
     private func pruneRecentTags() {
-        let live = Set(tabs.flatMap(\.paneTags.values))
+        let live = Set(tabs.flatMap { $0.paneTags.values.joined() })
         let kept = recentTags.filter(live.contains)
         if kept.count != recentTags.count { recentTags = kept }
     }
@@ -1021,12 +1028,12 @@ final class SessionRegistry: ObservableObject {
               tabs[si].tree.leafRefs.contains(ref) else { return false }
         let key = ref.key
         let label = tabs[si].paneLabels[key]
-        let tag = tabs[si].paneTags[key]
+        let tags = tabs[si].paneTags[key]
         let last = tabs[si].lastActive[key]
         let cc = tabs[si].ccNames[key]
         if let proof = tabs[si].aliasProven[key] { tabs[di].aliasProven[key] = proof }
         if let label { tabs[di].paneLabels[key] = label }
-        if let tag { tabs[di].paneTags[key] = tag }
+        if let tags { tabs[di].paneTags[key] = tags }
         if let last { tabs[di].lastActive[key] = last }
         if let cc { tabs[di].ccNames[key] = cc }
         // The pending exit-stamp follows a moved focused pane: src's entry is pruned below,
