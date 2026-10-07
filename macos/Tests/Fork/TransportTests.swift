@@ -144,6 +144,40 @@ struct TransportTests {
         #expect(ForkHost.SSHTarget(parsing: "-h") != nil)
     }
 
+    private func tab(paneTagJSON: String) throws -> TabModel {
+        try JSONDecoder().decode(TabModel.self, from: Data(#"""
+            {"id":"00000000-0000-0000-0000-000000000001","hostID":"local","title":"t","tree":{"empty":{}}\#(paneTagJSON)}
+            """#.utf8))
+    }
+
+    /// Every fork.json written before panes could wear several tags has one per pane, under
+    /// `paneTags`. Those have to come through, not vanish on the first launch of this build.
+    @Test func oneTagPerPaneMigratesToAList() throws {
+        let t = try tab(paneTagJSON: #","paneTags":{"a":{"text":"prod","hue":0.7}}"#)
+        #expect(t.paneTags == ["a": [PaneTag(text: "prod", hue: 0.7)]])
+    }
+
+    /// The list key wins when both are there, and an empty list is no entry.
+    @Test func tagListsWinOverTheOldKey() throws {
+        let t = try tab(paneTagJSON: #"""
+            ,"paneTags":{"a":{"text":"old","hue":0.1}}
+            ,"paneTagLists":{"a":[{"text":"x","hue":0.2},{"text":"y","hue":0.3}],"b":[]}
+            """#)
+        #expect(t.paneTags["a"]?.map(\.text) == ["x", "y"])
+        #expect(t.paneTags["b"] == nil)
+    }
+
+    /// What an *older* build will be handed: no list under the key it reads as a single tag —
+    /// that would fail its decode of the whole tab, and the lenient load drops such a tab.
+    @Test func tagListsAreNotWrittenUnderTheOldKey() throws {
+        var t = TabModel(hostID: "local", title: "t")
+        t.paneTags = ["a": [PaneTag(text: "x", hue: 0.2), PaneTag(text: "y", hue: 0.3)]]
+        let json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(t)) as? [String: Any])
+        #expect(json["paneTags"] == nil)
+        #expect((json["paneTagLists"] as? [String: Any])?["a"] is [Any])
+        #expect(try JSONDecoder().decode(TabModel.self, from: JSONEncoder().encode(t)) == t)
+    }
+
     /// fork.json is hand-editable: a hostile/typo'd tag hue must clamp at decode, not reach
     /// whatever does arithmetic on it (an `Int(hue * 97)` once trapped on every launch).
     @Test func paneTagHueClampsAtDecode() throws {

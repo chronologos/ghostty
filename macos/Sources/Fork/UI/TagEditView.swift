@@ -1,6 +1,8 @@
 #if os(macOS)
 import SwiftUI
 
+/// The "New Tag…" popover: a name and a hue, added to whatever the pane already wears.
+/// `onCommit(nil)` = never mind.
 struct TagEditView: View {
     @Environment(\.forkTokens) private var tokens
 
@@ -34,9 +36,10 @@ struct TagEditView: View {
                 }
             }
             HStack {
-                Button("Clear") { onCommit(nil) }.buttonStyle(PanelButtonStyle())
+                Button("Cancel") { onCommit(nil) }.buttonStyle(PanelButtonStyle(chord: "esc"))
+                    .keyboardShortcut(.cancelAction)
                 Spacer()
-                Button("Set") { onCommit(PaneTag(text: trimmed, hue: hue)) }
+                Button("Add") { onCommit(PaneTag(text: trimmed, hue: hue)) }
                     .buttonStyle(PanelButtonStyle(kind: .primary, chord: "⏎"))
                     .keyboardShortcut(.defaultAction)
                     .disabled(trimmed.isEmpty)
