@@ -165,7 +165,7 @@ struct RegistryMoveTests {
         let src = makeTab(r, names: ["a", "b"])
         let dst = makeTab(r, names: ["x"])
         r.setPaneLabel(tab: src, name: "b", to: "keeper")
-        r.setPaneTag(tab: src, name: "b", to: PaneTag(text: "prod", hue: 0.3))
+        r.addPaneTag(tab: src, name: "b", PaneTag(text: "prod", hue: 0.3))
         r.touchPane(tab: src, name: "b")
         let ref = SessionRef(hostID: "local", name: "b")
         _ = r.movePanePersisted(from: src, ref: ref, to: dst)
@@ -175,7 +175,7 @@ struct RegistryMoveTests {
         #expect(srcTab.paneTags["b"] == nil)
         #expect(srcTab.lastActive["b"] == nil)
         #expect(dstTab.paneLabels["b"] == "keeper")
-        #expect(dstTab.paneTags["b"]?.text == "prod")
+        #expect(dstTab.paneTags["b"]?.map(\.text) == ["prod"])
         #expect(dstTab.lastActive["b"] != nil)
     }
 
@@ -254,19 +254,68 @@ struct RegistryMoveTests {
         let r = reset()
         let t = makeTab(r, names: ["a", "b"])
         let wip = PaneTag(text: "wip", hue: 0.5)
-        r.setPaneTag(tab: t, name: "a", to: wip)
-        r.setPaneTag(tab: t, name: "b", to: wip)
+        r.addPaneTag(tab: t, name: "a", wip)
+        r.addPaneTag(tab: t, name: "b", wip)
         #expect(r.recentTags == [wip])
-        r.setPaneTag(tab: t, name: "a", to: nil)
+        r.removePaneTag(tab: t, name: "a", nil)
         #expect(r.recentTags == [wip])           // b still has it
-        r.setPaneTag(tab: t, name: "b", to: nil)
+        r.removePaneTag(tab: t, name: "b", nil)
+        #expect(r.recentTags.isEmpty)
+    }
+
+    /// Tags accumulate in the order they were put on; the same one twice is one.
+    @Test func paneTags_addInOrderWithoutDuplicates() {
+        let r = reset()
+        let t = makeTab(r, names: ["a"])
+        let ops = PaneTag(text: "ops", hue: 0), wip = PaneTag(text: "wip", hue: 0.5)
+        r.addPaneTag(tab: t, name: "a", ops)
+        r.addPaneTag(tab: t, name: "a", wip)
+        r.addPaneTag(tab: t, name: "a", ops)
+        #expect(r.tabs.first { $0.id == t }?.paneTags["a"] == [ops, wip])
+        // …but re-adding is still a use: it leads the recents.
+        #expect(r.recentTags == [ops, wip])
+    }
+
+    /// Same word in another color is another tag — that's what the swatches are for.
+    @Test func paneTags_sameTextDifferentHueAreTwoTags() {
+        let r = reset()
+        let t = makeTab(r, names: ["a"])
+        r.addPaneTag(tab: t, name: "a", PaneTag(text: "env", hue: 0))
+        r.addPaneTag(tab: t, name: "a", PaneTag(text: "env", hue: 0.3))
+        #expect(r.tabs.first { $0.id == t }?.paneTags["a"]?.count == 2)
+    }
+
+    /// Removing one leaves the others; removing the last leaves no entry at all, so the tab
+    /// stops counting as tagged (an empty list would keep it in the TAGS filter).
+    @Test func paneTags_removeOneThenLast() {
+        let r = reset()
+        let t = makeTab(r, names: ["a"])
+        let ops = PaneTag(text: "ops", hue: 0), wip = PaneTag(text: "wip", hue: 0.5)
+        r.addPaneTag(tab: t, name: "a", ops)
+        r.addPaneTag(tab: t, name: "a", wip)
+        r.removePaneTag(tab: t, name: "a", ops)
+        #expect(r.tabs.first { $0.id == t }?.paneTags["a"] == [wip])
+        #expect(r.recentTags == [wip])
+        r.removePaneTag(tab: t, name: "a", wip)
+        let tab = r.tabs.first { $0.id == t }
+        #expect(tab?.paneTags["a"] == nil)
+        #expect(tab?.hasTag == false)
+    }
+
+    @Test func paneTags_clearTakesAll() {
+        let r = reset()
+        let t = makeTab(r, names: ["a"])
+        r.addPaneTag(tab: t, name: "a", PaneTag(text: "ops", hue: 0))
+        r.addPaneTag(tab: t, name: "a", PaneTag(text: "wip", hue: 0.5))
+        r.removePaneTag(tab: t, name: "a", nil)
+        #expect(r.tabs.first { $0.id == t }?.paneTags["a"] == nil)
         #expect(r.recentTags.isEmpty)
     }
 
     @Test func recentTags_prunedWhenPaneClosed() {
         let r = reset()
         let t = makeTab(r, names: ["a", "b"])
-        r.setPaneTag(tab: t, name: "b", to: PaneTag(text: "hot", hue: 0.0))
+        r.addPaneTag(tab: t, name: "b", PaneTag(text: "hot", hue: 0.0))
         #expect(r.recentTags.count == 1)
         r.setPersistedTree(.leaf(SessionRef(hostID: "local", name: "a")), for: t)
         #expect(r.recentTags.isEmpty)
@@ -473,7 +522,7 @@ struct RegistryMoveTests {
         let plain = makeTab(r, names: ["p"])
         r.touchPane(tab: tagged, name: "t")
         r.touchPane(tab: plain, name: "p")
-        r.setPaneTag(tab: tagged, name: "t", to: PaneTag(text: "wip", hue: 0.2))
+        r.addPaneTag(tab: tagged, name: "t", PaneTag(text: "wip", hue: 0.2))
         let ids = r.focusTabs(taggedOnly: true).map(\.id)
         #expect(ids.contains(tagged))
         #expect(!ids.contains(plain))

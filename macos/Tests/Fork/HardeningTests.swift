@@ -144,7 +144,7 @@ struct PersistenceSafetyTests {
                                                   a: .leaf(b), b: .leaf(ext))))
         tab.lastActive = ["left": Date(timeIntervalSince1970: 1_700_000_000)]
         tab.paneLabels = ["left": "build", "@watcher": "logs"]
-        tab.paneTags = ["right": PaneTag(text: "prod", hue: 0.7)]
+        tab.paneTags = ["right": [PaneTag(text: "prod", hue: 0.7), PaneTag(text: "wip", hue: 0.1)]]
         tab.ccNames = ["left": "fixing-the-build"]
         tab.collapsed = true
         tab.pinned = true

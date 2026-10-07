@@ -163,8 +163,10 @@ Fork/
                                *is* the grouping. Per-pane rows show paneLabel ›
                                surface.title › ref.name; optional tab-title heading + collapse
                                chevron; ⌘I/⌘⇧I → inline rename; one layout rule per side —
-                               the leading gutter is *identity* (the tag, a filled
-                               square at the title line, its name sliding in on hover only),
+                               the leading gutter is *identity* (the tags: one square at the
+                               title line divided between them — `TagMark`: whole, halves, two
+                               over one, quarters, the rest elided — their names sliding in on
+                               hover only; the pane menu's tag entries are toggles),
                                the trailing edge is *state* (`Lamp`s)
                                — so a red tag can't read as an alarm. `Lamp` is the one state
                                carrier (rows, collapsed headers, host strip, footer): filled =
@@ -192,8 +194,13 @@ Fork/
                                peek ledger's age line; resting the cursor on a row ≥ Theme.peekDelay
                                exhales it open into the PanePeek ledger (state+age / DIR / ZMX
                                lines + un-clamped status text — replaced the row tooltip);
-                               focus mode wraps each tab in a ForkCard whose ⌘N + pin … HostDot
-                               + host-label caption rides on the tab's heading line (a headless
+                               ⌘1-9 are spelled out in both modes: host mode shows ⌘N at the
+                               trailing edge of each tab's first line, on the module of the
+                               host you are *in* only — that is all ⌘N indexes there
+                               (`visibleTabs`) — and they move with you;
+                               focus mode wraps each tab in a ForkCard whose ⌘N + pin · hatch ·
+                               HostDot + HOST caption (a host strip read the other way round,
+                               same caps) rides on the tab's heading line (a headless
                                tab keeps a caption row of its own — its only tab-level
                                right-click target). Toolbar = worded keys (`KeyCap`), on =
                                inverse video. Footer = the lamps' legend and the fleet's tally
@@ -223,8 +230,8 @@ Fork/
     Theme.swift                theme-*independent* tokens (blocked/error, both pure red; tag
                                hues), recency rule (asleep), peek timing
                                (peekDelay/exhale/settle), shapes: Chamfer + Hatch, ForkCard
-    TagEditView.swift          tag popover (text + 8 hue swatches); opened from the pane
-                               context menu's Tag submenu ("New Tag…")
+    TagEditView.swift          "New Tag…" popover (text + 8 hue swatches), from the pane context
+                               menu's Tag submenu; *adds* to what the pane already wears
     NewSessionView.swift       two-stage new-session palette (⌘T / ⌘⇧T / sidebar ＋ /
                                host context-menu / ⌘D split): type-filter host → ⏎/Tab →
                                name (or ↓ to pick existing). ⏎ create/attach;
@@ -363,6 +370,11 @@ shadows upstream's `undo` alias (Config.zig:6934); ⌘Z remains undo.
 - **Codable defaults aren't optional**: adding a non-Optional field with a default to a
   persisted type breaks decode of old `fork.json`. Use `decodeIfPresent` in a custom
   `init(from:)`.
+- **Changing a persisted field's *shape* needs a new key.** `TabModel.paneTags` went from one
+  tag per pane to a list and is stored as `paneTagLists`; the old `paneTags` key is read-only,
+  migrated on load. Reusing the name would decode fine *here*, but any older build handed a
+  list where it expects an object fails to decode the **tab**, and the lenient load drops a
+  tab it can't decode — then autosaves without it.
 
 ## Security boundary
 

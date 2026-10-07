@@ -43,9 +43,9 @@ struct SidebarView: View {
     // of one tab. The heading's chevron column and the focus caption's indent are this same
     // width, so chips, chevrons and titles share one left edge.
     static let gutter: CGFloat = 16
-    /// Centre line of the tag.
-    static let tagX: CGFloat = 8
-    static let bead: CGFloat = 7
+    /// Centre line of the tag: 3…12pt, on whole pixels, with air before the title at 16.
+    static let tagX: CGFloat = 7.5
+    static let bead: CGFloat = 9
     /// The title line's centre, measured from the top of the title block: a 14pt title is a
     /// ≈17pt line. The tag and the lamps are both placed by it.
     static let titleCenterTop: CGFloat = 8.5
@@ -210,10 +210,11 @@ struct SidebarView: View {
                         // right-click target. Indented by the row gutter so the ⌘N chips of
                         // headed and headless cards sit on the same line as the pane titles.
                         if !hasHeading(tab) {
-                            // ⌘N left, dot+host right — caption recedes behind the rows.
+                            // ⌘N left, square+host right, hatch between: a host module's
+                            // strip, read the other way round.
                             HStack(spacing: 6) {
                                 focusCaptionLeading(tab, index: i)
-                                Spacer()
+                                hatch(tokens.text)
                                 focusCaptionHost(tab)
                             }
                             // Same insets as `tabHeading` and the rows: gutter on the left,
@@ -248,9 +249,17 @@ struct SidebarView: View {
     @ViewBuilder
     private func focusCaptionHost(_ tab: TabModel) -> some View {
         let host = registry.host(id: tab.hostID)
-        HostDot(host: host, size: 7)
-        Text(host?.label ?? "—")
-            .font(mono(11)).foregroundStyle(tokens.inactive).lineLimit(1)
+        HostDot(host: host, size: 8)
+        // Set like the host strip's name, so a host is spelled one way in both modes.
+        Text((host?.label ?? "—").uppercased())
+            .font(mono(11, .bold)).kerning(1).foregroundStyle(tokens.text).lineLimit(1)
+    }
+
+    /// The filler between a strip's name and what sits at its far end. Gives way first: a long
+    /// name or a narrow sidebar squeezes it to nothing before anything that says something.
+    private func hatch(_ color: Color) -> some View {
+        Hatch().stroke(color, lineWidth: 1)
+            .frame(minWidth: 0, maxWidth: .infinity).frame(height: 8).clipped()
     }
 
     /// Does this tab draw a `tabHeading`? Only when its title says more than its first
@@ -260,10 +269,14 @@ struct SidebarView: View {
             || tab.title != tab.tree.leafRefs.first?.name
     }
 
-    private func tagButton(_ t: PaneTag, tab: TabModel.ID, ref: String,
-                           prefix: String = "") -> some View {
-        Button { registry.setPaneTag(tab: tab, name: ref, to: t) } label: {
-            Label(prefix + t.text, systemImage: "circle.fill").foregroundStyle(Theme.tag(t.hue))
+    /// A tag in the pane's menu: checked if the pane wears it, and picking it flips that.
+    private func tagToggle(_ t: PaneTag, tab: TabModel, ref: String, prefix: String = "") -> some View {
+        Toggle(isOn: Binding(
+            get: { tab.paneTags[ref]?.contains(t) == true },
+            set: { $0 ? registry.addPaneTag(tab: tab.id, name: ref, t)
+                      : registry.removePaneTag(tab: tab.id, name: ref, t) }
+        )) {
+            Label(prefix + t.text, systemImage: "square.fill").foregroundStyle(Theme.tag(t.hue))
         }
     }
 
@@ -295,7 +308,9 @@ struct SidebarView: View {
                 if host.expanded {
                     line.frame(height: 1)
                     if !tabs.isEmpty {
-                        hostBody(tabs: tabs)
+                        // ⌘1-9 index the tabs of the host you are *in* (`visibleTabs`), so only
+                        // that module shows them, and they move with you.
+                        hostBody(tabs: tabs, keyed: host.id == (registry.activeHost?.id ?? ForkHost.local.id))
                     } else {
                         // Expanded host, zero tabs: without this the module opens onto nothing
                         // and the section reads as broken rather than empty.
@@ -346,10 +361,7 @@ struct SidebarView: View {
                     .foregroundStyle(tokens.inactive)
                     .help("\(n) pane\(n == 1 ? "" : "s") detached — sessions still running. Right-click → Reattach.")
                 }
-                // The filler gives way first: a long host name or a narrow sidebar squeezes it
-                // to nothing before anything that says something.
-                Hatch().stroke(connected ? tokens.text : tokens.rule, lineWidth: 1)
-                    .frame(minWidth: 0, maxWidth: .infinity).frame(height: 8).clipped()
+                hatch(connected ? tokens.text : tokens.rule)
                 if !host.expanded {
                     // Roll up over the same filtered set the rows render — with the tag filter on, a hidden untagged tab's state must
                     // not drive a lamp that points at something the user can't see.
@@ -389,15 +401,15 @@ struct SidebarView: View {
         }
     }
 
-    private func hostBody(tabs: [TabModel]) -> some View {
-        // Normal mode is positional — the row's visual index *is* the ⌘N index — so per-tab
-        // digit hints are dropped here; ⌘⌥N on the host header is the non-obvious one.
+    private func hostBody(tabs: [TabModel], keyed: Bool) -> some View {
+        // Normal mode is positional — the row's visual index *is* the ⌘N index — but counting
+        // rows is work, more so with multi-pane tabs between, so each tab says its number.
         VStack(alignment: .leading, spacing: 0) {
             ForEach(Array(tabs.enumerated()), id: \.element.id) { i, tab in
                 // The rule is the grouping: between tabs, never between one tab's panes.
                 VStack(alignment: .leading, spacing: 0) {
                     if i > 0 { tokens.rule.frame(height: 1) }
-                    tabRow(tab)
+                    tabRow(tab, keyIndex: keyed && i < 9 ? i : nil)
                 }
             }
         }
@@ -413,9 +425,11 @@ struct SidebarView: View {
     // above the group, shown only when it diverges from the first session name (⌘⇧I edits it).
     // Cold-restored tabs have no live surfaces until first activated.
 
-    /// `focusIndex`: the card's position in focus mode (drives the ⌘N chip) — nil in host
-    /// mode, where the row's visual position *is* the ⌘N index and no chip is drawn.
-    private func tabRow(_ tab: TabModel, focusIndex: Int? = nil) -> some View {
+    /// `focusIndex`: the card's position in focus mode, where ⌘N leads the card's caption.
+    /// `keyIndex`: the tab's position in host mode, on the host ⌘N currently indexes; there the
+    /// hint sits at the trailing edge, beside the lamps, on the tab's first line (its heading
+    /// if it has one) — leading would push that one title out of line with the rest.
+    private func tabRow(_ tab: TabModel, focusIndex: Int? = nil, keyIndex: Int? = nil) -> some View {
         let active = tab.id == registry.activeTabID
         let allRefs = tab.tree.leafRefs
         let surfaces = controller?.surfaces(for: tab.id) ?? []
@@ -423,7 +437,7 @@ struct SidebarView: View {
         return VStack(alignment: .leading, spacing: 0) {
             if hasHeading(tab) {
                 tabHeading(tab, renaming: renaming, active: active, paneCount: allRefs.count,
-                           focusIndex: focusIndex)
+                           focusIndex: focusIndex, keyIndex: keyIndex)
             }
             if !tab.collapsed {
                 ForEach(Array(allRefs.enumerated()), id: \.0) { i, ref in
@@ -432,7 +446,7 @@ struct SidebarView: View {
                     // would mis-pair duplicate-ref tabs (PR26) permanently.
                     paneRow(tab, index: i, ref: ref,
                             surface: i < surfaces.count ? surfaces[i] : nil,
-                            active: active)
+                            active: active, keyIndex: i == 0 && !hasHeading(tab) ? keyIndex : nil)
                 }
             }
         }
@@ -445,7 +459,7 @@ struct SidebarView: View {
     }
 
     private func tabHeading(_ tab: TabModel, renaming: Bool, active: Bool,
-                            paneCount: Int, focusIndex: Int? = nil) -> some View {
+                            paneCount: Int, focusIndex: Int? = nil, keyIndex: Int? = nil) -> some View {
         let toggle = {
             withAnimation(.snappy(duration: 0.15)) {
                 registry.setCollapsed(tab.id, !tab.collapsed)
@@ -475,7 +489,12 @@ struct SidebarView: View {
                     // first (see `focusCaptionHost`).
                     .layoutPriority(1)
             }
-            Spacer(minLength: 6)
+            // Focus mode: hatch out to the host, like the headless caption.
+            if focusIndex != nil { hatch(tokens.text).padding(.horizontal, 6) } else { Spacer(minLength: 6) }
+            // Lined up with the hints on pane rows, which have a lamp to their right.
+            if let keyIndex {
+                keyHint("⌘\(keyIndex + 1)").padding(.trailing, tab.collapsed ? 6 : Lamp.size + 5)
+            }
             if tab.collapsed {
                 stateLamp(registry.rollup(tab: tab))
                     .padding(.trailing, 6)
@@ -562,10 +581,10 @@ struct SidebarView: View {
     }
 
     private func paneRow(_ tab: TabModel, index: Int, ref: SessionRef,
-                         surface: Ghostty.SurfaceView?, active: Bool) -> some View {
+                         surface: Ghostty.SurfaceView?, active: Bool, keyIndex: Int? = nil) -> some View {
         let focused = active && (registry.focusedPaneIndex.map { $0 == index } ?? (index == 0))
         let userLabel = tab.paneLabels[ref.key]
-        let tag = tab.paneTags[ref.key]
+        let tags = tab.paneTags[ref.key] ?? []
         let renaming = registry.renaming == .pane(tab.id, name: ref.key)
         let live = showCC ? registry.ccLive[tab.hostID]?[ref.key] : nil
         let dot = registry.dot(ref: ref)
@@ -656,20 +675,20 @@ struct SidebarView: View {
                                         .foregroundStyle(tint)
                                 }
                             }
-                            // The tag: a filled square in the gutter, level with
-                            // the title. It used to be a hollow ring in the trailing column,
+                            // The tags: one filled square in the gutter, level with
+                            // the title, divided between them (`TagMark`). It used to be a hollow ring in the trailing column,
                             // beside the state indicator — where a red tag read as an alarm (red is
                             // `Theme.blocked`'s color, and that column is where alarms live).
                             // Hung off the title as an overlay rather than laid out in the
                             // gutter so it tracks the title line exactly: rows are 1–4 lines
                             // tall and only the title knows where its own centre is.
                             .overlay(alignment: .topLeading) {
-                                if let tag {
-                                    Rectangle().fill(Theme.tag(tag.hue))
+                                if !tags.isEmpty {
+                                    TagMark(tags: tags)
                                         .frame(width: Self.bead, height: Self.bead)
                                         .offset(x: Self.tagX - Self.gutter - Self.bead / 2,
                                                 y: Self.titleCenterTop - Self.bead / 2)
-                                        .help(tag.text)
+                                        .help(tags.map(\.text).joined(separator: ", "))
                                 }
                             }
                             if showCC {
@@ -688,17 +707,29 @@ struct SidebarView: View {
                             }
                         }
                         Spacer(minLength: 6)
-                        // The tag's *name* — hover only. At rest the tag is the square in the
+                        // The tags' *names* — hover only. At rest they are the square in the
                         // leading gutter and this column holds nothing but state; the label
                         // slides in while you're actually pointing at the row, which is when
                         // "which tag is that color" is the question.
-                        if let tag, hovered {
-                            Text(tag.text.uppercased()).font(mono(10, .bold)).kerning(0.5)
-                                .foregroundStyle(tokens.ground).fixedSize()
-                                .padding(.horizontal, 4).padding(.vertical, 1)
-                                .background(Theme.tag(tag.hue))
-                                .transition(.opacity.combined(with: .move(edge: .trailing)))
-                                .padding(.trailing, 6).padding(.top, 1)
+                        if !tags.isEmpty, hovered {
+                            HStack(spacing: 2) {
+                                ForEach(tags.prefix(TagMark.limit), id: \.self) { tag in
+                                    Text(tag.text.uppercased()).font(mono(10, .bold)).kerning(0.5)
+                                        .foregroundStyle(tokens.ground).fixedSize()
+                                        .padding(.horizontal, 4).padding(.vertical, 1)
+                                        .background(Theme.tag(tag.hue))
+                                }
+                                if tags.count > TagMark.limit {
+                                    Text("+\(tags.count - TagMark.limit)").font(mono(10, .bold))
+                                        .foregroundStyle(tokens.inactive).fixedSize()
+                                }
+                            }
+                            .transition(.opacity.combined(with: .move(edge: .trailing)))
+                            .padding(.trailing, 6).padding(.top, 1)
+                        }
+                        if let keyIndex {
+                            keyHint("⌘\(keyIndex + 1)").fixedSize()
+                                .padding(.trailing, 6).padding(.top, 2)
                         }
                         // One lamp per fact, rightmost = the row's main one, so the right edge
                         // reads as a column. Every row has it, lit or not: an unlit lamp is
@@ -765,7 +796,7 @@ struct SidebarView: View {
         .simultaneousGesture(TapGesture(count: 2).onEnded {
             registry.setRenaming(.pane(tab.id, name: ref.key))
         })
-        .contextMenu { paneContextMenu(tab, ref: ref, tag: tag) }
+        .contextMenu { paneContextMenu(tab, ref: ref, tags: tags) }
         .popover(isPresented: Binding(
             get: { taggingPane.map { $0 == (tab.id, ref.key) } ?? false },
             // Only clear shared state if it still points at *this* row — opening B's popover
@@ -775,8 +806,8 @@ struct SidebarView: View {
                 taggingPane = nil
             } }
         ), arrowEdge: .trailing) {
-            TagEditView(seed: tag) {
-                registry.setPaneTag(tab: tab.id, name: ref.key, to: $0)
+            TagEditView(seed: nil) {
+                if let t = $0 { registry.addPaneTag(tab: tab.id, name: ref.key, t) }
                 taggingPane = nil
             }
         }
@@ -814,17 +845,19 @@ struct SidebarView: View {
 
     @ViewBuilder
     /// Pane-scoped actions only — tab-scoped actions live on the tab heading menu.
-    private func paneContextMenu(_ tab: TabModel, ref: SessionRef, tag: PaneTag?) -> some View {
+    private func paneContextMenu(_ tab: TabModel, ref: SessionRef, tags: [PaneTag]) -> some View {
         Group {
             Button("Rename Pane…") { registry.setRenaming(.pane(tab.id, name: ref.key)) }
             // Top-3 recent tags inline (one click); the rest stay under the submenu.
-            ForEach(recentTags.prefix(3), id: \.self) { tagButton($0, tab: tab.id, ref: ref.key, prefix: "Tag: ") }
+            ForEach(recentTags.prefix(3), id: \.self) { tagToggle($0, tab: tab, ref: ref.key, prefix: "Tag: ") }
             Menu("Tag") {
-                ForEach(recentTags.dropFirst(3), id: \.self) { tagButton($0, tab: tab.id, ref: ref.key) }
+                ForEach(recentTags.dropFirst(3), id: \.self) { tagToggle($0, tab: tab, ref: ref.key) }
                 if recentTags.count > 3 { Divider() }
                 Button("New Tag…") { taggingPane = (tab.id, ref.key) }
-                if tag != nil {
-                    Button("Clear Tag") { registry.setPaneTag(tab: tab.id, name: ref.key, to: nil) }
+                if !tags.isEmpty {
+                    Button(tags.count == 1 ? "Clear Tag" : "Clear \(tags.count) Tags") {
+                        registry.removePaneTag(tab: tab.id, name: ref.key, nil)
+                    }
                 }
             }
             if registry.ccLive[ref.hostID]?[ref.key]?.sock != nil {
@@ -1190,6 +1223,30 @@ extension PaneState {
         case .working: "Working"
         case .waiting: "Finished — unread"
         case .blocked: "Needs your input"
+        }
+    }
+}
+
+/// A pane's tags as one square, divided between them: whole, halves, two over one, quarters.
+/// A hairline of ground between the parts, or two near hues read as one. Past four the rest
+/// are elided here (the hover names count them, the menu lists them).
+struct TagMark: View {
+    static let limit = 4
+    let tags: [PaneTag]
+
+    var body: some View {
+        let c = tags.prefix(Self.limit).map { Theme.tag($0.hue) }
+        VStack(spacing: 1) {
+            HStack(spacing: 1) {
+                if !c.isEmpty { c[0] }
+                if c.count > 1 { c[1] }
+            }
+            if c.count > 2 {
+                HStack(spacing: 1) {
+                    c[2]
+                    if c.count > 3 { c[3] }
+                }
+            }
         }
     }
 }

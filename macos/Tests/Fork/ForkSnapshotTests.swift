@@ -137,8 +137,12 @@ struct ForkSnapshotTests {
         _ = r.apply(ref("borei", "adsum"), .watch(true))
         _ = r.apply(ref("borei", "pr-loop"), .watch(true))
 
-        r.setPaneTag(tab: deputy, name: "deputy", to: PaneTag(text: "ops", hue: 0))
-        r.setPaneTag(tab: azure, name: "azure", to: PaneTag(text: "cloud", hue: 0.08))
+        // One, two, three, four, and past the limit.
+        let hues: [(String, Double)] = [("ops", 0), ("cloud", 0.08), ("wip", 0.5), ("env", 0.3), ("x", 0.75)]
+        for (t, name, n) in [(deputy, "deputy", 1), (deputy, "deputy-wbd5", 2), (ledger, "ledger", 3),
+                             (ledger, "ledger-djzu", 4), (azure, "azure", 5)] {
+            for (text, hue) in hues.prefix(n) { r.addPaneTag(tab: t, name: name, PaneTag(text: text, hue: hue)) }
+        }
 
         // Visits (they mark status text read); the last one is where "you" are.
         for (t, n) in [(foundry, "foundry"), (ledger, "ledger"), (azure, "azure"), (ghostty, "ghostty")] {
@@ -268,6 +272,13 @@ struct ForkSnapshotTests {
         try shoot(floating(CheatsheetView(hoverCommands: ["g": .init(cmd: ["lazygit", "-p", "{cwd}"], mode: .pane)]), s),
                   s, as: "cheatsheet")
         try shoot(TagEditView(seed: PaneTag(text: "ops", hue: 0.08)) { _ in }, s, as: "tag")
+        // The tag mark, enlarged: 1…5 tags.
+        try shoot(HStack(spacing: 16) {
+            ForEach(1...5, id: \.self) { n in
+                TagMark(tags: [0, 0.08, 0.5, 0.3, 0.75].prefix(n).map { PaneTag(text: "t", hue: $0) })
+                    .frame(width: 9, height: 9).scaleEffect(4).frame(width: 36, height: 36)
+            }
+        }.padding(12).background(tokens(s).ground), s, as: "tagmarks")
     }
 }
 #endif
