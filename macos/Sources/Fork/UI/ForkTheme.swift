@@ -27,7 +27,9 @@ struct ForkTokens: Equatable {
     /// Read, asleep, detached, ended: a neutral gray, not a dimmer `text` — losing the hue is
     /// what says "not live".
     var inactive: Color
-    /// The one step above `text`: the focused row, unread status text, a finished lamp.
+    /// The one step above `text`. As *type* it means one thing, "you are here": the focused
+    /// row's title (and its outline). Unread text is `text` — live, against read's gray — or
+    /// a few agents reporting at once outshout the row you are in. Also a finished lamp.
     var bright: Color
 
     /// The un-themed ramp — used until a config lands, and for any theme whose own colors

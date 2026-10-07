@@ -11,6 +11,8 @@ struct SidebarView: View {
     /// Off only for offscreen renders (`ForkSnapshotTests`): mounting the view must not be
     /// what starts `zmx list` and ssh against whatever hosts the registry was seeded with.
     var polls = true
+    /// On only for offscreen renders: every row drawn as if pointed at. There is no pointer there.
+    var hoverAll = false
     @EnvironmentObject private var registry: SessionRegistry
     @State private var renameText: String = ""
     @State private var draggingTab: TabModel.ID?
@@ -32,6 +34,7 @@ struct SidebarView: View {
     @State private var taggingPane: (tab: TabModel.ID, key: String)?
 
     @Environment(\.forkFontFamily) private var fontFamily
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private func mono(_ s: CGFloat, _ w: Font.Weight = .regular) -> Font { forkMono(s, w, fontFamily) }
 
     private var recentTags: ArraySlice<PaneTag> { registry.recentTags.prefix(5) }
@@ -43,12 +46,13 @@ struct SidebarView: View {
     // of one tab. The heading's chevron column and the focus caption's indent are this same
     // width, so chips, chevrons and titles share one left edge.
     static let gutter: CGFloat = 16
-    /// Centre line of the tag: 3…12pt, on whole pixels, with air before the title at 16.
-    static let tagX: CGFloat = 7.5
-    static let bead: CGFloat = 9
+    /// The tag square's left edge: 3…12pt, on whole pixels, with air before the title at 16.
+    static let tagLeft: CGFloat = 3
     /// The title line's centre, measured from the top of the title block: a 14pt title is a
     /// ≈17pt line. The tag and the lamps are both placed by it.
     static let titleCenterTop: CGFloat = 8.5
+    /// The same for a plain shell's one 12pt line (≈15pt).
+    static let plainCenterTop: CGFloat = 7.5
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -105,6 +109,9 @@ struct SidebarView: View {
             key("+ NEW", help: "New tab") { controller?.showSessionPicker() }
             key("HOSTS", help: "Hosts") { controller?.showHostsSheet() }
             key("HIDE", help: "Hide sidebar") { controller?.toggleSidebar() }
+            // Three keys that do something, three that stay on or off: same cap, so the gap
+            // is what says they are two kinds.
+            Color.clear.frame(width: 4, height: 1)
             key("TAGS", on: filterTagged, help: filterTagged ? "Show all" : "Tagged only") {
                 withAnimation(.snappy(duration: 0.12)) { filterTagged.toggle() }
             }
@@ -156,15 +163,22 @@ struct SidebarView: View {
         let off = registry.hosts.reduce(0) {
             $0 + (controller?.detachedPlaceholders(on: $1.id).count ?? 0)
         }
+        let tallies: [(kind: Lamp.Kind, word: String, n: Int, help: String)] = [
+            (.blocked, "BLOCKED", count(.blocked), PaneState.blocked.help),
+            (.finished, "DONE", count(.waiting), PaneState.waiting.help),
+            (.working, "BUSY", count(.working), PaneState.working.help),
+            // The rows' own word for it. It was "OFF", for sessions that are still running.
+            (.detached, "DETACHED", off, "Detached — sessions still running"),
+        ].filter { $0.n > 0 }
         func row(words: Bool) -> some View {
-            HStack(spacing: 0) {
-                tally(.blocked, words ? "BLOCKED" : nil, count(.blocked), help: PaneState.blocked.help)
-                Spacer(minLength: 8)
-                tally(.finished, words ? "DONE" : nil, count(.waiting), help: PaneState.waiting.help)
-                Spacer(minLength: 8)
-                tally(.working, words ? "BUSY" : nil, count(.working), help: PaneState.working.help)
-                Spacer(minLength: 8)
-                tally(.detached, words ? "OFF" : nil, off, help: "Detached — sessions still running")
+            // Leading, not spread: what is listed comes and goes, and spread out, one count
+            // reaching zero would move all the others.
+            HStack(spacing: 14) {
+                ForEach(tallies, id: \.word) { tally($0.kind, words ? $0.word : nil, $0.n, help: $0.help) }
+                if tallies.isEmpty {
+                    Text("ALL QUIET").font(mono(10)).kerning(0.5).foregroundStyle(tokens.inactive)
+                }
+                Spacer(minLength: 0)
             }
         }
         // At the sidebar's narrow floor the words don't fit; a truncated "BLOCKED…" is worse
@@ -174,13 +188,13 @@ struct SidebarView: View {
         .overlay(alignment: .top) { tokens.rule.frame(height: 1) }
     }
 
-    /// Zero is an unlit lamp: a red square that is always lit beside "BLOCKED 0" is a false
-    /// alarm, however useful as a legend.
+    /// Only what there is some of: "BLOCKED 0" says nothing, and takes the room a whole word
+    /// needs. (It was a full legend once, zeros shown with unlit lamps.)
     private func tally(_ kind: Lamp.Kind, _ word: String?, _ n: Int, help: String) -> some View {
         HStack(spacing: 5) {
-            Lamp(n > 0 ? kind : .unlit)
+            Lamp(kind)
             Text(word.map { "\($0) \(n)" } ?? "\(n)").font(mono(10)).kerning(0.5).fixedSize()
-                .foregroundStyle(n > 0 ? tokens.text : tokens.inactive)
+                .foregroundStyle(tokens.text)
         }
         .help(help)
     }
@@ -287,8 +301,10 @@ struct SidebarView: View {
         if let s { Lamp(state: s).help(s.help) }
     }
 
+    /// Gray: it is there to be looked up, and on a row it sits beside the lamps, which are
+    /// there to be noticed.
     private func keyHint(_ chord: String) -> some View {
-        Text(chord).font(mono(10, .semibold)).foregroundStyle(tokens.text)
+        Text(chord).font(mono(10, .semibold)).foregroundStyle(tokens.inactive)
     }
 
     // MARK: Host section
@@ -630,12 +646,23 @@ struct SidebarView: View {
                                       cached: surface == nil ? tab.ccNames[ref.key] : nil,
                                       fallback: ref.name, title: shownTitle,
                                       attention: blockedDetail) : nil
-        let whereText = showCC && ccText == nil
+        let place = ccText == nil
             ? registry.zmxCwd[tab.hostID]?[ref.key].flatMap(SessionNameLabel.whereLine) : nil
+        // A shell nobody named — a split's `deputy-wbd5`, a `shell-k7w` — with no agent in it: its
+        // id is noise and where it sits is the only thing that tells it from the next one, so
+        // that *is* the row, one quiet line. The big titles are then all names somebody chose.
+        // (The id is in the tooltip and the peek.) Decided only by things that hold still: the
+        // OSC title changes with every command, and a row that grew and shrank with it
+        // would shove the list around — `PaneLabel` appends it to the line instead.
+        let plain = Self.plainLine(label: userLabel, name: ref.name, renaming: renaming, place: place)
+        let whereText = showCC && plain == nil ? place : nil
+        // The first line's centre: lamps, tag and ⌘N hang off it.
+        let center = plain == nil ? Self.titleCenterTop : Self.plainCenterTop
         // tick: sleep and the peek age both derive from wall-clock age — without
         // a clock, a row nothing else re-renders (showCC off, no focus changes) would never
         // fall asleep.
-        return Hovering(tick: 60) { hovered, peek in
+        return Hovering(tick: 60) { pointed, peek in
+            let hovered = pointed || hoverAll
             // Long-tail recency: past the focus cutoff a row sleeps, and its text goes to the
             // inactive gray. Never asleep: the active tab (literally on screen), hovered rows
             // (hover means you're trying to read it), blocked rows (a pane asking for you
@@ -649,7 +676,8 @@ struct SidebarView: View {
                                 cutoff: SessionRegistry.focusCutoffSeconds(hours: cutoffHours))
             // A session with nobody home reads inactive whatever its age.
             let gone = cue.map { $0.lamp != .unresponsive } ?? false
-            let tint = focused ? tokens.bright : (asleep || gone) ? tokens.inactive : tokens.text
+            let tint = focused ? tokens.bright
+                : (asleep || gone || (plain != nil && !hovered)) ? tokens.inactive : tokens.text
             HStack(spacing: 0) {
                 // Leading gutter = identity: this pane's tag (drawn from the title
                 // block below, so it sits on the title line whatever the row's height).
@@ -661,34 +689,40 @@ struct SidebarView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     HStack(alignment: .top, spacing: 0) {
                         VStack(alignment: .leading, spacing: 0) {
-                            Group {
+                            HStack(alignment: .top, spacing: 0) {
+                                // The tags: one filled square in the gutter, level with
+                                // the title, divided between them (`TagMark`). It used to be a hollow ring in the trailing column,
+                                // beside the state indicator — where a red tag read as an alarm (red is
+                                // `Theme.blocked`'s color, and that column is where alarms live).
+                                // Laid out *with* the title rather than in the gutter so it
+                                // tracks the title line exactly (rows are 1–4 lines tall), and
+                                // so that unfolding into names on hover — which is when "which
+                                // tag is that color" is the question — moves the title aside
+                                // instead of covering it. The insets hang it back into
+                                // the gutter: shut, they cancel its width and the title sits
+                                // where an untagged row's does. One `padding`, not two — a
+                                // width can't go negative on the way, so applied in turn the
+                                // leading one stops at zero and the trailing one shows.
+                                if !tags.isEmpty {
+                                    let open = hovered && !renaming
+                                    TagMark(tags: tags, open: open ? 1 : 0, line: center * 2)
+                                        .padding(EdgeInsets(
+                                            top: 0, leading: Self.tagLeft - Self.gutter, bottom: 0,
+                                            trailing: Self.gutter - Self.tagLeft - TagMark.side
+                                                + (open ? 2 : 0)))
+                                        .help(tags.map(\.text).joined(separator: ", "))
+                                }
                                 if renaming {
                                     renameField(seed: userLabel ?? ref.name, font: mono(14))
                                 } else if let surface {
                                     PaneLabel(surface: surface, userLabel: userLabel, fallback: ref.name,
+                                              plain: plain,
                                               tint: tint, struck: cue?.lamp == .ended, focused: focused,
                                               suppressSubtitle: showCC, fontFamily: fontFamily)
                                 } else {
-                                    Text(userLabel ?? ref.name)
-                                        .font(mono(14, focused ? .bold : .regular)).lineLimit(1)
-                                        .strikethrough(cue?.lamp == .ended)
-                                        .foregroundStyle(tint)
-                                }
-                            }
-                            // The tags: one filled square in the gutter, level with
-                            // the title, divided between them (`TagMark`). It used to be a hollow ring in the trailing column,
-                            // beside the state indicator — where a red tag read as an alarm (red is
-                            // `Theme.blocked`'s color, and that column is where alarms live).
-                            // Hung off the title as an overlay rather than laid out in the
-                            // gutter so it tracks the title line exactly: rows are 1–4 lines
-                            // tall and only the title knows where its own centre is.
-                            .overlay(alignment: .topLeading) {
-                                if !tags.isEmpty {
-                                    TagMark(tags: tags)
-                                        .frame(width: Self.bead, height: Self.bead)
-                                        .offset(x: Self.tagX - Self.gutter - Self.bead / 2,
-                                                y: Self.titleCenterTop - Self.bead / 2)
-                                        .help(tags.map(\.text).joined(separator: ", "))
+                                    PaneLabel.line(plain ?? userLabel ?? ref.name, plain: plain != nil,
+                                                   id: ref.name, tint: tint, struck: cue?.lamp == .ended,
+                                                   focused: focused, fontFamily: fontFamily)
                                 }
                             }
                             if showCC {
@@ -698,38 +732,18 @@ struct SidebarView: View {
                                 // lines (4 total — the wrap cap lives in `ccLine`).
                                 if let ccText {
                                     ccLine(ccText, live: live, attention: blockedDetail,
-                                           read: read, unclamped: peek)
+                                           read: read, unread: unread, unclamped: peek)
                                 } else if let whereText {
                                     // `.head`: the leaf of a path is the part that identifies it.
-                                    Text(whereText).font(mono(11)).lineLimit(1).truncationMode(.head)
+                                    Text(whereText).font(mono(12)).lineLimit(1).truncationMode(.head)
                                         .foregroundStyle(tokens.inactive)
                                 }
                             }
                         }
                         Spacer(minLength: 6)
-                        // The tags' *names* — hover only. At rest they are the square in the
-                        // leading gutter and this column holds nothing but state; the label
-                        // slides in while you're actually pointing at the row, which is when
-                        // "which tag is that color" is the question.
-                        if !tags.isEmpty, hovered {
-                            HStack(spacing: 2) {
-                                ForEach(tags.prefix(TagMark.limit), id: \.self) { tag in
-                                    Text(tag.text.uppercased()).font(mono(10, .bold)).kerning(0.5)
-                                        .foregroundStyle(tokens.ground).fixedSize()
-                                        .padding(.horizontal, 4).padding(.vertical, 1)
-                                        .background(Theme.tag(tag.hue))
-                                }
-                                if tags.count > TagMark.limit {
-                                    Text("+\(tags.count - TagMark.limit)").font(mono(10, .bold))
-                                        .foregroundStyle(tokens.inactive).fixedSize()
-                                }
-                            }
-                            .transition(.opacity.combined(with: .move(edge: .trailing)))
-                            .padding(.trailing, 6).padding(.top, 1)
-                        }
                         if let keyIndex {
                             keyHint("⌘\(keyIndex + 1)").fixedSize()
-                                .padding(.trailing, 6).padding(.top, 2)
+                                .padding(.trailing, 6).padding(.top, center - 6.5)
                         }
                         // One lamp per fact, rightmost = the row's main one, so the right edge
                         // reads as a column. Every row has it, lit or not: an unlit lamp is
@@ -750,9 +764,14 @@ struct SidebarView: View {
                                 Lamp(.unlit)
                             }
                         }
-                        .padding(.top, Self.titleCenterTop - Lamp.size / 2)
+                        .padding(.top, center - Lamp.size / 2)
                     }
-                    .animation(.snappy(duration: 0.15), value: hovered)
+                    // The beat before opening is for a pointer crossing the list on its way
+                    // somewhere else: gone again inside it, and the shutting animation starts
+                    // from a square that never moved.
+                    .animation(reduceMotion ? nil
+                               : hovered ? .snappy(duration: 0.22).delay(0.07) : Theme.settle,
+                               value: hovered)
                     // Peek ledger — suppressed while renaming (growth under a focused text
                     // field just shoves it around mid-edit).
                     if peek, !renaming {
@@ -780,7 +799,7 @@ struct SidebarView: View {
                     }
                 }
             }
-            .padding(.trailing, 7).padding(.vertical, 2).frame(minHeight: 30)
+            .padding(.trailing, 7).padding(.vertical, 2).frame(minHeight: plain == nil ? 30 : 21)
             // "Here" is a shape, not a shade: a bright cut-corner outline (+ the heavier,
             // brighter title above). Hover is the same outline in the quiet rule color.
             .overlay(Chamfer(cut: 5).strokeBorder(
@@ -876,7 +895,7 @@ struct SidebarView: View {
 
     /// CC subtitle — status lives in the right-edge lamp; recency is the row's
     /// sleep and the hover peek's age line.
-    /// Blocked: the question CC is asking, in `tokens.bright` (the red lives in the
+    /// Blocked: the question CC is asking, in `tokens.text` (the red lives in the
     /// lamp). Otherwise `name · detail` is a live
     /// activity feed (what the session is, what it's doing / last did), falling back to
     /// cwd basename, then the cached last-seen name for placeholder rows. Unread text is
@@ -927,6 +946,13 @@ struct SidebarView: View {
         }
     }
 
+    /// What an unnamed shell's row shows instead of a title, or nil for an ordinary row. A pane
+    /// somebody named is never one, whatever its id looks like; nor is one with nowhere to
+    /// show (the id is then all there is), nor the row being renamed. Pure, for tests.
+    static func plainLine(label: String?, name: String, renaming: Bool, place: String?) -> String? {
+        label == nil && !renaming && SessionRegistry.looksAuto(name) ? place : nil
+    }
+
     /// Does a CC session name merely repeat the row's title? Case- and punctuation-blind:
     /// `API-SERVER`, `api_server` and `Api Server` are the same name as far as "does line two repeat
     /// line one" goes. A name that folds to nothing never matches (it isn't a repeat of
@@ -941,12 +967,15 @@ struct SidebarView: View {
     }
 
     private func ccLine(_ label: Text, live: CCProbe.Info?,
-                        attention: String?, read: Bool, unclamped: Bool) -> some View {
-        // The question renders bright, not red: with several agents blocked at once a
+                        attention: String?, read: Bool, unread: Bool, unclamped: Bool) -> some View {
+        // The question is not red: with several agents blocked at once a
         // 3-line red paragraph per row reads as a wall of alarm. Red stays on the
-        // lamp; the question and unread status text share `tokens.bright` ("look here"),
-        // and the lamp beside them says which of the two it is.
-        let style = (attention == nil && (read || live == nil)) ? tokens.inactive : tokens.bright
+        // lamp; the question and unread status text share `tokens.text` ("live"),
+        // and the lamp beside them says which of the two it is. Not `bright` either: that is
+        // "you are here", and with a few agents reporting it was most of the sidebar.
+        // Everything else is gray — including a bare session name with no status after it,
+        // which is neither read nor unread: there is nothing there to catch up on.
+        let style = attention != nil || unread ? tokens.text : tokens.inactive
         return label
             // `attention == nil`: the read-state belongs to the detail text only — a blocked
             // question must keep its 3 lines even when the unrelated detail counts as read
@@ -1024,6 +1053,8 @@ private struct PaneLabel: View {
     @ObservedObject var surface: Ghostty.SurfaceView
     let userLabel: String?
     let fallback: String
+    /// Non-nil = an unnamed shell's row (see `paneRow`): this, where it sits, stands in for a title.
+    var plain: String?
     /// Decided by the row (bright / text / inactive) — it knows about sleep and liveness.
     let tint: Color
     /// The session has ended: the name is crossed out, not just grayed.
@@ -1045,13 +1076,24 @@ private struct PaneLabel: View {
         return userLabel ?? (t.isEmpty || t == "👻" || isPathish ? fallback : t)
     }
 
+    /// The first line, for a row with a surface or without. `.head` on a plain one: the leaf of a
+    /// path is the part that identifies it, and what is running comes after that.
+    static func line(_ text: String, plain: Bool, id: String, tint: Color, struck: Bool,
+                     focused: Bool, fontFamily: String?) -> some View {
+        Text(text).font(forkMono(plain ? 12 : 14, focused ? .bold : .regular, fontFamily))
+            .lineLimit(1).truncationMode(plain ? .head : .tail)
+            .strikethrough(struck)
+            .foregroundStyle(tint)
+            .help(plain ? id : "")
+    }
+
     var body: some View {
         let label = Self.displayed(userLabel: userLabel, title: surface.title, fallback: fallback)
         return VStack(alignment: .leading, spacing: 0) {
-            Text(label).font(forkMono(14, focused ? .bold : .regular, fontFamily)).lineLimit(1)
-                .strikethrough(struck)
-                .foregroundStyle(tint)
-            if !suppressSubtitle && label != fallback {
+            Self.line(plain.map { label == fallback ? $0 : "\($0)  ·  \(label)" } ?? label,
+                      plain: plain != nil, id: fallback, tint: tint, struck: struck,
+                      focused: focused, fontFamily: fontFamily)
+            if !suppressSubtitle && label != fallback && plain == nil {
                 Text(fallback).font(forkMono(11, .regular, fontFamily)).lineLimit(1)
                     .foregroundStyle(tokens.inactive)
             }
@@ -1159,7 +1201,7 @@ private struct PanePeek: View {
         switch state {
         case .working: ("WORKING", tokens.text)
         case .blocked: ("NEEDS YOU", Theme.blocked)
-        case .waiting: ("UNREAD", tokens.bright)
+        case .waiting: ("UNREAD", tokens.text)
         case nil:      (((rawStatus?.isEmpty == false ? rawStatus! : "idle").uppercased(), tokens.inactive))
         }
     }
@@ -1229,23 +1271,113 @@ extension PaneState {
 
 /// A pane's tags as one square, divided between them: whole, halves, two over one, quarters.
 /// A hairline of ground between the parts, or two near hues read as one. Past four the rest
-/// are elided here (the hover names count them, the menu lists them).
+/// are elided here (the names count them, the menu lists them).
+///
+/// `open` unfolds it: each part grows out of its place in the square into that tag's name, in a
+/// row. One set of views for both ends rather than a square swapped for labels, so a color can
+/// be followed by eye from the part to the word.
 struct TagMark: View {
     static let limit = 4
+    static let side: CGFloat = 9
+
+    @Environment(\.forkTokens) private var tokens
     let tags: [PaneTag]
+    /// 0 = the square, 1 = the names.
+    var open: CGFloat = 0
+    /// Height it claims at either end, the mark centered in it — the title line's, so
+    /// unfolding can't change the row's height under the pointer.
+    var line: CGFloat = TagMark.side
+
+    /// Where part `i` of `n` sits in the square. Past the last part (the "+N"): nowhere, at the
+    /// trailing edge. Pure, for tests.
+    static func cell(_ i: Int, of n: Int) -> CGRect {
+        let half = (side - 1) / 2, far = half + 1
+        guard i < n else { return CGRect(x: side, y: 0, width: 0, height: side) }
+        let rows = n > 2 ? 2 : 1, row = i / 2
+        // Alone on its row: the only tag, or the third of three.
+        let wide = n == 1 || (n == 3 && i == 2)
+        return CGRect(x: i % 2 == 0 ? 0 : far, y: row == 0 ? 0 : far,
+                      width: wide ? side : half, height: rows == 1 ? side : half)
+    }
 
     var body: some View {
-        let c = tags.prefix(Self.limit).map { Theme.tag($0.hue) }
-        VStack(spacing: 1) {
-            HStack(spacing: 1) {
-                if !c.isEmpty { c[0] }
-                if c.count > 1 { c[1] }
+        let shown = tags.prefix(Self.limit)
+        Unfold(t: open, parts: shown.count, line: line) {
+            ForEach(shown, id: \.self) { tag in
+                // `fixedSize` + a frame that takes whatever it is given + a clip: the word is
+                // set once at full size and wiped into view as its part widens. Left to
+                // truncate it would flicker through "O…", "OP…" on the way.
+                Text(tag.text.uppercased()).kerning(0.5).forkFont(10, .bold)
+                    .foregroundStyle(tokens.ground).fixedSize().modifier(Late(t: open))
+                    .padding(.horizontal, 4).padding(.vertical, 1)
+                    .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity,
+                           alignment: .leading)
+                    .background(Theme.tag(tag.hue)).clipped()
             }
-            if c.count > 2 {
-                HStack(spacing: 1) {
-                    c[2]
-                    if c.count > 3 { c[3] }
-                }
+            if tags.count > Self.limit {
+                Text("+\(tags.count - Self.limit)").forkFont(10, .bold)
+                    .foregroundStyle(tokens.inactive).fixedSize().modifier(Late(t: open))
+                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading).clipped()
+            }
+        }
+        // Names too long for the row are cut at its edge rather than squeezing the title out.
+        .clipped()
+    }
+
+    /// The first part of the way is the square re-forming as a row; words wait for it.
+    private static let regroup: CGFloat = 0.4
+
+    /// Opacity that starts after `regroup`. A modifier of its own because a plain
+    /// `.opacity(f(open))` is only evaluated at the two ends and interpolated straight between.
+    private struct Late: ViewModifier, Animatable {
+        var t: CGFloat
+        var animatableData: CGFloat {
+            get { t }
+            set { t = newValue }
+        }
+        func body(content: Content) -> some View {
+            content.opacity(max(0, (t - regroup) / (1 - regroup)))
+        }
+    }
+
+    /// Two overlapping moves on one `t`. Widths grow the whole way. Over the first `regroup` of
+    /// it the parts leave the grid for a row — full height, each placed after the *current*
+    /// width of the ones before it. Sent straight from cell to final place instead, the bottom
+    /// row crosses the top row's words diagonally and covers them most of the way.
+    private struct Unfold: Layout {
+        var t: CGFloat
+        let parts: Int
+        let line: CGFloat
+        var animatableData: CGFloat {
+            get { t }
+            set { t = newValue }
+        }
+
+        private func mix(_ a: CGFloat, _ b: CGFloat, _ t: CGFloat) -> CGFloat { a + (b - a) * t }
+
+        private func rects(_ subviews: Subviews, at t: CGFloat) -> [CGRect] {
+            let u = min(1, t / regroup)
+            var x: CGFloat = 0
+            return subviews.enumerated().map { i, v in
+                let name = v.sizeThatFits(.unspecified)
+                let cell = TagMark.cell(i, of: parts).offsetBy(dx: 0, dy: (line - side) / 2)
+                let w = mix(cell.width, name.width, t)
+                defer { x += w + mix(1, 2, t) }
+                return CGRect(x: mix(cell.minX, x, u), y: mix(cell.minY, (line - name.height) / 2, u),
+                              width: w, height: mix(cell.height, name.height, u))
+            }
+        }
+
+        func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+            let want = max(side, rects(subviews, at: t).last?.maxX ?? side)
+            return CGSize(width: min(want, max(proposal.width ?? .infinity, side)), height: line)
+        }
+
+        func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews,
+                           cache: inout ()) {
+            for (v, r) in zip(subviews, rects(subviews, at: t)) {
+                v.place(at: CGPoint(x: bounds.minX + r.minX, y: bounds.minY + r.minY),
+                        proposal: ProposedViewSize(r.size))
             }
         }
     }

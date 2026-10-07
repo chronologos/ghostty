@@ -1063,6 +1063,14 @@ final class SessionRegistry: ObservableObject {
         return "\(base)-\(suffix)"
     }
 
+    /// Could `autoName` have made this? `shell-xxx`, or anything ending in a derived `-xxxx`.
+    /// Shape alone can't tell `deputy-wbd5` from a typed `api-prod`, so on its own this proves
+    /// nothing: pair it with "has no alias" — a typed name is seeded as one
+    /// (`NewSessionIntent.named`), a generated name never is.
+    static func looksAuto(_ name: String) -> Bool {
+        name.range(of: #"^shell-[a-z0-9]{3}$|-[a-z0-9]{4}$"#, options: .regularExpression) != nil
+    }
+
     // MARK: Test support
 
     /// Full state reset for the test suite — the shared singleton leaks state across test
