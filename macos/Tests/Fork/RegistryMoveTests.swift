@@ -546,6 +546,22 @@ struct RegistryMoveTests {
 
     // MARK: - uniqueAutoName
 
+    /// The recogniser has to keep up with the generator: whatever it makes, in either form.
+    @Test func looksAuto_recognisesWhatAutoNameMakes() {
+        let r = SessionRegistry.shared
+        r.resetForTesting()
+        for _ in 0..<50 {
+            #expect(SessionRegistry.looksAuto(r.uniqueAutoName()))
+            #expect(SessionRegistry.looksAuto(r.uniqueAutoName(derivedFrom: "deputy")))
+            #expect(SessionRegistry.looksAuto(r.uniqueAutoName(derivedFrom: r.uniqueAutoName())))
+        }
+        for typed in ["deputy", "shell", "shell-", "shell-ab", "build-box", "API-PROD", "a-b-c", "v1.2-beta1"] {
+            #expect(!SessionRegistry.looksAuto(typed), "\(typed)")
+        }
+        // Shape can't separate these; the caller's "no alias" test does.
+        #expect(SessionRegistry.looksAuto("api-prod") && SessionRegistry.looksAuto("pr-loop"))
+    }
+
     @Test func uniqueAutoName_collisionsAndDerivedStems() {
         let r = reset()
         _ = makeTab(r, names: ["api-prod"])
