@@ -52,8 +52,9 @@ final class ForkNotify: NSObject, UNUserNotificationCenterDelegate {
             // never reached the badge at all. `!ccBusy` is the only `dot`-ism that belongs
             // here (a busy pane renders a working rail; badging "needs you" at the same
             // time would contradict it — and `ccBusy` also masks `blocked` in `dot`).
+            // The rule itself is `PaneMachine.needsYou`, beside `dot`.
             let needsYou = { (p: [SessionRef: PaneMachine]) in
-                p.values.lazy.filter { ($0.phase == .waiting || $0.blocked) && !$0.ccBusy }.count
+                p.values.lazy.filter(\.needsYou).count
             }
             // Upstream's `setDockBadge` (AppDelegate) is the second writer; it's `private`,
             // so on the 1→0 edge we re-derive its bell label locally instead of writing

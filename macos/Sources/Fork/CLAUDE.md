@@ -103,12 +103,17 @@ Fork/
                                propagation, stamp-matched retries); pure, unit-tested
     PaneMachine.swift          Per-SessionRef status reducer — event-ordered `.progress`/
                                `.settled`/`.probe`/`.probeAbsent`/`.probeStopped`/`.viewed`/
-                               `.watch`/`.bell(isActive:)`/`.detached` → `.dot` projection
-                               + post-banner bool
+                               `.watch`/`.bell(isActive:)`/`.detached`/`.link` → `.dot`
+                               projection + post-banner bool. `link` is the session's own
+                               daemon speaking (via the bridge): said outright (OSC 7501) it
+                               outranks every other witness, inferred from a progress bar it
+                               is one more. Unread = `link.stamp > seen`; nothing is cleared
     SessionRegistry.swift      @MainActor singleton; @Published hosts/tabs/activeTabID/
                                focusedPaneIndex/renaming/recentTags/panes/ccLive (refs is a
                                plain var); focusTabs/hostTabs (the ⌘1-9 contract), rollup,
-                               applyProbeResult (mergeCC body), uniqueAutoName, tab visit
+                               applyProbeResult (mergeCC body), noteBridge/noteBridgeDown
+                               (the link's fold) + publishCC (`ccLive` = probe result with
+                               each program's own words laid over it), uniqueAutoName, tab visit
                                history (setActive records; historyStep walks — mouse ⏴/⏵)
     Persistence.swift          fork.json (atomic write + .bak + preserve-aside + revalidate-on-load)
   Zmx/
@@ -121,6 +126,14 @@ Fork/
                                cmd, task end/exit) + `ListResult.unresponsive` (daemons that
                                didn't answer — present, not gone); `ListFailure` (why a list
                                failed), `KillOutcome`, `SetResult`
+    BridgeWire.swift           `zmx-bridge` protocol 1, decoded (pure): hello / set / del /
+                               ready; strips + caps every string again; `overlaid(on:)` turns
+                               a status into the `CCProbe.Info` shape the views already read
+    BridgeLink.swift           one long-lived `zmx-bridge` per host (child process, or
+                               `ssh -T host zmx-bridge`): started by the app, told to leave by
+                               closing its stdin, so there is nothing to keep running on a
+                               host. Line + rate caps, backoff 1→60s, 10 min when the bridge
+                               isn't there (127) or refuses (2/64). Carries lines only
     CCProbe.swift              zmx pid → ~/.claude/sessions/<pid>.json. Local host: native
                                Swift (sysctl process table + FileManager); ssh hosts: sh
                                probe script. Keyed by SessionRef.key; nil-on-failure so the
@@ -174,7 +187,8 @@ Fork/
                                the trailing edge is *state* (`Lamp`s)
                                — so a red tag can't read as an alarm. `Lamp` is the one state
                                carrier (rows, collapsed headers, host strip, footer): filled =
-                               wants your eyes (red blocked, bright finished), outline = armed
+                               wants your eyes (red blocked, red struck through failed, bright
+                               finished), outline = armed
                                or in progress (filling = working, dot = watched, red =
                                not responding), gray = nobody home (bars = detached, hatch =
                                ended). Kinds differ in shape, never hue alone — on a black- or
@@ -219,7 +233,7 @@ Fork/
                                right-click target). Toolbar = worded keys (`KeyCap`), on =
                                inverse video, a gap between the three that act and the three
                                that stay on. Footer = the fleet's tally
-                               (blocked / done / busy / detached), always on screen; only what
+                               (blocked / failed / done / busy / detached), always on screen; only what
                                there is some of, "ALL QUIET" for none;
                                drops its words when they don't fit (`ViewThatFits`: the narrow
                                floor, or all four at once). Hidden
@@ -396,7 +410,7 @@ shadows upstream's `undo` alias (Config.zig:6934); ⌘Z remains undo.
 
 ## Security boundary
 
-`Transport.wrap` / `controlArgv` are the shell **boundary**. `SSHTarget` and
+`Transport.wrap` / `controlArgv` / `streamArgv` are the shell **boundary**. `SSHTarget` and
 `SessionRef.name` are validated against `\A[A-Za-z0-9._-]+\z` (`\A…\z`, not `^…$` — ICU `$`
 matches before a trailing newline); `shq` single-quotes argv. For ssh, the remote command is
 double-quoted (`shq(shq(argv))`) and both ssh argv builders pass `--` before the destination.
@@ -425,7 +439,12 @@ interpolated into it;
 cached CC names are `stripControl`'d before they reach a local pty, and so are remote-origin
 strings that reach UN notification titles (`paneDisplayLabel`) and `CommandError.stderr`.
 `zmx run()` output accumulation is capped (8 MiB stdout / 256 KiB stderr) so a hostile remote
-can't balloon memory inside the timeout window. On shared-uid hosts the probe still transfers
+can't balloon memory inside the timeout window. The bridge's command is a constant
+(`ZmxAdapter.bridgeArgv`) and nothing is ever written to it; what it sends back is
+pane-controlled text relayed by a host that may itself be hostile, so `BridgeWire` re-strips and
+re-caps it, session names are only *compared* with the wire names of refs already in the
+sidebar (never made into a `SessionRef`), and `BridgeLink` drops a connection that sends an
+endless line or more than 5000 lines a second. On shared-uid hosts the probe still transfers
 (and heartbeats) every user's CC session files — treat `name`/`detail`/`needs` from such
 hosts as untrusted display text.
 
@@ -581,6 +600,20 @@ A terminal that runs arbitrary shells will trip every macOS privacy surface. Thr
 `FORK_SIGN_IDENTITY="Apple Development: …"` overrides the cert if you'd rather use a real Team ID.
 
 ## Known limitations
+
+- **Pushed status needs the zmx fork on that host** (`chronologos/zmx`, bookmark `fork`): its
+  daemons publish what the program in each session reports (`src/fork/FACTS.md`) and
+  `zmx-bridge` (`bridge/README.md`) streams the changes. Without it `BridgeLink` goes `.absent`
+  and the poll + CC probe below are all there is; with it they still run, as the fallback and
+  for what only they know (session list, aliases, liveness, the agent's name / cwd / socket).
+  A daemon keeps the code it started with, so a session created before the upgrade publishes
+  nothing until it is restarted.
+  CC speaks OSC 7501 from 2.1.295. A program may ask first whether anyone is listening, which
+  the patched daemon always answers, and may have settings of its own that keep it quiet. From
+  one that only sends OSC 9;4, working / finished are still instant (inferred, with the surface
+  path's 250ms settle), but `blocked`, `failed` and the status text come from the probe.
+  `blocked` doesn't banner (CC's own OSC 777 does, for an attached pane; a cold one gets the lamp
+  and the badge only). `seen` marks live in UserDefaults (`forkLinkSeen`), per Mac.
 
 - Launch applies the *cached* login-shell PATH instantly (pre-`ghostty_init`) and refreshes
   the cache via a background probe (15s bound — heavy rc inits measured at 2-4s defeat any
