@@ -33,6 +33,14 @@ enum ZmxAdapter {
         host.transport.isLocal ? localZmx : "zmx"
     }
 
+    /// The command behind a `BridgeLink`. A constant: nothing about a session, a pane or a
+    /// remote reply ever goes into it. Locally the bridge is looked for beside `zmx`, where the
+    /// deploy puts it; remotely by bare name, like `zmx` itself.
+    static func bridgeArgv(host: ForkHost) -> [String] {
+        let local = localZmx.hasSuffix("/zmx") ? localZmx + "-bridge" : "zmx-bridge"
+        return host.transport.streamArgv([host.transport.isLocal ? local : "zmx-bridge", "--stdio"])
+    }
+
     /// zmx's default tracked-env list (cfg.zig `tracked_envs` — `ZMX_TRACK_ENV` *replaces*
     /// it, so the defaults are repeated) plus the two variables CC's progress reporting
     /// gates on.
@@ -764,6 +772,20 @@ extension ForkHost.Transport {
     /// instead of sitting out the OS TCP timeout. Command-line `-o` beats `ssh_config`.
     static let paneSSHOptions = ["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
                                  "-o", "ConnectTimeout=15"]
+
+    /// argv (no shell) for a command that stays connected and streams (`zmx-bridge`). No tty;
+    /// the panes' liveness options, because a stream over a link that died silently is as
+    /// frozen as a pane and has nobody looking at it.
+    func streamArgv(_ argv: [String]) -> [String] {
+        switch self {
+        case .local:
+            return argv
+        case .ssh(let t):
+            precondition(t.isValid)
+            return ["ssh", "-T", "-o", "BatchMode=yes"] + Self.paneSSHOptions
+                + ["--", t.connectionString, shq(argv)]
+        }
+    }
 
     /// argv (no shell) for non-interactive control commands (`list`, `kill`) via `Process`.
     func controlArgv(_ argv: [String]) -> [String] {

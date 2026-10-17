@@ -165,6 +165,7 @@ struct SidebarView: View {
         }
         let tallies: [(kind: Lamp.Kind, word: String, n: Int, help: String)] = [
             (.blocked, "BLOCKED", count(.blocked), PaneState.blocked.help),
+            (.failed, "FAILED", count(.failed), PaneState.failed.help),
             (.finished, "DONE", count(.waiting), PaneState.waiting.help),
             (.working, "BUSY", count(.working), PaneState.working.help),
             // The rows' own word for it. It was "OFF", for sessions that are still running.
@@ -671,7 +672,7 @@ struct SidebarView: View {
             // content the unread model exists to surface). The ⌥ reveal deliberately does
             // NOT wake a row or brighten read text — it only un-clamps the line count, so
             // holding ⌥ reads as "more of the same sidebar", not a different one.
-            let asleep = !(active || hovered || dot == .blocked || unread)
+            let asleep = !(active || hovered || dot == .blocked || dot == .failed || unread)
                 && Theme.asleep(lastSeen(),
                                 cutoff: SessionRegistry.focusCutoffSeconds(hours: cutoffHours))
             // A session with nobody home reads inactive whatever its age.
@@ -1201,6 +1202,7 @@ private struct PanePeek: View {
         switch state {
         case .working: ("WORKING", tokens.text)
         case .blocked: ("NEEDS YOU", Theme.blocked)
+        case .failed:  ("FAILED", Theme.blocked)
         case .waiting: ("UNREAD", tokens.text)
         case nil:      (((rawStatus?.isEmpty == false ? rawStatus! : "idle").uppercased(), tokens.inactive))
         }
@@ -1264,6 +1266,7 @@ extension PaneState {
         switch self {
         case .working: "Working"
         case .waiting: "Finished — unread"
+        case .failed: "Failed — unread"
         case .blocked: "Needs your input"
         }
     }
@@ -1394,7 +1397,7 @@ struct TagMark: View {
 /// contradictory indicators on one row.
 struct Lamp: View {
     enum Kind: Equatable {
-        case unlit, working, finished, blocked, detached, ended, unresponsive, watching
+        case unlit, working, finished, failed, blocked, detached, ended, unresponsive, watching
     }
     static let size: CGFloat = 10
 
@@ -1407,6 +1410,7 @@ struct Lamp: View {
         switch state {
         case .working: kind = .working
         case .waiting: kind = .finished
+        case .failed: kind = .failed
         case .blocked: kind = .blocked
         }
     }
@@ -1419,6 +1423,16 @@ struct Lamp: View {
             // Steady, not blinking: with several agents blocked at once a column of flashing
             // red is the wall of alarm the plain question text was chosen to avoid.
             case .blocked: Rectangle().fill(Theme.blocked)
+            // Filled, so it wants your eyes; struck through, so it isn't a question. The stroke
+            // is what tells it from `blocked`: same red, and hue alone is never the difference.
+            case .failed:
+                Rectangle().fill(Theme.blocked).overlay {
+                    Path { p in
+                        p.move(to: .init(x: 0, y: Self.size)); p.addLine(to: .init(x: Self.size, y: 0))
+                    }
+                    .stroke(tokens.ground, lineWidth: 2)
+                }
+                .clipped()
             case .working:
                 Rectangle().strokeBorder(tokens.text, lineWidth: 1)
                     .overlay(alignment: .leading) { filling.padding(1) }

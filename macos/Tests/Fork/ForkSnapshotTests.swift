@@ -198,7 +198,7 @@ struct ForkSnapshotTests {
     func lamps() throws {
         let kinds: [(Lamp.Kind, String)] = [
             (.unlit, "unlit"), (.working, "working"), (.finished, "finished"),
-            (.blocked, "blocked"), (.detached, "detached"), (.ended, "ended"),
+            (.failed, "failed"), (.blocked, "blocked"), (.detached, "detached"), (.ended, "ended"),
             (.unresponsive, "unresponsive"), (.watching, "watching"),
         ]
         try FileManager.default.createDirectory(atPath: Self.dir!, withIntermediateDirectories: true)

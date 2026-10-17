@@ -12,7 +12,7 @@ enum RenameTarget: Hashable {
 
 /// Projection of `PaneMachine.dot` — what the sidebar/rollup/badge render.
 /// `Comparable` order is "needs me most" for `rollup` max-reduce.
-enum PaneState: Comparable { case working, waiting, blocked }
+enum PaneState: Comparable { case working, waiting, failed, blocked }
 
 /// What the last successful `zmx list` said about an in-tree session. The pane's own pty
 /// can't tell these apart (every way a zmx client ends is exit 0), so the sidebar reads it
@@ -65,8 +65,10 @@ final class SessionRegistry: ObservableObject {
     /// Only writer. `!=` guard ⇒ steady-state probe ticks don't publish.
     @discardableResult
     func apply(_ ref: SessionRef, _ e: PaneEvent) -> Bool {
-        var m = panes[ref, default: .init()]; let post = m.apply(e)
-        if panes[ref] != m { panes[ref] = m }; return post
+        var m = panes[ref] ?? PaneMachine(seen: linkSeen[ref]); let post = m.apply(e)
+        if panes[ref] != m { panes[ref] = m }
+        if let s = m.seen, linkSeen[ref] != s { linkSeen[ref] = s; saveLinkSeen() }
+        return post
     }
     func dot(ref: SessionRef) -> PaneState? { panes[ref]?.dot }
     /// Worst-child state for a collapsed tab heading — max-reduce over `dot`. Registry-side
@@ -85,6 +87,8 @@ final class SessionRegistry: ObservableObject {
         refBornAt.removeValue(forKey: ref)
         listMisses.removeValue(forKey: ref)
         if liveness[ref] != nil { liveness.removeValue(forKey: ref) }
+        linkSettle.removeValue(forKey: ref)?.cancel()
+        if linkSeen.removeValue(forKey: ref) != nil { saveLinkSeen() }
     }
     private func refInAnyTree(_ r: SessionRef) -> Bool {
         tabs.contains { $0.tree.leafRefs.contains(r) }
@@ -293,6 +297,15 @@ final class SessionRegistry: ObservableObject {
         hostUnreachableSince[id] = nil
         hostUnreachableWhy[id] = nil
         zmxCwd[id] = nil
+        probeInfo[id] = nil
+        links.removeValue(forKey: id)?.stop()
+        linkSessions[id] = nil
+        linkOpening[id] = nil
+        linkOpened.remove(id)
+        for (ref, t) in linkSettle where ref.hostID == id { t.cancel(); linkSettle[ref] = nil }
+        if linkSeen.contains(where: { $0.key.hostID == id }) {
+            linkSeen = linkSeen.filter { $0.key.hostID != id }; saveLinkSeen()
+        }
         panes = panes.filter { $0.key.hostID != id }
         // Host ids are deterministic (hash of user@host), so re-adding the host would
         // inherit these: a queued retry would fire an unsolicited `zmx set` on the first
@@ -585,11 +598,14 @@ final class SessionRegistry: ObservableObject {
             if !liveness.isEmpty { liveness = [:] }
             listMisses = [:]
         }
+        syncLinks()
         if !(windowsUp && ccProbeOn) { ccTeardown() }
+        else { for h in hosts { publishCC(h.id) } }   // the links may already have text to show
     }
 
     private func ccTeardown() {
         if !ccLive.isEmpty { ccLive = [:] }
+        probeInfo = [:]
         ccUpdatedAt = [:]
         // `blocked`/`blockSig` survive toggle (the machine holds the edge-detect latch),
         // but `ccBusy` must not — nothing else clears it once probing stops, and `dot`
@@ -600,6 +616,7 @@ final class SessionRegistry: ObservableObject {
     private func pollLoop() async {
         var tick = 0
         while !Task.isCancelled {
+            syncLinks()
             let probing = ccProbeOn
             // Wake every 3s but do the work on a tick schedule: locals every tick and ssh
             // every 5th at the fast cadence (CC probe on + a fork window visible); every
@@ -782,11 +799,11 @@ final class SessionRegistry: ObservableObject {
         // Same keep-last-known for the display slice: carry the previous info forward for
         // sessions that merely didn't answer this tick.
         var merged = result
-        if !unresponsive.isEmpty, let prev = ccLive[hostID] {
+        if !unresponsive.isEmpty, let prev = probeInfo[hostID] {
             for key in unresponsive where merged[key] == nil { merged[key] = prev[key] }
         }
-        if ccLive[hostID] != merged { ccLive[hostID] = merged }
-        ccUpdatedAt[hostID] = merged.compactMapValues(\.updatedAt)
+        probeInfo[hostID] = merged
+        publishCC(hostID)
         for i in tabs.indices where tabs[i].hostID == hostID {
             let live = Set(tabs[i].tree.leafRefs.map(\.key))
             for (key, info) in merged {
@@ -795,6 +812,173 @@ final class SessionRegistry: ObservableObject {
                 tabs[i].ccNames[key] = name
             }
         }
+    }
+
+    // MARK: Bridge link — each session's own daemon, pushed (`BridgeLink`)
+    //
+    // The poll above asks every few seconds and works status out from outside the session. A
+    // host whose zmx carries the fork's patch doesn't need asking: each daemon publishes what
+    // the program in it reports (OSC 7501, OSC 9;4) and `zmx-bridge` streams the changes. Where
+    // that exists it is the better witness, and `PaneMachine.dot` ranks it so; where it
+    // doesn't, nothing here ever fires and the poll is all there is.
+
+    private var links: [ForkHost.ID: BridgeLink] = [:]
+    /// What each host's bridge last said, keyed by zmx *wire* name. Holds every session on the
+    /// host, in the sidebar or not: a session opened as a pane later has its status at once.
+    private(set) var linkSessions: [ForkHost.ID: [String: BridgeSession]] = [:]
+    /// Between `hello` and `ready`: the names sent so far, so `ready` can tell who is missing.
+    private var linkOpening: [ForkHost.ID: Set<String>] = [:]
+    /// Hosts that have been heard in full once this run (see `PaneEvent.link`'s `quiet`).
+    private var linkOpened: Set<ForkHost.ID> = []
+    /// The 250ms `ForkWindowController.observeProgress` gives a vanished progress bar before
+    /// believing it, for sessions that have no surface to observe.
+    private var linkSettle: [SessionRef: Task<Void, Never>] = [:]
+    /// `PaneMachine.seen`, kept across launches: a daemon goes on saying `done` until its
+    /// program says something else, so without this every agent at rest would relight its
+    /// "finished" lamp on each launch. UserDefaults rather than fork.json: it is this screen's
+    /// reading position, not layout, and losing it costs one round of stale lamps.
+    private var linkSeen: [SessionRef: PaneMachine.Stamp] = SessionRegistry.loadLinkSeen()
+    private static let kLinkSeen = "forkLinkSeen"
+    /// Off under test, like `ForkPersistence`'s redirect: the suite runs inside the app and
+    /// shares its defaults domain.
+    private static let persistsLinkSeen =
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
+    /// The CC probe's own last result, before anything is laid over it (`publishCC`).
+    private var probeInfo: [ForkHost.ID: [String: CCProbe.Info]] = [:]
+    /// Test seam, like `aliasPusher`.
+    var linkBanner: (TabModel.ID, String, String) -> Void = {
+        ForkNotify.shared.post(tab: $0, title: $1, body: $2)
+    }
+    private static let maxLinkSessions = 512
+
+    private static func loadLinkSeen() -> [SessionRef: PaneMachine.Stamp] {
+        guard persistsLinkSeen, let d = UserDefaults.standard.data(forKey: kLinkSeen) else { return [:] }
+        return (try? JSONDecoder().decode([SessionRef: PaneMachine.Stamp].self, from: d)) ?? [:]
+    }
+    private func saveLinkSeen() {
+        guard Self.persistsLinkSeen, let d = try? JSONEncoder().encode(linkSeen) else { return }
+        UserDefaults.standard.set(d, forKey: Self.kLinkSeen)
+    }
+
+    /// The probe found an agent in this pane (as opposed to a program describing itself).
+    func probeSaw(_ ref: SessionRef) -> Bool { probeInfo[ref.hostID]?[ref.key] != nil }
+
+    /// One link per host that has a tab, while a fork window is up. Called from `reconcile` and
+    /// on every poll wake, so hosts and tabs coming and going need no hooks of their own. The
+    /// same wake re-applies what is known: a session that became a pane since its last `set`
+    /// picks its status up here.
+    private func syncLinks() {
+        let wanted = windowsUp ? hosts.filter { h in tabs.contains { $0.hostID == h.id } } : []
+        for (id, link) in links where !wanted.contains(where: { $0.id == id }) {
+            link.stop()
+            links[id] = nil
+            noteBridgeDown(hostID: id)
+        }
+        for h in wanted where links[h.id] == nil {
+            let id = h.id
+            let link = BridgeLink(argv: ZmxAdapter.bridgeArgv(host: h), label: h.label,
+                                  deliver: { [weak self] in self?.noteBridge(hostID: id, $0) },
+                                  down: { [weak self] in self?.noteBridgeDown(hostID: id) })
+            links[id] = link
+            link.start()
+        }
+        for h in wanted where linkOpening[h.id] == nil && linkSessions[h.id] != nil {
+            for ref in treeRefs(on: h.id) { applyLink(ref, quiet: false) }
+        }
+    }
+
+    private func treeRefs(on hostID: ForkHost.ID) -> Set<SessionRef> {
+        Set(tabs.lazy.filter { $0.hostID == hostID }.flatMap(\.tree.leafRefs))
+    }
+
+    /// Fold one batch of bridge lines in. Internal so tests can drive it without a process.
+    func noteBridge(hostID: ForkHost.ID, _ msgs: [BridgeMsg]) {
+        guard host(id: hostID) != nil else { return }
+        let refs = treeRefs(on: hostID)
+        func touch(_ wire: String) {
+            let quiet = !linkOpened.contains(hostID)
+            for ref in refs where ZmxAdapter.wireName(ref) == wire { applyLink(ref, quiet: quiet) }
+        }
+        for m in msgs {
+            switch m {
+            case .hello:
+                // Not cleared through to the panes yet: on a reconnect nearly everything is
+                // about to be said again unchanged, and blanking first would blink every lamp.
+                linkSessions[hostID] = [:]
+                linkOpening[hostID] = []
+            case .set(let s):
+                guard linkSessions[hostID]?[s.name] != nil
+                        || (linkSessions[hostID]?.count ?? 0) < Self.maxLinkSessions else { continue }
+                linkSessions[hostID, default: [:]][s.name] = s
+                linkOpening[hostID]?.insert(s.name)
+                touch(s.name)
+            case .del(let name):
+                linkSessions[hostID]?[name] = nil
+                touch(name)
+            case .ready:
+                let said = linkOpening.removeValue(forKey: hostID) ?? []
+                for ref in refs where !said.contains(ZmxAdapter.wireName(ref)) {
+                    applyLink(ref, quiet: true)
+                }
+                linkOpened.insert(hostID)
+            }
+        }
+        if windowsUp && ccProbeOn { publishCC(hostID) }
+    }
+
+    /// The connection is gone, so nothing it said can be vouched for. A lamp left `working` by a
+    /// link that will never say otherwise is the wedge `.probeStopped` exists to prevent.
+    func noteBridgeDown(hostID: ForkHost.ID) {
+        guard linkSessions[hostID] != nil || linkOpening[hostID] != nil else { return }
+        linkSessions[hostID] = nil
+        linkOpening[hostID] = nil
+        for ref in treeRefs(on: hostID) { applyLink(ref, quiet: true) }
+        if windowsUp && ccProbeOn { publishCC(hostID) }
+    }
+
+    /// Hand `ref`'s machine whatever `linkSessions` now holds for it.
+    private func applyLink(_ ref: SessionRef, quiet: Bool) {
+        let link = linkSessions[ref.hostID]?[ZmxAdapter.wireName(ref)]?.link
+        linkSettle.removeValue(forKey: ref)?.cancel()
+        // CC takes its bar down and puts it back between tool calls. Only a gap that lasts is
+        // a finish. (A program that says `done` outright is taken at its word.)
+        if let link, link.inferred, link.state == .done, panes[ref]?.link?.state == .working {
+            linkSettle[ref] = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(250))
+                guard let self, !Task.isCancelled else { return }
+                self.linkSettle[ref] = nil
+                self.deliverLink(ref, link, quiet: quiet)
+            }
+            return
+        }
+        deliverLink(ref, link, quiet: quiet)
+    }
+
+    private func deliverLink(_ ref: SessionRef, _ link: PaneMachine.Link?, quiet: Bool) {
+        // Nothing to say about a pane nothing has been said about: don't mint a machine for it.
+        guard link != nil || panes[ref]?.link != nil else { return }
+        let isActive = activeTab?.tree.leafRefs.contains(ref) ?? false
+        guard apply(ref, .link(link, isActive: isActive, quiet: quiet)),
+              let tab = tabs.first(where: { $0.hostID == ref.hostID && $0.tree.leafRefs.contains(ref) })
+        else { return }
+        // Same words as the controller's banners for the same event; no surface to ask for a
+        // title here, and an external ref's name is remote-controlled.
+        let label = stripControl(tab.paneLabels[ref.key] ?? ref.name, max: 96)
+        linkBanner(tab.id, "\(label) \(link?.state == .error ? "failed" : "finished")", "Tab '\(tab.title)'")
+    }
+
+    /// `ccLive` = what the probe found, with what each program says about itself laid over it.
+    /// The only writer of `ccLive` besides the teardowns. `!=`-guarded like every poll write.
+    func publishCC(_ hostID: ForkHost.ID) {
+        var out = probeInfo[hostID] ?? [:]
+        if let said = linkSessions[hostID] {
+            for ref in treeRefs(on: hostID) {
+                guard let now = said[ZmxAdapter.wireName(ref)]?.now, !now.inferred else { continue }
+                out[ref.key] = now.overlaid(on: out[ref.key])
+            }
+        }
+        if (ccLive[hostID] ?? [:]) != out { ccLive[hostID] = out }
+        ccUpdatedAt[hostID] = out.compactMapValues(\.updatedAt)
     }
 
     // MARK: Session aliases (zmx `ghostty_name` label)
@@ -1073,10 +1257,22 @@ final class SessionRegistry: ObservableObject {
 
     // MARK: Test support
 
+    /// A registry of the test's own. (Nothing it is used for reaches `shared`; its autosave
+    /// goes where `ForkPersistence` sends every save under test.)
+    static func isolatedForTesting() -> SessionRegistry {
+        let r = SessionRegistry()
+        r.resetForTesting()
+        r.aliasPusher = { _, _, _, _ in }
+        return r
+    }
+
     /// Full state reset for the test suite — the shared singleton leaks state across test
     /// cases otherwise: `refs` and the pending exit-stamp have no public clearing path, and
     /// `ccLive`/`ccSeenDetail` for the local host survive `removeHost`'s local-host guard.
     /// Never called from production code (live surfaces bound in `refs` would be orphaned).
+    /// Only good for a test that never suspends: the suites run in parallel on the main actor,
+    /// so at any `await` another test's reset lands in the middle of this one. A test that has
+    /// to wait for something takes `isolatedForTesting()` instead.
     func resetForTesting() {
         for h in hosts where h.id != ForkHost.local.id { removeHost(h.id) }
         for t in tabs { removeTab(t.id) }
@@ -1109,6 +1305,16 @@ final class SessionRegistry: ObservableObject {
         hostUnreachableWhy = [:]
         aliasPendingTTL = 40
         aliasPusher = Self.liveAliasPusher
+        for l in links.values { l.stop() }
+        links = [:]
+        linkSessions = [:]
+        linkOpening = [:]
+        linkOpened = []
+        for t in linkSettle.values { t.cancel() }
+        linkSettle = [:]
+        linkSeen = [:]
+        probeInfo = [:]
+        linkBanner = { _, _, _ in }
     }
 
     /// `autoName()` retried until disjoint from live refs and dormant persisted-tree leaves.
