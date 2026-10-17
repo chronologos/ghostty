@@ -37,7 +37,7 @@ func forkWigglePane(_ view: Ghostty.SurfaceView) {
     // press+release pairs because under kitty report-event-types a bare press
     // reads as a held key.
     if let ref = SessionRegistry.shared.refs[view.id],
-       SessionRegistry.shared.ccLive[ref.hostID]?[ref.key] != nil,
+       SessionRegistry.shared.probeSaw(ref),
        let m = view.surfaceModel {
         for k in [Ghostty.Input.Key.space, .backspace] {
             m.sendKeyEvent(.init(key: k, action: .press,
