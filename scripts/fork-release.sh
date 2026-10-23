@@ -19,6 +19,44 @@ xcodebuild -license check \
   || { echo "fork-release: Xcode license not accepted — run: sudo xcodebuild -license accept" >&2; exit 1; }
 xcodebuild -checkFirstLaunchStatus \
   || { echo "fork-release: Xcode first-launch tasks pending — run: sudo xcodebuild -runFirstLaunch" >&2; exit 1; }
+# The Metal compiler is a separate download that belongs to one Xcode build, so the same
+# auto-update leaves it uninstalled. That can stay hidden for weeks: zig caches the compiled
+# shaders, and `metal` only runs again when they change or the cache is new (a new Zig).
+# xcrun also remembers "missing" after the download has finished, hence the second try.
+xcrun -sdk macosx metal --version >/dev/null 2>&1 \
+  || { xcrun --kill-cache; xcrun -sdk macosx metal --version >/dev/null 2>&1; } \
+  || { echo "fork-release: Xcode's Metal toolchain is not installed — run: xcodebuild -downloadComponent MetalToolchain" >&2; exit 1; }
+
+# Preflight: is the Zig this tree needs installed? Upstream raises build.zig.zon's
+# `minimum_zig_version` every few months (0.16 in 2026-07, 0.17 in 2026-10), so the first
+# release after a rebase is where a missing toolchain shows up. Without this check
+# scripts/shims/zig falls through to the system `zig` and the build dies on a version error.
+#
+# How Zig is installed here (scripts/shims/zig depends on it, and so do the zmx deploy scripts):
+#   ~/.local/share/zig-X.Y.Z/   the official tarball from ziglang.org, unpacked and untouched
+#   ~/.local/bin/zig-X.Y        symlink to that directory's `zig`; ~/.local/bin is on PATH
+# One directory per release, side by side. Nothing is ever upgraded in place, because this repo
+# and zmx change Zig versions at different times. Not Homebrew: it carries one version, and
+# moves it on its own schedule. A patch release (X.Y.1) gets its own directory and the
+# symlink is re-pointed. An old directory can go once no build.zig.zon on this machine names
+# its X.Y. The message below is the install procedure, with this tree's version filled in.
+zig_min="$(sed -nE 's/.*\.minimum_zig_version = "([^"]+)".*/\1/p' build.zig.zon | head -1)"
+zig_bin="zig-${zig_min%.*}"
+zig_have="$("${zig_bin}" version 2>/dev/null || true)" # empty sorts first, so "missing" fails too
+if [[ "$(printf '%s\n' "${zig_min}" "${zig_have}" | sort -V | head -1)" != "${zig_min}" ]]; then
+  zig_tar="zig-$(uname -m | sed 's/^arm64$/aarch64/')-macos-${zig_min}"
+  cat >&2 <<EOF
+fork-release: this tree needs Zig >= ${zig_min} as \`${zig_bin}\` on PATH (found: ${zig_have:-none}). To install it:
+
+  cd "\$(mktemp -d)"
+  curl -fLO https://ziglang.org/download/${zig_min}/${zig_tar}.tar.xz
+  shasum -a 256 ${zig_tar}.tar.xz    # must match the one listed on https://ziglang.org/download/
+  tar -xJf ${zig_tar}.tar.xz
+  mv ${zig_tar} ~/.local/share/zig-${zig_min}
+  ln -sfn ~/.local/share/zig-${zig_min}/zig ~/.local/bin/${zig_bin}
+EOF
+  exit 1
+fi
 
 # Skip the xcframework freshness check — the zig build right below regenerates it.
 FORK_CHECK_SKIP_XCFW=1 ./scripts/fork-check.sh

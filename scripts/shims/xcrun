@@ -3,8 +3,10 @@
 # arm64e-only libSystem.tbd in the Xcode 26.4 SDK. Redirect zig's SDK probe
 # to a 15.x SDK whose tbd still lists arm64-macos. This repo no longer needs
 # it (Zig 0.16 fixed the bug), but this shims dir is also prepended by other
-# 0.15.2 builds — zmx via ~/bin/zmx-deploy — so it stays until nothing on
-# this machine builds with 0.15.2.
+# 0.15.2 builds, so it stays until nothing on this machine builds with 0.15.2.
+# zmx was the known one and moved to 0.16 in 2026-07. Dropping this file is still
+# a change to test, not a cleanup: while a 15.x SDK is installed, every build that
+# goes through this dir, this repo's included, has only ever run against it.
 #
 # The SDK is looked up, not hardcoded: a Command Line Tools update replaces the
 # point release (15.4 → 15.5 …), and a redirect to a directory that no longer
