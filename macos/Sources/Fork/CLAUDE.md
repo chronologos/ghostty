@@ -19,12 +19,15 @@ section numbers as historical anchors).
 ## Build & test
 
 ```sh
-# Upstream requires Zig 0.16 (build.zig.zon `minimum_zig_version`) while system `zig`
-# stays 0.15.2 (zmx builds on it); scripts/shims/zig picks per-project from the nearest
-# build.zig.zon's declared minimum → `zig-0.16` here — a real shim, not an alias, because
+# Upstream requires Zig 0.17 (build.zig.zon `minimum_zig_version`) while zmx is on 0.16
+# and system `zig` lags both; scripts/shims/zig picks per-project from the nearest
+# build.zig.zon's declared minimum → `zig-0.17` here — a real shim, not an alias, because
 # upstream's `translate_c` dependency discovers the lib dir via `zig env` on PATH.
-# (0.16 no longer needs scripts/shims/xcrun — ziglang/zig#31658 is fixed — but the
-# 0.15.2 consumers of this shims dir, e.g. ~/bin/zmx-deploy, still do; leave it.)
+# A new minimum means installing that release beside the others (~/.local/share/zig-X.Y.Z,
+# linked as ~/.local/bin/zig-X.Y); the shim needs no edit. scripts/fork-release.sh documents
+# the layout, checks for it first, and prints the install commands when it is missing.
+# (0.16+ no longer needs scripts/shims/xcrun — ziglang/zig#31658 is fixed — it only
+# matters to anything still built with 0.15.2 through this shims dir; leave it.)
 # -Demit-xcframework: upstream's libghostty-vt split made the xcframework non-default.
 PATH=$(pwd)/scripts/shims:$PATH zig build -Demit-xcframework -Demit-macos-app=false
 

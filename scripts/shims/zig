@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
-# Two Zig toolchains live on this machine: 0.16 (this repo — upstream's
-# build.zig.zon `minimum_zig_version`) and the system `zig` 0.15.2 (zmx). Pick
-# per *project*, from the nearest ancestor build.zig.zon: a project declaring a
-# 0.16.x minimum gets `zig-0.16`; anything else falls through to the real system
-# `zig`. This dir sits on PATH beyond this repo — .envrc.local `PATH_add`s it, and
-# zmx-deploy prepends it for the xcrun shim — so an unconditional shim would
-# hijack zmx's 0.15 build. It must be a real PATH shim, not an alias: upstream's
+# Several Zig toolchains live on this machine side by side, as `zig-<major.minor>`
+# on PATH: this repo and zmx move to a new Zig at different times (0.17 and 0.16
+# as of 2026-10), and the system `zig` lags both. Pick per *project*, from the
+# nearest ancestor build.zig.zon: a project declaring an X.Y.z
+# `minimum_zig_version` gets `zig-X.Y` if that exists; anything else falls through
+# to the real system `zig`. This dir sits on PATH beyond this repo — .envrc.local
+# `PATH_add`s it, and zmx deploy scripts may prepend it — so an unconditional shim
+# would hijack another project's build. It must be a real PATH shim, not an alias: upstream's
 # `translate_c` build dependency discovers the Zig lib dir by running `zig env`
 # (whatever `zig` is on PATH), so both the entry point and that probe have to
 # resolve the same way.
+#
+# `zig-X.Y` is a symlink in ~/.local/bin to ~/.local/share/zig-X.Y.Z/zig, an unpacked
+# official tarball. When upstream raises its minimum, install the new release beside the
+# old ones; this file needs no edit. scripts/fork-release.sh documents the layout and, when
+# the toolchain is missing, prints the install commands for the version this tree needs.
 self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
 
 # Nearest build.zig.zon walking up from $PWD → its declared minimum version.
@@ -22,8 +28,8 @@ while [[ -n "$d" && "$d" != "/" ]]; do
   d="$(dirname "$d")"
 done
 
-if [[ "$want" == "0.16" ]] && command -v zig-0.16 >/dev/null 2>&1; then
-  exec zig-0.16 "$@"
+if [[ -n "$want" ]] && command -v "zig-$want" >/dev/null 2>&1; then
+  exec "zig-$want" "$@"
 fi
 
 # Fall through to the real system zig (skipping this shim so it can't recurse).
