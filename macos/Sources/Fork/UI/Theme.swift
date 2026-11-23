@@ -66,32 +66,25 @@ enum Theme {
     static let settle = Animation.easeOut(duration: 0.18)
 }
 
-/// Cut corners — a rectangle with all four corners taken off at 45°. The fork's one
-/// frame shape: host modules, panels, focus-mode cards, the selected row, keys.
-struct Chamfer: InsettableShape {
-    var cut: CGFloat = 8
-    var insetAmount: CGFloat = 0
-    func inset(by amount: CGFloat) -> Chamfer {
-        var c = self; c.insetAmount += amount; return c
+/// The fork's one frame shape — host modules, panels, focus-mode cards, the selected row, keys,
+/// fields: a rectangle with its corners just taken off. One radius at every size, so frames that
+/// sit inside each other read as the same part. (It was a 45° cut until it had been lived with.)
+/// Lamps, host squares and tags are marks, not frames, and stay square.
+extension Shape where Self == RoundedRectangle {
+    static var forkFrame: RoundedRectangle { RoundedRectangle(cornerRadius: 3, style: .circular) }
+}
+
+/// The line between two panes of one tab: dashed, so it can't be taken for the solid one between
+/// tabs. A dash rather than a fainter color: `rule` is already as dark as a dark theme can carry.
+struct DashedRule: View {
+    @Environment(\.forkTokens) private var tokens
+    private struct Line: Shape {
+        func path(in r: CGRect) -> Path {
+            Path { $0.move(to: .init(x: r.minX, y: r.midY)); $0.addLine(to: .init(x: r.maxX, y: r.midY)) }
+        }
     }
-    func path(in rect: CGRect) -> Path {
-        let r = rect.insetBy(dx: insetAmount, dy: insetAmount)
-        guard r.width > 0, r.height > 0 else { return Path() }
-        // Insetting moves the diagonal in by `inset`·√2 along each axis but the straight edges
-        // by only `inset`, so the cut shortens by the difference — otherwise a stroked border
-        // is visibly heavier on the diagonals.
-        let c = min(max(cut - insetAmount * (2 - 2.0.squareRoot()), 0), min(r.width, r.height) / 2)
-        var p = Path()
-        p.move(to: .init(x: r.minX + c, y: r.minY))
-        p.addLine(to: .init(x: r.maxX - c, y: r.minY))
-        p.addLine(to: .init(x: r.maxX, y: r.minY + c))
-        p.addLine(to: .init(x: r.maxX, y: r.maxY - c))
-        p.addLine(to: .init(x: r.maxX - c, y: r.maxY))
-        p.addLine(to: .init(x: r.minX + c, y: r.maxY))
-        p.addLine(to: .init(x: r.minX, y: r.maxY - c))
-        p.addLine(to: .init(x: r.minX, y: r.minY + c))
-        p.closeSubpath()
-        return p
+    var body: some View {
+        Line().stroke(tokens.rule, style: StrokeStyle(lineWidth: 1, dash: [2, 3])).frame(height: 1)
     }
 }
 
@@ -111,7 +104,7 @@ struct Hatch: Shape {
     }
 }
 
-/// Shared card chrome (focus-mode tab cards, host modules): a cut-corner frame on the
+/// Shared card chrome (focus-mode tab cards, host modules): the fork's frame on the
 /// sidebar's own ground. `line` nil = the quiet rule color.
 struct ForkCard: ViewModifier {
     @Environment(\.forkTokens) private var tokens
@@ -121,7 +114,7 @@ struct ForkCard: ViewModifier {
     func body(content: Content) -> some View {
         content
             .padding(pad)
-            .overlay(Chamfer().strokeBorder(line ?? tokens.rule, lineWidth: 1))
+            .overlay(RoundedRectangle.forkFrame.strokeBorder(line ?? tokens.rule, lineWidth: 1))
             .padding(.horizontal, hPad)
     }
 }

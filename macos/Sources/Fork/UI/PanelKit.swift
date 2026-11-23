@@ -4,7 +4,7 @@ import SwiftUI
 
 // The parts every fork surface outside the sidebar is built from — palette, pickers, Hosts,
 // confirms, cheatsheet, popovers — so the look lives in one place and a new surface can't
-// drift. Same rules as the sidebar: flat, opaque, cut corners, words rather than symbols,
+// drift. Same rules as the sidebar: flat, opaque, one frame shape, words rather than symbols,
 // and nothing on screen that has to be explained.
 
 // MARK: Type
@@ -49,7 +49,7 @@ extension View {
 
 // MARK: Frame
 
-/// What everything the fork floats over the terminal wears: a cut-corner frame on the
+/// What everything the fork floats over the terminal wears: `forkFrame` on the
 /// terminal's own ground, under a title strip (NAME · hatch · the chord that opens it) — a host
 /// module's strip, one size up.
 struct Panel<Content: View>: View {
@@ -57,8 +57,6 @@ struct Panel<Content: View>: View {
     let title: String
     var chord: String?
     @ViewBuilder let content: Content
-
-    static var cut: CGFloat { 10 }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -75,8 +73,8 @@ struct Panel<Content: View>: View {
             content
         }
         .background(tokens.ground)
-        .clipShape(Chamfer(cut: Self.cut))
-        .overlay(Chamfer(cut: Self.cut).strokeBorder(tokens.text, lineWidth: 1))
+        .clipShape(.forkFrame)
+        .overlay(RoundedRectangle.forkFrame.strokeBorder(tokens.text, lineWidth: 1))
     }
 }
 
@@ -88,7 +86,7 @@ struct PanelRule: View {
 
 // MARK: Controls
 
-/// Cut-corner key. `primary` is inverse video (what ⏎ does), `destructive` is red line and
+/// A key. `primary` is inverse video (what ⏎ does), `destructive` is red line and
 /// label — never a red *fill*: the thing you might regret must not be the loudest thing there.
 /// A `ButtonStyle`, not a view, so a `keyboardShortcut` on the button keeps working.
 struct PanelButtonStyle: ButtonStyle {
@@ -122,10 +120,10 @@ struct PanelButtonStyle: ButtonStyle {
             .foregroundStyle(!enabled ? tokens.inactive : inverse ? tokens.ground : hue)
             .padding(.horizontal, compact ? 6 : 10).frame(height: compact ? 18 : 24)
             .background(inverse ? tokens.text : configuration.isPressed ? tokens.rule : tokens.ground,
-                        in: Chamfer(cut: compact ? 4 : 5))
+                        in: .forkFrame)
             // A compact destructive key repeats down a list (Kill per session): red labels in
             // quiet frames, or the column of red boxes is the loudest thing on the panel.
-            .overlay(Chamfer(cut: compact ? 4 : 5).strokeBorder(
+            .overlay(RoundedRectangle.forkFrame.strokeBorder(
                 !enabled ? tokens.rule
                     : kind == .destructive && compact ? (hovered ? hue : tokens.rule)
                     : hovered ? tokens.bright : hue, lineWidth: 1))
@@ -141,7 +139,7 @@ private struct PanelFieldChrome: ViewModifier {
         content
             .textFieldStyle(.plain).forkFont(13).foregroundStyle(tokens.bright).tint(tokens.text)
             .padding(.horizontal, 8).frame(height: 26)
-            .overlay(Rectangle().strokeBorder(tokens.rule, lineWidth: 1))
+            .overlay(RoundedRectangle.forkFrame.strokeBorder(tokens.rule, lineWidth: 1))
     }
 }
 
@@ -150,7 +148,7 @@ private struct PanelRowChrome: ViewModifier {
     let selected: Bool
     let hovered: Bool
     func body(content: Content) -> some View {
-        content.overlay(Chamfer(cut: 5).strokeBorder(
+        content.overlay(RoundedRectangle.forkFrame.strokeBorder(
             selected ? tokens.bright : hovered ? tokens.rule : .clear, lineWidth: 1))
     }
 }
@@ -159,7 +157,7 @@ extension View {
     /// A boxed form field. On a `TextField`, which keeps its own `focused`/`onSubmit`.
     func panelField() -> some View { modifier(PanelFieldChrome()) }
 
-    /// List selection, the sidebar's way: the selected row is the bright cut-corner outline
+    /// List selection, the sidebar's way: the selected row is the bright outline
     /// the focused pane row wears, hover the same outline in the rule color. An outline rather
     /// than inverse video so whatever is *in* the row (lamps, host squares, red) keeps its color.
     func panelRow(selected: Bool, hovered: Bool = false) -> some View {

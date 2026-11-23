@@ -249,7 +249,7 @@ private struct ForkPaletteCard: View {
                     Text(badge.uppercased()).kerning(0.5)
                         .foregroundStyle(tokens.text).forkFont(9, .bold)
                         .padding(.horizontal, 4).padding(.vertical, 1)
-                        .overlay(Rectangle().strokeBorder(tokens.rule, lineWidth: 1))
+                        .overlay(RoundedRectangle.forkFrame.strokeBorder(tokens.rule, lineWidth: 1))
                 }
                 if let symbols = opt.symbols {
                     Text(symbols.joined()).foregroundStyle(tokens.text).forkFont(10, .semibold)

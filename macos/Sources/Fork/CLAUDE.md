@@ -152,7 +152,7 @@ Fork/
                                sidebar width = drag the right edge (248pt floor, persisted
                                via UserDefaults ForkSidebarWidth; ⌘⇧B hide/show restores it)
     PanelKit.swift             the parts every surface outside the sidebar is built from, so the
-                               look lives in one place: `Panel` (cut-corner frame + title strip:
+                               look lives in one place: `Panel` (`forkFrame` + title strip:
                                NAME · hatch · chord), `PanelButtonStyle` (primary = inverse
                                video, destructive = red line and label, never a red fill;
                                compact destructive = red label in a quiet frame, because it
@@ -167,16 +167,18 @@ Fork/
                                `.forkFont(_:_:)` off `\.forkFontFamily`. House rules: flat,
                                opaque, words or lamps rather than symbols, nothing on screen
                                that has to be explained
-    SidebarView.swift          flat, opaque, cut-cornered: nothing in it is translucent, so every
+    SidebarView.swift          flat, opaque, one frame shape: nothing in it is translucent, so every
                                state is a *shape* or a *color role*, never an alpha. Sits on
                                the terminal's own background (`ForkTokens.ground`), divided
                                from the grid by a rule. One module per host (drag-reorder): a
-                               `Chamfer` frame holding a title strip (host square · NAME · hatch
+                               `forkFrame` holding a title strip (host square · NAME · hatch
                                filler · ⌘⌥N; click = collapse, no chevron — and nothing on it
                                that needs explaining: an "H-01" index and a bare tab count were
                                tried and cut) and the rows; a host with no live surface gets the quiet frame.
-                               Hairline between tabs, none between one tab's panes — the rule
-                               *is* the grouping. Per-pane rows show paneLabel ›
+                               Solid rule between tabs, frame edge to frame edge with air around
+                               it; `DashedRule`, inset to the text column, between one tab's panes
+                               — an unnamed shell's one gray line otherwise reads as the third
+                               line of the row above. Per-pane rows show paneLabel ›
                                surface.title › ref.name; optional tab-title heading + collapse
                                chevron; ⌘I/⌘⇧I → inline rename; one layout rule per side —
                                the leading gutter is *identity* (the tags: one square at the
@@ -217,7 +219,7 @@ Fork/
                                appended to the line, never allowed to change the row's height;
                                solo ⌥-hold ≥0.5s reveals all (and pops the
                                cheatsheet — one peek, one threshold), ⌥⌥ marks all
-                               read; the focused row is a *shape* — bright cut-corner outline +
+                               read; the focused row is a *shape* — bright outline +
                                bold bright title (hover = the same outline in the rule color);
                                recency = sleep (text goes
                                `inactive` past the focus cutoff; never on unread/blocked rows) + the
@@ -264,7 +266,9 @@ Fork/
                                window appearance (system controls inside a panel follow it)
     Theme.swift                theme-*independent* tokens (blocked/error, both pure red; tag
                                hues), recency rule (asleep), peek timing
-                               (peekDelay/exhale/settle), shapes: Chamfer + Hatch, ForkCard
+                               (peekDelay/exhale/settle), shapes: `forkFrame` (3pt radius, every
+                               frame at every size; lamps/squares/tags stay square) + DashedRule
+                               + Hatch, ForkCard
     TagEditView.swift          "New Tag…" popover (text + 8 hue swatches), from the pane context
                                menu's Tag submenu; *adds* to what the pane already wears
     NewSessionView.swift       two-stage new-session palette (⌘T / ⌘⇧T / sidebar ＋ /

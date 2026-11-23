@@ -269,7 +269,7 @@ struct NewSessionView: View {
                     Text(m.host.label.uppercased()).kerning(0.6).foregroundStyle(tokens.text).forkFont(10, .bold)
                 }
                 .padding(.horizontal, 7).frame(height: 20)
-                .overlay(Chamfer(cut: 4).strokeBorder(m.locked ? tokens.rule : tokens.text, lineWidth: 1))
+                .overlay(RoundedRectangle.forkFrame.strokeBorder(m.locked ? tokens.rule : tokens.text, lineWidth: 1))
                 .contentShape(Rectangle())
                 .onTapGesture { m.back() }
                 .transition(.opacity.combined(with: .move(edge: .leading)))

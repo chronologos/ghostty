@@ -1211,7 +1211,7 @@ final class ForkWindowController: TerminalController {
     /// Every fork surface that floats over the terminal goes through here, as a borderless
     /// child window — never a sheet: macOS sheets wrap content in a system
     /// `NSVisualEffectView` with its own rounded mask that `backgroundColor = .clear` can't
-    /// suppress, and `Panel` draws its own cut-corner frame. One at a time; losing key closes
+    /// suppress, and `Panel` draws its own frame. One at a time; losing key closes
     /// it, and so does Esc. `size` nil = as tall as the content wants at its own fixed width
     /// (confirms, whose text varies). `onKey` sees the panel's key presses first; true = handled.
     private func presentSheet<V: View>(size: CGSize?, onKey: ((NSEvent) -> Bool)? = nil,
@@ -1225,7 +1225,7 @@ final class ForkWindowController: TerminalController {
         sheetPanel = panel
         panel.styleMask = .borderless
         panel.isOpaque = false
-        panel.backgroundColor = .clear   // the cut corners show the terminal through
+        panel.backgroundColor = .clear   // the rounded corners show the terminal through
         panel.hasShadow = false
         let parent = window.frame
         panel.setFrameOrigin(.init(x: parent.midX - size.width / 2,

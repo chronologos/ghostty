@@ -317,7 +317,7 @@ struct SidebarView: View {
         // Filter-on + no tagged tabs on this host → hide the whole section so the
         // sidebar isn't cluttered with empty host cards.
         if !(filterTagged && tabs.isEmpty) {
-            // One module per host: a cut-corner frame holding a title strip and the rows. A
+            // One module per host: a frame holding a title strip and the rows. A
             // host with no live surface gets the quiet line — the frame is the host's lamp.
             let line = registry.isConnected(host.id) ? tokens.text : tokens.rule
             VStack(alignment: .leading, spacing: 0) {
@@ -337,8 +337,8 @@ struct SidebarView: View {
                     }
                 }
             }
-            .clipShape(Chamfer())
-            .overlay(Chamfer().strokeBorder(line, lineWidth: 1))
+            .clipShape(.forkFrame)
+            .overlay(RoundedRectangle.forkFrame.strokeBorder(line, lineWidth: 1))
             .padding(.horizontal, 8)
         }
     }
@@ -423,14 +423,14 @@ struct SidebarView: View {
         // rows is work, more so with multi-pane tabs between, so each tab says its number.
         VStack(alignment: .leading, spacing: 0) {
             ForEach(Array(tabs.enumerated()), id: \.element.id) { i, tab in
-                // The rule is the grouping: between tabs, never between one tab's panes.
+                // Solid between tabs, meeting the frame on both sides; dashed and inset between one
+                // tab's panes (`tabRow`). The line says which of the two it is.
                 VStack(alignment: .leading, spacing: 0) {
                     if i > 0 { tokens.rule.frame(height: 1) }
                     tabRow(tab, keyIndex: keyed && i < 9 ? i : nil)
                 }
             }
         }
-        .padding(4)
         .transition(.opacity)
     }
 
@@ -458,6 +458,13 @@ struct SidebarView: View {
             }
             if !tab.collapsed {
                 ForEach(Array(allRefs.enumerated()), id: \.0) { i, ref in
+                    // Where one pane stops has to be drawn, not implied by the titles: an unnamed
+                    // shell's row *is* one gray path line, which under a row ending in a gray path
+                    // or session name read as that row's third line.
+                    if i > 0 {
+                        DashedRule().padding(.leading, Self.gutter).padding(.trailing, 7).padding(.vertical, 3)
+                            .allowsHitTesting(false)
+                    }
                     // Index-match: `surfaces` may be one ahead of `allRefs` for ≤80ms after a
                     // split (debounced persistActive) — accepted; matching by ref instead
                     // would mis-pair duplicate-ref tabs (PR26) permanently.
@@ -467,6 +474,14 @@ struct SidebarView: View {
                 }
             }
         }
+        // Air around the tab's outline, off the lines above and below it (focus mode's card has
+        // its own). Inside the drag/drop target, and a click in it or on a line between panes
+        // still lands on the tab: no dead strips. Behind the rows rather than a gesture around
+        // them, so it can't compete with theirs.
+        .padding(focusIndex == nil ? 4 : 0)
+        .background(Color.clear.contentShape(Rectangle())
+            .onTapGesture { controller?.activate(tab: tab.id) })
+        .contentShape(Rectangle())
         .onDrag {
             draggingHost = nil; draggingTab = tab.id
             return NSItemProvider(object: tab.id.uuidString as NSString)
@@ -801,9 +816,9 @@ struct SidebarView: View {
                 }
             }
             .padding(.trailing, 7).padding(.vertical, 2).frame(minHeight: plain == nil ? 30 : 21)
-            // "Here" is a shape, not a shade: a bright cut-corner outline (+ the heavier,
+            // "Here" is a shape, not a shade: a bright outline (+ the heavier,
             // brighter title above). Hover is the same outline in the quiet rule color.
-            .overlay(Chamfer(cut: 5).strokeBorder(
+            .overlay(RoundedRectangle.forkFrame.strokeBorder(
                 focused ? tokens.bright : hovered ? tokens.rule : .clear, lineWidth: 1))
             .contentShape(Rectangle())
             // Hover peek — formerly a multi-line `.help` tooltip here, now the in-row
@@ -1498,8 +1513,8 @@ struct KeyCap: View {
         Text(label).font(font).kerning(0.4).lineLimit(1).minimumScaleFactor(0.75)
             .foregroundStyle(on ? tokens.ground : tokens.text)
             .padding(.horizontal, 3).frame(maxWidth: .infinity).frame(height: 22)
-            .background(on ? tokens.text : tokens.ground, in: Chamfer(cut: 5))
-            .overlay(Chamfer(cut: 5).strokeBorder(hovered ? tokens.bright : tokens.text, lineWidth: 1))
+            .background(on ? tokens.text : tokens.ground, in: .forkFrame)
+            .overlay(RoundedRectangle.forkFrame.strokeBorder(hovered ? tokens.bright : tokens.text, lineWidth: 1))
             .contentShape(Rectangle())
             .onHover { hovered = $0 }
     }

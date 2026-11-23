@@ -26,6 +26,7 @@ struct ForkSnapshotTests {
         Scheme(name: "green", fg: 0x00A645, bg: 0x000000),
         Scheme(name: "amber", fg: 0xFFBF00, bg: 0x000000),
         Scheme(name: "paper", fg: 0x000000, bg: 0xFFFFFF),
+        Scheme(name: "slate", fg: 0xFFFFFF, bg: 0x282A33),
     ]
 
     private func color(_ hex: UInt32) -> NSColor {
@@ -83,6 +84,9 @@ struct ForkSnapshotTests {
         let ledger = tab(r, "local", ["ledger", "ledger-djzu"])
         let ghostty = tab(r, "local", ["ghostty"])
         _ = tab(r, "local", ["shell-k7w"])
+        // Several panes to a tab, most with no agent in them: what one row's second line and the
+        // next pane's only line look like one above the other.
+        _ = tab(r, "local", ["notes", "release", "release-k7w"])
         let azure = tab(r, "atlas", ["azure", "azure-ge1o"], title: "azure")
         r.renameTab(azure, to: "cloud")
         let foundry = tab(r, "borei", ["foundry"])
@@ -102,7 +106,9 @@ struct ForkSnapshotTests {
         r.noteList(hostID: "local", list: .init(managed: [
             entry("deputy", "/Users/me/code/proxy-trial"), entry("deputy-wbd5", "/Users/me/code/proxy-trial"),
             entry("ledger", "/Users/me/Desktop"), entry("ledger-djzu", "/Users/me/Desktop"),
-            entry("ghostty", "/Users/me/src/ghostty"), entry("shell-k7w", "/Users/me/src/ghostty/macos")]))
+            entry("ghostty", "/Users/me/src/ghostty"), entry("shell-k7w", "/Users/me/src/ghostty/macos"),
+            entry("notes", "/Users/me/src/notes"), entry("release", "/Users/me/src/app"),
+            entry("release-k7w", "/Users/me/src/app")]))
         r.noteList(hostID: "atlas", list: .init(managed: [
             entry("azure", "/root/src/app"), entry("azure-ge1o", "/root/src/app")]))
         r.noteList(hostID: "borei", list: .init(
@@ -172,23 +178,23 @@ struct ForkSnapshotTests {
             try withDefaults(["forkSidebarShowCC": true, SessionRegistry.kFocusMode: false,
                               SessionRegistry.kFilterTagged: false]) {
                 try shoot(SidebarView(controller: nil, polls: false).environmentObject(r), s,
-                          size: CGSize(width: 300, height: 792), as: "hosts")
+                          size: CGSize(width: 300, height: 960), as: "hosts")
             }
         }
         try withDefaults(["forkSidebarShowCC": true, SessionRegistry.kFocusMode: true,
                           SessionRegistry.kFilterTagged: false]) {
             try shoot(SidebarView(controller: nil, polls: false).environmentObject(r), Self.schemes[0],
-                      size: CGSize(width: 300, height: 792), as: "focus")
+                      size: CGSize(width: 300, height: 960), as: "focus")
         }
         // The floor the sidebar can be dragged to.
         try withDefaults(["forkSidebarShowCC": true, SessionRegistry.kFocusMode: false,
                           SessionRegistry.kFilterTagged: false]) {
             try shoot(SidebarView(controller: nil, polls: false).environmentObject(r), Self.schemes[0],
-                      size: CGSize(width: 248, height: 792), as: "narrow")
+                      size: CGSize(width: 248, height: 960), as: "narrow")
             // Every row as if pointed at: tags unfolded into names, at both widths.
             for (w, name) in [(300, "hover"), (248, "hover-narrow")] {
                 try shoot(SidebarView(controller: nil, polls: false, hoverAll: true).environmentObject(r),
-                          Self.schemes[0], size: CGSize(width: w, height: 792), as: name)
+                          Self.schemes[0], size: CGSize(width: w, height: 960), as: name)
             }
         }
     }
